@@ -12,7 +12,7 @@ FETCH_CONFIG = ArticulationCfg(
             max_depenetration_velocity=5.0,
         ),
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(
-            enabled_self_collisions=True, solver_position_iteration_count=8, solver_velocity_iteration_count=0
+            enabled_self_collisions=True, solver_position_iteration_count=8, solver_velocity_iteration_count=4
         ),
         # collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0),
     ),
@@ -65,7 +65,7 @@ FETCH_CONFIG = ArticulationCfg(
             effort_limit=10000.0,
             velocity_limit=1.0,
             stiffness=100000.0,
-            damping=100000.0,
+            damping=100.0,
         ),
         "fetch_hand": ImplicitActuatorCfg(
             joint_names_expr=["r_gripper_finger_joint", "l_gripper_finger_joint"],

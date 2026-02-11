@@ -1,58 +1,62 @@
 from dataclasses import MISSING
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg
-from isaaclab.devices.openxr import XrCfg
-from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransformerCfg
-from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
+from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
+from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.devices.device_base import DevicesCfg
+from isaaclab.devices.keyboard import Se3KeyboardCfg
+
 from isaaclab.sensors import CameraCfg
 import isaaclab.envs.mdp as mdp
 
 
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
 from dsynth_isaac.robots.fetch_cfg import FETCH_CONFIG
+import dsynth_isaac.tasks.manager_based.mdp.fetch_events as fetch_events
+from dsynth_isaac.devices.mobile_se3_keyboard import MobileSe3KeyboardCfg
+
+ARM_JOINT_NAMES = ["shoulder_pan_joint",
+        "shoulder_lift_joint",
+        "upperarm_roll_joint",
+        "elbow_flex_joint",
+        "forearm_roll_joint",
+        "wrist_flex_joint",
+        "wrist_roll_joint"
+]
+GRIPPER_JOINT_NAMES = ["r_gripper_finger_joint", "l_gripper_finger_joint"]
+BODY_JOINT_NAMES = ["torso_lift_joint"]
+HEAD_JOINT_NAMES = ["head_pan_joint", "head_tilt_joint"]
+BASE_JOINT_NAMES = ["l_wheel_joint", "r_wheel_joint"]
 
 @configclass
 class FetchActionsCfg:
     """Action specifications for the MDP."""
 
     # will be set by agent env cfg
-    arm_action = mdp.JointPositionActionCfg(asset_name="robot", joint_names=[
-        "shoulder_pan_joint",
-        "shoulder_lift_joint",
-        "upperarm_roll_joint",
-        "elbow_flex_joint",
-        "forearm_roll_joint",
-        "wrist_flex_joint",
-        "wrist_roll_joint",
-        ], scale=1.0)
-    gripper_action = mdp.BinaryJointPositionActionCfg(asset_name="robot", joint_names=[
-        "r_gripper_finger_joint",
-        "l_gripper_finger_joint"
-        ],
+    arm_actions = mdp.JointPositionActionCfg(asset_name="robot", joint_names=ARM_JOINT_NAMES, scale=1.0)
+    gripper_actions = mdp.BinaryJointPositionActionCfg(asset_name="robot", joint_names=GRIPPER_JOINT_NAMES,
         open_command_expr={"r_gripper_finger_joint": 0.04, "l_gripper_finger_joint": 0.04},
         close_command_expr={"r_gripper_finger_joint": 0.01, "l_gripper_finger_joint": 0.01},
         )
-    body_actions = mdp.JointPositionActionCfg(asset_name="robot", joint_names=[
-        "torso_lift_joint"
-    ], scale=1.0)
-    head_actions = mdp.JointPositionActionCfg(asset_name="robot", joint_names=[
-        "head_pan_joint", 
-        "head_tilt_joint"
-    ], scale=1.0)
-    base_actions = mdp.JointVelocityActionCfg(asset_name="robot", joint_names=[
-        "l_wheel_joint", 
-        "r_wheel_joint"
-        ], scale=1.0)
+    body_actions = mdp.JointPositionActionCfg(asset_name="robot", joint_names=BODY_JOINT_NAMES, scale=1.0)
+    head_actions = mdp.JointPositionActionCfg(asset_name="robot", joint_names=HEAD_JOINT_NAMES, scale=1.0)
+    base_actions = mdp.JointVelocityActionCfg(asset_name="robot", joint_names=BASE_JOINT_NAMES, scale=1.0)
 
+@configclass
+class FetchEventCfg:
+    # TODO: do scene rearrangement?
+    """Configuration for events."""
+    init_fetch_pose = EventTerm(
+        func=fetch_events.set_default_joint_pose,
+        mode="reset",
+        params={
+            "default_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ],
+        },
+    )
 
 @configclass
 class FetchBaseEnvCfg(DarkstoreBaseEnvCfg):
@@ -85,5 +89,31 @@ class FetchBaseEnvCfg(DarkstoreBaseEnvCfg):
         )
 
         self.actions = FetchActionsCfg()
+        self.events = FetchEventCfg()
 
 
+@configclass
+class FetchIKBaseEnvCfg(FetchBaseEnvCfg):
+
+    def __post_init__(self):
+        # post init of parent
+        super().__post_init__()
+
+        self.actions.arm_actions = DifferentialInverseKinematicsActionCfg(
+            asset_name="robot",
+            joint_names=ARM_JOINT_NAMES,
+            body_name="gripper_link",
+            controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="dls"),
+            scale=0.5,
+            body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.107]),
+        )
+
+        self.teleop_devices = DevicesCfg(
+            devices={
+                "keyboard": MobileSe3KeyboardCfg(
+                    pos_sensitivity=0.05,
+                    rot_sensitivity=0.05,
+                    sim_device=self.sim.device,
+                ),
+            }
+        )
