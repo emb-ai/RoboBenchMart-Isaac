@@ -2,10 +2,13 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets.articulation import ArticulationCfg
 import isaaclab.sim as sim_utils
 
+from dsynth_isaac import DSYNTH_ISAAC_PATH
+
 # https://github.com/jih189/isaaclab_fetch_project/blob/main/exts/fetch_project/fetch_project/robots/fetch.py
 FETCH_CONFIG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path=f"/home/kvsoshin/Work/fetch-isaac-sim/assets/fetch/fetch_new.usd",
+        # usd_path=f"/home/kvsoshin/Work/fetch-isaac-sim/assets/fetch/fetch_new.usd",
+        usd_path=f"{DSYNTH_ISAAC_PATH}/assets/robots/fetch/fetch.usd",
         activate_contact_sensors=False,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,

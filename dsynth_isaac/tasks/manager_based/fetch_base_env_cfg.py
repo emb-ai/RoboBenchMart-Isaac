@@ -70,7 +70,7 @@ class FetchBaseEnvCfg(DarkstoreBaseEnvCfg):
         self.scene.robot.init_state.pos = (0, 0, 0)
 
         self.scene.head_camera = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/fetch/head_camera_link/head_camera_rgb_frame",
+            prim_path="{ENV_REGEX_NS}/Robot/fetch/head_tilt_link/head_camera_link/head_camera_rgb_frame/head_camera_rgb_optical_frame/HeadCameraRGBFrame",
             update_period=0.1,
             height=480,
             width=640,
