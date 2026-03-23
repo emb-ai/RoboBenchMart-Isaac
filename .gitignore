@@ -1,3 +1,7 @@
 .vscode
 *.pyc
 __pycache__
+
+generated_envs
+assets
+assets_usd
