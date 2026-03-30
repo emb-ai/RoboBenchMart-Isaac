@@ -1,0 +1,35 @@
+defaults:
+  - base_shelf_config
+  - _self_
+
+name: 'shelf_metal_fake_usd'
+filling_type: BOARDWISE_COLUMNS
+shelf_asset: fixtures.shelf_metal
+board_product_numcol:
+  0:
+    food.BEER.AleBeerBottle: 1
+    food.BEER.CoronaExtraJapan: 1
+  1:
+    food.BEER.AsahiBeerBottle: 1
+    food.BEER.DuffBeerCan: 1
+  2:
+    food.BEER.Baltika9BeerCan: 1
+    food.BEER.GuinnessBeerCan: 1
+  3:
+    food.BEER.BlueLakeLager: 1
+    food.BEER.KaniBeerCan: 1
+  4:
+    food.BEER.BudLightBeerBottle: 1
+    food.BEER.KirinIchibanBeerCan: 1
+
+
+x_gap: 1.02
+y_gap: 1.02
+
+rotation_lower: -0.1
+rotation_upper: 0.1
+noise_std_x: 0.001
+noise_std_y: 0.001
+
+delta_x: 0.1
+delta_y: 0.1

@@ -1,0 +1,87 @@
+
+defaults:
+  - main_darkstore_continuous_config_base   # inherit from  base config
+  - _self_
+
+name: 'custom_scene'
+output_dir: generated_envs/custom_scene
+
+# scene size (in meters)
+size_x: 8
+size_y: 6
+
+# Number of scenes to generate
+num_scenes: 4
+
+# Number of workers (the more workers, the faster generation and more RAM-expensive)
+num_workers: 2
+
+# use tensor field -based algorithm for layout generation
+layout_gen_type: PROCEDURAL_TENSOR_FIELD
+
+# layout / arrangement randomization
+randomize_layout: true
+randomize_arrangements: true
+
+
+random_seed: 42
+
+# list of active shelving
+active_shelvings_list:
+
+  # Active shelf config
+  - name: 'mixed_shelf'
+      
+    # place products in columns as specified in `board_product_numcol` parameter
+    filling_type: BOARDWISE_COLUMNS 
+
+    # adjust gaps between items
+    x_gap: 0.06
+    y_gap: 0.01
+
+    # shelf asset
+    shelf_asset: fixtures.shelf_metal
+    
+    # whether to shuffle board arrangements before new scene generation
+    shuffle_boards: False                       
+    
+    board_product_numcol:
+      1:                                           # arrangement fot the 1st board
+        food.dairy_products.milkCarton: 2            # place milk in 2 columns
+      2:                                           # arrangement fot the 2nd board
+        food.DRINKS_SODA.FantaSaborNaranja2L: 6   # place fanta in 6 columns
+      3:                                           # arrangement fot the 3rd board
+        food.drinks.coffeePackaging: 1
+
+# non-active shelving assets to be placed
+inactive_shelvings_list:
+  - fixtures.shelf_metal
+  - fixtures.small_shelf_two_sided
+
+# non-active wall shelving assets to be placed
+inactive_wall_shelvings_list:
+  - fixtures.freezer_large_filled
+
+# non-active surrounding assets to be placed
+scene_fixtures_list: 
+  - fixtures.pile_of_pallets
+
+# Fake shelves are inactive assets of cluttered shelves. 
+# Needed to create visible fullness 
+
+fake_arrangements_mapping:
+
+  # Change every `fixtures.shelf_metal` randomly to one of 
+  # `fixtures.shelf_metal_fake_1` or `fixtures.shelf_metal_fake_2`
+  # to create visible fullness
+  
+  fixtures.shelf_metal:
+    - fixtures.shelf_metal_fake_1
+    - fixtures.shelf_metal_fake_2
+
+  # Change every `fixtures.small_shelf_two_sided` randomly to one of 
+  # `fixtures.small_shelf_two_sided_fake_1` or `fixtures.small_shelf_two_sided_fake_2`
+  
+  fixtures.small_shelf_two_sided:
+    - fixtures.small_shelf_two_sided_fake_1
+    - fixtures.small_shelf_two_sided_fake_2
