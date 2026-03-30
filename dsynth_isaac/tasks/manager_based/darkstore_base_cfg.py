@@ -15,6 +15,7 @@ from isaaclab.utils import configclass
 
 import isaaclab.envs.mdp as mdp
 
+from dsynth_isaac.scene.spawners import DsynthMultiSceneCfg
 
 @configclass
 class DarkstoreSceneCfg(InteractiveSceneCfg):
@@ -24,8 +25,6 @@ class DarkstoreSceneCfg(InteractiveSceneCfg):
     # ee_frame: FrameTransformerCfg = MISSING
 
     #==== RoboBenchMart scene ====
-    # TODO: redo (how to import dsynth scene?)
-    # config_dir_path: str = None
     
     # ground plane 
     ground = AssetBaseCfg(
@@ -33,90 +32,20 @@ class DarkstoreSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.GroundPlaneCfg(size=(100.0, 100.0)),
     )
 
-    # sphere_light = AssetBaseCfg(
-    #     prim_path="{ENV_REGEX_NS}/SphereLight",
-    #     spawn=sim_utils.SphereLightCfg(color=(0.9, 0.9, 0.9), intensity=60000.0),
-    #     init_state=AssetBaseCfg.InitialStateCfg(pos=(0, 0, 2.5))
-    # )
+
+    dsynth_multi_scene = AssetBaseCfg(
+        prim_path="{ENV_REGEX_NS}/dsynth_scene",
+        spawn=DsynthMultiSceneCfg(
+            config_dir_path=MISSING
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
+    )
+
+
     dome_light = AssetBaseCfg(
         prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=3000.0, color=(0.75, 0.75, 0.75))
     )
-    object_collection: RigidObjectCollectionCfg = RigidObjectCollectionCfg(
-        rigid_objects={
-            "object_a": RigidObjectCfg(
-                prim_path="{ENV_REGEX_NS}/object_a",
-                spawn=sim_utils.UsdFileCfg(
-                    usd_path=f"assets_usd/preprocessed/monster_energy_drink_rotated/monster_energy_drink_rotated.usd",
-                    # usd_path="shelf_metal_fake_1/shelf_metal_fake_1.usd",
-                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                            solver_position_iteration_count=4, solver_velocity_iteration_count=0,
-                            rigid_body_enabled=True,
-                            kinematic_enabled=False
-                        ),
-                    mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
-                    collision_props=sim_utils.CollisionPropertiesCfg(),
-                ),
-                init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 0, 2.0))
-            ),
-            "object_b": RigidObjectCfg(
-                prim_path="{ENV_REGEX_NS}/object_b",
-                spawn=sim_utils.UsdFileCfg(
-                    usd_path=f"assets_usd/preprocessed/fantaNaranja1p35l/fantaNaranja1p35l.usd",
-                    # usd_path="shelf_metal_fake_1/shelf_metal_fake_1.usd",
-                    rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                            solver_position_iteration_count=4, solver_velocity_iteration_count=0,
-                            rigid_body_enabled=True,
-                            kinematic_enabled=False
-                        ),
-                    mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
-                    collision_props=sim_utils.CollisionPropertiesCfg(),
-                ),
-                init_state=RigidObjectCfg.InitialStateCfg(pos=(0, 1.0, 2.0))
-            )
-        }
-    )
-    # custom_object = RigidObjectCfg(
-    #     prim_path="{ENV_REGEX_NS}/CustomObject",
-    #     spawn=sim_utils.UsdFileCfg(
-    #         usd_path="assets/preprocessed/monster_energy_drink_rotated.glb", # Convert GLB to USD first
-    #         # 1. Enable Rigid Body properties
-    #         rigid_props=sim_utils.RigidBodyPropertiesCfg(
-    #             rigid_body_enabled=True,
-    #             kinematic_enabled=False,
-    #             solver_position_iteration_count=4,
-    #             solver_velocity_iteration_count=1,
-    #         ),
-    #         # 2. Enable Collision properties
-    #         collision_props=sim_utils.CollisionPropertiesCfg(
-    #             collision_enabled=True,
-    #         ),
-    #         # 3. Define the Collider Approximation (Essential for meshes)
-    #         # 4. Optional: Set Mass
-    #         mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
-    #     ),
-    #     init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 2.0)),
-    # )
-
-
-    object_b = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Object_b",
-        spawn=sim_utils.SphereCfg(
-            radius=0.1,
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.0, 0.0), metallic=0.2),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                solver_position_iteration_count=4, solver_velocity_iteration_count=0
-            ),
-            mass_props=sim_utils.MassPropertiesCfg(mass=1.0),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, -0.5, 2.0)),
-    )
-    # def __post_init__(self):
-    #     if self.config_dir_path is not None:
-    #         self.scene_config_paths = sorted(list(Path(self.config_dir_path).glob('*layout_data*.json')))
-    #     else:
-    #         self.scene_config_paths = []
-    #     print(">>>>", self.scene_config_paths)
+   
 
 @configclass
 class EventCfg:
@@ -176,7 +105,7 @@ class TerminationsCfg:
 class DarkstoreBaseEnvCfg(ManagerBasedRLEnvCfg):
     """Configuration for the stacking environment."""
     # Scene settings
-    scene: DarkstoreSceneCfg = DarkstoreSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=False)
+    scene: DarkstoreSceneCfg = DarkstoreSceneCfg(num_envs=4096, env_spacing=20.5, replicate_physics=False)
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
