@@ -4,7 +4,7 @@ from pathlib import Path
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
 import json
 import numpy as np
-from transforms3d.euler import euler2quat
+from transforms3d.euler import euler2quat, quat2mat
 from pxr import UsdGeom
 import hydra
 
@@ -19,7 +19,9 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCollection
 from dsynth_isaac.core.assets.asset import load_assets_lib
 from dsynth_isaac.core.scene_gen.utils import flatten_dict
 from dsynth_isaac.scene.utils import _get_absolute_matrix, _get_pq
-
+ 
+PI = np.pi # for brevity
+ 
 def load_dsynth_multiscene(prim_path: str,
     cfg,
     translation: tuple[float, float, float] | None = None,
@@ -110,7 +112,7 @@ def load_dsynth_scene(prim_path: str,
             p = np.array([inactive_fixture['x'], inactive_fixture['y'], 0.])
             angle = 0.
             if inactive_fixture['orientation'] == 'vertical':
-                angle = 3.14 / 2.
+                angle = PI / 2.
             q = euler2quat(0, 0, angle)
 
             shelf_cfg = sim_utils.UsdFileCfg(
@@ -124,14 +126,27 @@ def load_dsynth_scene(prim_path: str,
         for i, active_fixture in enumerate(scene_data['layout_data'][fixture_category]):
             shelf_asset_name = active_fixture['asset_name']
             fixture_name = active_fixture['name']
-            item_name = f'active_shelf_{fixture_name}_{i}'
+            shelf_prim_name = f'active_shelf_{fixture_name}_{i}'
             p = np.array([active_fixture['x'], active_fixture['y'], 0.])
             angle = 0.
             if active_fixture['orientation'] == 'vertical':
-                angle = 3.14 / 2.
+                angle = PI / 2.
             q = euler2quat(0, 0, angle)
+
+            shelf_direction = quat2mat(q)[:3, 1]
+            direction_to_scene_center = np.array([scene_data['size_x']/ 2, scene_data['size_y'] / 2, 0.]) - p
+            direction_to_scene_center /= (np.linalg.norm(direction_to_scene_center) + 1e-3)
+            if np.dot(direction_to_scene_center, shelf_direction) > 0:
+                angle += PI
+                q = euler2quat(0, 0, angle)
+
+            direction_to_shelf = quat2mat(q)[:3, 1]
+            robot_default_pose_path = f"{prim_path}/robot_default_pose"
+            robot_default_p = p - 1.4 * direction_to_shelf
+            sim_utils.create_prim(robot_default_pose_path, "Xform", translation=robot_default_p, orientation=euler2quat(0, 0, angle + PI / 2.))
             
-            shelf_prim_path = f"{prim_path}/{item_name}"
+            
+            shelf_prim_path = f"{prim_path}/{shelf_prim_name}"
             sim_utils.create_prim(shelf_prim_path, "Xform", translation=p, orientation=q)
 
             shelf_cfg = sim_utils.UsdFileCfg(

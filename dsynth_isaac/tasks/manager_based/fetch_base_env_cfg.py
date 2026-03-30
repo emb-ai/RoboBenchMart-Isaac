@@ -57,6 +57,22 @@ class FetchEventCfg:
             "default_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ],
         },
     )
+    reset_fetch_base_pose = EventTerm(
+        func=mdp.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {},
+            "velocity_range": {},
+        },
+    )
+
+    init_fetch_base_pose = EventTerm(
+        func=fetch_events.set_default_base_pose,
+        mode="startup",
+        params={
+        },
+    )
+
 
 @configclass
 class FetchBaseEnvCfg(DarkstoreBaseEnvCfg):

@@ -3,7 +3,7 @@ from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Tutorial on creating a cartpole base environment.")
-parser.add_argument("--num_envs", type=int, default=8, help="Number of environments to spawn.")
+parser.add_argument("--num_envs", type=int, default=2, help="Number of environments to spawn.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
@@ -44,8 +44,8 @@ def main():
         with torch.inference_mode():
             # joint_efforts = torch.randn_like(env.action_manager.action)
             action = env.action_manager.action
-            action[:, -2] = 8.0
-            action[:, -1] = 8.0
+            action[:, -2] = 10.0
+            action[:, -1] = 10.0
             # action[0, 0] =  0.0
             # action[0, 1] =  -0.002
             # action[0, 2] =  0.0
