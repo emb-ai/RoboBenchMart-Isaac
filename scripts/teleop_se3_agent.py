@@ -113,6 +113,8 @@ def main() -> None:
         env_cfg = remove_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
 
+    env_cfg.scene.dsynth_multi_scene.spawn.config_dir_path = "generated_envs/isaac_sample"
+
     try:
         # create environment
         env = gym.make(args_cli.task, cfg=env_cfg).unwrapped

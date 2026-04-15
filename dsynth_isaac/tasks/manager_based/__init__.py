@@ -8,3 +8,12 @@ gym.register(
     },
     disable_env_checker=True,
 )
+
+gym.register(
+    id="Isaac-Dsynth-Panda-Base-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.panda_base_env_cfg:PandaBaseEnvCfg",
+    },
+    disable_env_checker=True,
+)

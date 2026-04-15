@@ -14,7 +14,7 @@ from isaaclab.sensors import CameraCfg
 import isaaclab.envs.mdp as mdp
 
 
-from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
+from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import gen_dsynth_env_cfg_class
 from dsynth_isaac.robots.fetch_cfg import FETCH_CONFIG
 import dsynth_isaac.tasks.manager_based.mdp.fetch_events as fetch_events
 from dsynth_isaac.devices.mobile_se3_keyboard import MobileSe3KeyboardCfg
@@ -73,63 +73,128 @@ class FetchEventCfg:
         },
     )
 
+    # reset_cube = EventTerm(
+    #     func=mdp.reset_root_state_uniform,
+    #     mode="reset",
+    #     params={
+    #         "pose_range": {},
+    #         "velocity_range": {},
+    #         "asset_cfg": SceneEntityCfg("cube"),
+    #     },
+    # )
 
-@configclass
-class FetchBaseEnvCfg(DarkstoreBaseEnvCfg):
+    reset_cube = EventTerm(
+        func=fetch_events.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {},
+            "velocity_range": {},
+            "asset_cfg": SceneEntityCfg("cube"),
+        },
+    )
 
-    def __post_init__(self):
-        # post init of parent
-        super().__post_init__()
+    # cube_texture_randomizer = EventTerm(
+    #     func=fetch_events.randomize_visual_texture_material,
+    #     mode="prestartup",
+    #     params={
+    #         "prim_path": '/World/envs/env_.*/dsynth_scene/wall_.*',
+    #         "texture_paths": [
+    #             "assets/textures/walls/apricot_texture.PNG",
+    #             "assets/textures/walls/green_texture.PNG",
+    #             "assets/textures/walls/white_bricks.png",
+    #             "assets/textures/walls/Bricks058_1K-JPG_Color.jpg"
+    #         ],
+    #         "event_name": "cube_texture_randomizer",
+    #     },
+    # )
+    cube_texture_randomizer_reset = EventTerm(
+        func=mdp.randomize_visual_texture_material,
+        mode="reset",
+        params={
+            "asset_cfg": SceneEntityCfg("cube"),
+            "texture_paths": [
+                "assets/textures/walls/apricot_texture.PNG",
+                "assets/textures/walls/green_texture.PNG",
+                "assets/textures/walls/white_bricks.png",
+                "assets/textures/walls/Bricks058_1K-JPG_Color.jpg"
+            ],
+            "event_name": "cube_texture_randomizer_reset",
+        },
+    )
 
-        self.scene.robot = FETCH_CONFIG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-        self.scene.robot.spawn.semantic_tags = [("class", "robot")]
-        self.scene.robot.init_state.pos = (0, 0, 0)
-
-        self.scene.head_camera = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/fetch/head_tilt_link/head_camera_link/head_camera_rgb_frame/head_camera_rgb_optical_frame/HeadCameraRGBFrame",
-            update_period=0.1,
-            height=480,
-            width=640,
-            data_types=["rgb",],
-            spawn=sim_utils.PinholeCameraCfg(
-                focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
-            ),
-            offset=CameraCfg.OffsetCfg(pos=(0.05, 0.0, 0.0), convention="ros"),
-        )
-
-        self.observations.rgb_camera.head_img = ObsTerm(
-            func=mdp.image,
-            params={"sensor_cfg": SceneEntityCfg("head_camera")},
-            # noise=Unoise(n_min=-0.1, n_max=0.1),
-            # clip=(-1.0, 1.0),
-        )
-
-        self.actions = FetchActionsCfg()
-        self.events = FetchEventCfg()
+    wall_texture_randomizer_reset = EventTerm(
+        func=fetch_events.randomize_visual_texture_material,
+        mode="reset",
+        params={
+            "prim_path": '/World/envs/env_.*/dsynth_scene/wall.*',
+            "texture_paths": [
+                "assets/textures/walls/apricot_texture.PNG",
+                "assets/textures/walls/green_texture.PNG",
+                "assets/textures/walls/white_bricks.png",
+                "assets/textures/walls/Bricks058_1K-JPG_Color.jpg"
+            ],
+            "event_name": "wall_texture_randomizer_reset",
+        },
+    )
 
 
-@configclass
-class FetchIKBaseEnvCfg(FetchBaseEnvCfg):
+def gen_fetch_env_cfg_class(config_dir_path: str, num_envs: int):
+    @configclass
+    class FetchBaseEnvCfg(gen_dsynth_env_cfg_class(config_dir_path, num_envs)):
 
-    def __post_init__(self):
-        # post init of parent
-        super().__post_init__()
+        def __post_init__(self):
+            # post init of parent
+            super().__post_init__()
 
-        self.actions.arm_actions = DifferentialInverseKinematicsActionCfg(
-            asset_name="robot",
-            joint_names=ARM_JOINT_NAMES,
-            body_name="gripper_link",
-            controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="dls"),
-            scale=0.5,
-            body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.107]),
-        )
+            self.scene.robot = FETCH_CONFIG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+            self.scene.robot.spawn.semantic_tags = [("class", "robot")]
+            self.scene.robot.init_state.pos = (0, 0, 0)
 
-        self.teleop_devices = DevicesCfg(
-            devices={
-                "keyboard": MobileSe3KeyboardCfg(
-                    pos_sensitivity=0.05,
-                    rot_sensitivity=0.05,
-                    sim_device=self.sim.device,
+            self.scene.head_camera = CameraCfg(
+                prim_path="{ENV_REGEX_NS}/Robot/fetch/head_tilt_link/head_camera_link/head_camera_rgb_frame/head_camera_rgb_optical_frame/HeadCameraRGBFrame",
+                update_period=0.1,
+                height=480,
+                width=640,
+                data_types=["rgb",],
+                spawn=sim_utils.PinholeCameraCfg(
+                    focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
                 ),
-            }
-        )
+                offset=CameraCfg.OffsetCfg(pos=(0.05, 0.0, 0.0), convention="ros"),
+            )
+
+            self.observations.rgb_camera.head_img = ObsTerm(
+                func=mdp.image,
+                params={"sensor_cfg": SceneEntityCfg("head_camera")},
+                # noise=Unoise(n_min=-0.1, n_max=0.1),
+                # clip=(-1.0, 1.0),
+            )
+
+            self.actions = FetchActionsCfg()
+            self.events = FetchEventCfg()
+    return FetchBaseEnvCfg
+
+# @configclass
+# class FetchIKBaseEnvCfg(FetchBaseEnvCfg):
+
+#     def __post_init__(self):
+#         # post init of parent
+#         super().__post_init__()
+
+#         self.actions.arm_actions = DifferentialInverseKinematicsActionCfg(
+#             asset_name="robot",
+#             joint_names=ARM_JOINT_NAMES,
+#             body_name="gripper_link",
+#             controller=DifferentialIKControllerCfg(command_type="pose", use_relative_mode=True, ik_method="dls"),
+#             scale=0.5,
+#             body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.107]),
+#         )
+
+#         self.teleop_devices = DevicesCfg(
+#             devices={
+#                 "keyboard": MobileSe3KeyboardCfg(
+#                     pos_sensitivity=0.05,
+#                     rot_sensitivity=0.05,
+#                     sim_device=self.sim.device,
+#                 ),
+#             }
+#         )
