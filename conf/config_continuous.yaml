@@ -1,0 +1,9 @@
+defaults:
+  - ds_continuous: config
+  - assets: assets_preprocessed_usd
+  - _self_
+
+hydra:  
+  output_subdir: null 
+  run:  
+    dir: .

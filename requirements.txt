@@ -1,0 +1,11 @@
+scene-synthesizer[recommend]
+usd-core
+pyglet<2
+hydra-core
+trimesh==4.5.3
+typeguard==4.4.2
+pandas
+websockets
+msgpack
+transforms3d
+huggingface_hub[cli]
