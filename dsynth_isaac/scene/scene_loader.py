@@ -72,7 +72,7 @@ def load_scene(dsynth_cfg, config_dir_path, num_envs):
                 return RuntimeError("No suitable shelvings!")
             to_be_replaced_shelf_idx = np.random.choice(to_be_replaced_idxs)
             active_shelf = inactive_shelvings.pop(to_be_replaced_shelf_idx)
-            print(">>> to_be_replaced_shelf_idx", to_be_replaced_shelf_idx)
+            # print(">>> to_be_replaced_shelf_idx", to_be_replaced_shelf_idx)
             
             active_shelving['x'] = active_shelf['x']
             active_shelving['y'] = active_shelf['y']

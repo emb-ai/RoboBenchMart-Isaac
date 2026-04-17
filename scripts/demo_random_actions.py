@@ -24,16 +24,16 @@ from isaaclab_tasks.utils import parse_env_cfg
 import gymnasium as gym
 import sys
 sys.path.append('.')
-from dsynth_isaac.tasks.manager_based.fetch_base_env_cfg import gen_fetch_env_cfg_class
+from dsynth_isaac.tasks.manager_based.fetch_base_env_cfg import FetchBaseEnvCfg
 # from dsynth_isaac.tasks.manager_based.panda_base_env_cfg import PandaBaseEnvCfg
 import dsynth_isaac.tasks.manager_based
 
 def main():
-    env_cfg = gen_fetch_env_cfg_class("generated_envs/isaac_sample", args_cli.num_envs)()
+    env_cfg = FetchBaseEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
     env_cfg.seed=42
-    env_cfg.scene.dsynth_scene.spawn.config_dir_path = "generated_envs/isaac_sample"
+    env_cfg.scene.dsynth_scene.spawn.config_dir_path = "generated_envs/isaac_sample3"
     # setup base environment
     env = ManagerBasedEnv(cfg=env_cfg)
 

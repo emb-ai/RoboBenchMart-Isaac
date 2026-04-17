@@ -18,7 +18,7 @@ from isaaclab.sim.utils import bind_physics_material, bind_visual_material, clon
 import isaaclab.sim as sim_utils
 import isaaclab.sim.schemas as sim_schemas
 from isaaclab.assets import ArticulationCfg, AssetBase, AssetBaseCfg, RigidObjectCollectionCfg, RigidObjectCfg, RigidObjectCollection
-
+from isaaclab.sim.spawners import materials
 
 
 from dsynth_isaac.core.assets.asset import load_assets_lib
@@ -31,6 +31,9 @@ class SceneManager:
     config_dir_path: str = MISSING
     max_scenes: Optional[int] = None
     seed: int = 42
+
+    HEIGHT = 3.0
+    THICKNESS = 0.2
 
     _entities: Dict[str, Any] = field(default_factory=dict)
     _assets_lib: Dict[str, Any] = field(default_factory=dict)
@@ -74,23 +77,59 @@ class SceneManager:
         scene_data = self.choose_and_replace_active_shelving(scene_data)
         env_entities['inactive_shelvings'] = self._build_inactive_shelvings(scene_data, prim_path)
         env_entities['active_shelving'] = self._build_active_shelving(scene_data, prim_path)
-        # env_entities['lights'] = self._build_lightning(scene_data, prim_path)
-        self._build_lightning(scene_data, prim_path)
-        
+        # env_entities['lights'] = self._build_lighting(scene_data, prim_path)
+        lamps_coords = self._get_lamps_coords(scene_data['size_x'], scene_data['size_y'])
+        self._build_lighting(scene_data, prim_path, lamps_coords)
+        self._build_lamps(scene_data, prim_path, lamps_coords)
+
+        env_entities['door'] = self._build_door(scene_data, prim_path)
         return env_entities
 
-    def _build_lightning(self, scene_data, prim_path):
-        lights = {}
-        light = AssetBaseCfg(
-            # prim_path=f"{prim_path}/light", 
-            spawn=sim_utils.CylinderLightCfg(intensity=3000.0)
+    def _build_door(self, scene_data, prim_path):
+        return self._build_rigid_asset(
+            f"{prim_path}/door",
+            'fixtures.door',
+            p=[scene_data['size_x'] - self.THICKNESS, scene_data['size_y'] - self._assets_lib['fixtures.door'].extents[1], 0],
+            q=[1, 0, 0, 0],
+            kinematic_enabled=True
         )
-        light.spawn.func(
-                        f"{prim_path}/light",
-                        light.spawn,
-                        translation=[2.0, 2.0, 3.0],
-                        orientation=[1.0, 0.0, 0.0, 0.0],
-                    )
+
+    def _build_lamps(self, scene_data, prim_path, lamps_coords):
+        for i, (x, y) in enumerate(lamps_coords):
+            self._build_rigid_asset(
+                f"{prim_path}/lamp_{i}",
+                'fixtures.lamp',
+                p=[x, y, self.HEIGHT],
+                q=[1, 0, 0, 0],
+                kinematic_enabled=True
+            )
+
+    def _build_lighting(self, scene_data, prim_path, lamps_coords, intensity=30000.0):
+        lamp_height = self._assets_lib['fixtures.lamp'].extents[2]
+        height = self.HEIGHT
+        height -= lamp_height + 0.1
+        # rot_qat = euler2quat(0, -PI / 2, 0)
+        rot_qat = [1, 0, 0, 0]
+        for i, (x, y) in enumerate(lamps_coords):
+            light = AssetBaseCfg(
+                # prim_path=f"{prim_path}/light", 
+                spawn=sim_utils.DiskLightCfg(intensity=intensity)
+            )
+            light.spawn.func(
+                            f"{prim_path}/light_{i}",
+                            light.spawn,
+                            translation=[x, y, height],
+                            orientation=rot_qat,
+                        )
+
+    def _get_lamps_coords(self, x_size, y_size, num_lamps_x=4, num_lamps_y=4, dist_from_wall=0.0):
+        lamps_coords = []
+        step_x = (x_size - 2*dist_from_wall)/(num_lamps_x+1)
+        step_y = (y_size - 2*dist_from_wall)/(num_lamps_y+1)
+        for x in range(1, num_lamps_x+1):
+            for y in range(1, num_lamps_y+1):
+                lamps_coords.append((dist_from_wall+step_x*x, dist_from_wall+step_y*y))
+        return lamps_coords
 
     def choose_and_replace_active_shelving(self, scene_data: dict):
         if len(scene_data['layout_data']["active_shelvings"]) > 0:
@@ -105,7 +144,7 @@ class SceneManager:
                 raise ValueError("No suitable shelvings!")
             to_be_replaced_shelf_idx = self._rng.choice(to_be_replaced_idxs)
             active_shelf = inactive_shelvings.pop(to_be_replaced_shelf_idx)
-            print(">>> to_be_replaced_shelf_idx", to_be_replaced_shelf_idx)
+            # print(">>> to_be_replaced_shelf_idx", to_be_replaced_shelf_idx)
             
             active_shelving['x'] = active_shelf['x']
             active_shelving['y'] = active_shelf['y']
@@ -119,6 +158,8 @@ class SceneManager:
     def _build_inactive_shelvings(self, scene_data: dict, prim_path: str):
         inactive_fixtures_categories = [
             "inactive_shelvings",
+            "inactive_wall_shelvings",
+            "scene_fixtures"
         ]
         inactive_shelvings = {}
         fake_shelfs_mapping = scene_data['fake_arrangements_mapping']
@@ -157,7 +198,7 @@ class SceneManager:
             spawn=sim_utils.UsdFileCfg(
                 usd_path=self._assets_lib[asset_name].asset_file_path,
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=kinematic_enabled),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
+                # collision_props=sim_utils.CollisionPropertiesCfg(),
             ),
             init_state=RigidObjectCfg.InitialStateCfg(pos=p, rot=q),
         )
@@ -240,8 +281,8 @@ class SceneManager:
             if '/' not in obj_name and 'SHELF' not in obj_name:
                 abs_matrix = _get_absolute_matrix(node, nodes_dict)
                 p, q = _get_pq(abs_matrix, [0., 0., 0.])
-                p += np.array([0.0, 0.0, 3.0])
-                
+                # q = [0.525322,  0, 0.8509035, 0]
+                # p += np.array([0.0, 0.0, 3.0])
                 asset_name = f'products_hierarchy.{obj_name.split(":")[0]}'
                 asset = self._assets_lib[asset_name]
 
@@ -259,21 +300,19 @@ class SceneManager:
     def _build_room(self, scene_data: dict, prim_path: str):
         x_size = scene_data['size_x']
         y_size = scene_data['size_y']
-        HEIGHT = 3.0
-        thk = 0.2
 
         sizes = [
-            (x_size, thk, HEIGHT),
-            (thk, y_size, HEIGHT),
-            (x_size, thk, HEIGHT),
-            (thk, y_size, HEIGHT)
+            (x_size, self.THICKNESS, self.HEIGHT),
+            (self.THICKNESS, y_size, self.HEIGHT),
+            (x_size, self.THICKNESS, self.HEIGHT),
+            (self.THICKNESS, y_size, self.HEIGHT)
         ]
 
         translations = [
-            (x_size / 2, thk / 2, HEIGHT / 2),
-            (x_size, y_size / 2, HEIGHT / 2),
-            (x_size / 2, y_size, HEIGHT / 2),
-            (thk / 2, y_size / 2, HEIGHT / 2)
+            (x_size / 2, - self.THICKNESS / 2, self.HEIGHT / 2),
+            (x_size + self.THICKNESS / 2 , y_size / 2, self.HEIGHT / 2),
+            (x_size / 2, y_size + self.THICKNESS / 2, self.HEIGHT / 2),
+            (-self.THICKNESS / 2, y_size / 2, self.HEIGHT / 2)
         ]
 
         room = {}
@@ -292,6 +331,38 @@ class SceneManager:
                 init_state=RigidObjectCfg.InitialStateCfg(pos=translation),
             )
             room['wall_{i}'] = wall_cfg.class_type(wall_cfg)
+
+        ceiling_cfg = RigidObjectCfg(
+            prim_path=f"{prim_path}/ceiling",
+            spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                visual_material=sim_utils.MdlFileCfg(
+                    mdl_path="assets_usd/mdl/bricks3/bricks3.mdl",
+                    project_uvw=True,
+                    texture_scale=(1., 1.)
+                ),
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, self.HEIGHT + self.THICKNESS / 2]),
+        )
+        room['ceiling'] = ceiling_cfg.class_type(ceiling_cfg)
+
+        floor_cfg = RigidObjectCfg(
+            prim_path=f"{prim_path}/floor",
+            spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                visual_material=sim_utils.MdlFileCfg(
+                    mdl_path="assets_usd/mdl/bricks3/bricks3.mdl",
+                    project_uvw=True,
+                    texture_scale=(1., 1.)
+                ),
+                physics_material=materials.RigidBodyMaterialCfg()
+            ),
+            init_state=RigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, - self.THICKNESS / 2]),
+        )
+        room['floor'] = floor_cfg.class_type(floor_cfg)
+
         return room
 
     def get_robot_default_poses(self):
