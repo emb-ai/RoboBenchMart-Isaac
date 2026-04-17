@@ -3,6 +3,9 @@ from isaaclab.app import AppLauncher
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Tutorial on creating a cartpole base environment.")
+parser.add_argument(
+    "--config_dir_path", type=str, help="Path to the config directory."
+)
 parser.add_argument("--num_envs", type=int, default=4, help="Number of environments to spawn.")
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
@@ -33,7 +36,7 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
     env_cfg.seed=42
-    env_cfg.scene.dsynth_scene.spawn.config_dir_path = "generated_envs/isaac_sample3"
+    env_cfg.scene.dsynth_scene.spawn.config_dir_path = args_cli.config_dir_path
     # setup base environment
     env = ManagerBasedEnv(cfg=env_cfg)
 
