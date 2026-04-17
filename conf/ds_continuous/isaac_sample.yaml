@@ -4,9 +4,9 @@ defaults:
 
 name: 'isaac_sample'
 output_dir: generated_envs/${ds_continuous.name}
-size_x: 7
-size_y: 6
-num_scenes: 4
+size_x: 12
+size_y: 10
+num_scenes: 1
 num_workers: 1
 layout_gen_type: PROCEDURAL_TENSOR_FIELD
 randomize_layout: true
@@ -24,27 +24,45 @@ random_seed: 42
 active_shelvings_list:
   - name: 'mixed_shelf'
     filling_type: BOARDWISE_COLUMNS
-    x_gap: 1.01
-    y_gap: 1.01
+    x_gap: 0.06
+    y_gap: 0.02
+    delta_x: 0.1
     shelf_asset: fixtures.shelf_metal
     shuffle_boards: True
+    shuffle_items_on_board: True
     board_product_numcol:
+      0:
+        food.HYGIENE.NiveaBodyMilk: 3 # train
+        food.HOUSEHOLD.VanishStainRemover: 4 # test OOD
+
+        food.HOUSEHOLD.AceDetergent: 3 # inactive
+      1:
+        food.CEREALS.NestleHoneyStars: 3 # train
+        food.CEREALS.NestleFitnessChocolateCereals: 4 # test OOD
+        
+        food.CRACKERS_COOKIES.BananiaCookies: 3 # inactive
       2:
-        food.dairy_products.milkCarton: 1
-      4:
-        food.drinks.coffeePackaging: 1
+        food.DRINKS_SODA.FantaSaborNaranja2L: 3 # train
+        food.BEER.DuffBeerCan: 4 # test OOD
+
+        food.ENERGY_DRINKS.MonsterEnergyDrink: 4 # inactive
+      3:
+        food.drinks.coffeePackaging: 3 # inactive
+        food.CRACKERS_COOKIES.OreoLemonCremeSandwichCookies: 3 # inactive
+        food.CRACKERS_COOKIES.BarryCallebautMilkChockolateChunks: 3 # inactive
+
       
 inactive_shelvings_list:
   - fixtures.shelf
   - fixtures.shelf_metal
   - fixtures.small_shelf_two_sided
 
-# inactive_wall_shelvings_list:
-#   - fixtures.freezer_large_filled
+inactive_wall_shelvings_list:
+  - fixtures.large_showcase_fake
 
-# scene_fixtures_list: 
-#   - fixtures.pile_of_pallets
-#   - fixtures.pallets_and_boxes
+scene_fixtures_list: 
+  - fixtures.pile_of_pallets
+  - fixtures.pallets_and_boxes
 #   - fixtures.freezer_nestle
 
 
