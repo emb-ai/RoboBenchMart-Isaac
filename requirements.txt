@@ -7,4 +7,5 @@ typeguard==4.4.2
 pandas
 websockets
 msgpack
+transforms3d
 huggingface_hub[cli]
