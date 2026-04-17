@@ -46,34 +46,36 @@ def set_default_base_pose(
     # Set the default pose for robots in all envs
     asset = env.scene[asset_cfg.name]
     
-    stage = omni.usd.get_context().get_stage()
-    default_positions = []
-    default_orientations = []
+    # stage = omni.usd.get_context().get_stage()
+    # default_positions = []
+    # default_orientations = []
     env_ids_list = list(range(env.num_envs)) if env_ids is None else env_ids.tolist()
-    for env_id in env_ids_list:
-        prim_path = f"/World/envs/env_{env_id}/dsynth_scene/robot_default_pose"
-        prim = stage.GetPrimAtPath(prim_path)
-        if not prim.IsValid():
-            # fallback: use zero pose
-            default_positions.append([0.0, 0.0, 0.0])
-            default_orientations.append([1.0, 0.0, 0.0, 0.0])
-            continue
+    # for env_id in env_ids_list:
+    #     prim_path = f"/World/envs/env_{env_id}/dsynth_scene/robot_default_pose"
+    #     prim = stage.GetPrimAtPath(prim_path)
+    #     if not prim.IsValid():
+    #         # fallback: use zero pose
+    #         default_positions.append([0.0, 0.0, 0.0])
+    #         default_orientations.append([1.0, 0.0, 0.0, 0.0])
+    #         continue
     
-        xformable = UsdGeom.Xformable(prim)
-        # world_transform: Gf.Matrix4d = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-        world_transform: Gf.Matrix4d = xformable.GetLocalTransformation()
-        translation = world_transform.ExtractTranslation()   # Gf.Vec3d
-        rotation_quat = world_transform.ExtractRotationQuat()  # Gf.Quatd  (real, i, j, k)
-        default_positions.append([translation[0], translation[1], translation[2]])
-        imag = rotation_quat.GetImaginary()
-        default_orientations.append([rotation_quat.GetReal(), imag[0], imag[1], imag[2]])
+    #     xformable = UsdGeom.Xformable(prim)
+    #     # world_transform: Gf.Matrix4d = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+    #     world_transform: Gf.Matrix4d = xformable.GetLocalTransformation()
+    #     translation = world_transform.ExtractTranslation()   # Gf.Vec3d
+    #     rotation_quat = world_transform.ExtractRotationQuat()  # Gf.Quatd  (real, i, j, k)
+    #     default_positions.append([translation[0], translation[1], translation[2]])
+    #     imag = rotation_quat.GetImaginary()
+    #     default_orientations.append([rotation_quat.GetReal(), imag[0], imag[1], imag[2]])
+    
+    manager = env.scene.cfg.dsynth_scene.spawn.manager
+    base_p, base_q = manager.get_robot_default_poses()
         
-    
-    pos_tensor = torch.tensor(default_positions, device=env.device, dtype=torch.float32)
-    quat_tensor = torch.tensor(default_orientations, device=env.device, dtype=torch.float32)
+    # pos_tensor = torch.tensor(default_positions, device=env.device, dtype=torch.float32)
+    # quat_tensor = torch.tensor(default_orientations, device=env.device, dtype=torch.float32)
     # Now use pos_tensor / quat_tensor to set the robot's default base pose
-    asset.data.default_root_state[env_ids_list, :3] = pos_tensor
-    asset.data.default_root_state[env_ids_list, 3:7] = quat_tensor
+    asset.data.default_root_state[env_ids_list, :3] = base_p[env_ids_list]
+    asset.data.default_root_state[env_ids_list, 3:7] = base_q[env_ids_list]
 
     # asset.write_root_pose_to_sim(asset.data.default_root_state[:, :7], env_ids=env_ids)
     # asset.write_root_velocity_to_sim(asset.data.default_root_state[:, 7:], env_ids=env_ids)
@@ -236,40 +238,76 @@ class randomize_visual_texture_material(ManagerTermBase):
             rep.functional.modify.attribute(self.material_prims, "world_or_object", True)
             # rep.functional.modify.attribute(self.material_prims, "texture_tiling", texture_tiling)
 
-def reset_root_state_uniform(
+def reset_items_uniform(
     env: ManagerBasedEnv,
         env_ids: torch.Tensor,
         pose_range: dict[str, tuple[float, float]],
         velocity_range: dict[str, tuple[float, float]],
-        asset_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+        asset_cfg: SceneEntityCfg = None,
     ):
-    env_id = 0
-    scene_cfg = env.cfg.scene.dsynth_multi_scene
-    asset: RigidObject = scene_cfg.spawn.data[f'/World/envs/env_{env_id}'].obj
-    env_ids = torch.tensor([env_id], device=env.device)
-    asset_2 = env.scene[asset_cfg.name]
-    # get default root state
+    manager = env.scene.cfg.dsynth_scene.spawn.manager
+    active_shelvings_xforms_poses = manager.get_active_shelvings_xforms_poses()
+    items = manager.get_item_entities()
 
-    root_states = asset.data.default_root_state.clone()
-    assert root_states.shape[0] == 1
-
-    # poses
     range_list = [pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
-    ranges = torch.tensor(range_list, device=asset.device)
-    rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=asset.device)
-
-    positions = root_states[:, 0:3] + env.scene.env_origins[env_ids] + rand_samples[:, 0:3]
-    orientations_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
-    orientations = math_utils.quat_mul(root_states[:, 3:7], orientations_delta)
-    # velocities
+    pos_ranges = torch.tensor(range_list, device=env.device)
     range_list = [velocity_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
-    ranges = torch.tensor(range_list, device=asset.device)
-    rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=asset.device)
+    vel_ranges = torch.tensor(range_list, device=env.device)
 
-    velocities = root_states[:, 7:13] + rand_samples
+    for env_id in env_ids.tolist():
+        for active_shelf in active_shelvings_xforms_poses[f'env_{env_id}'].keys():
+            shelf_p, shelf_q = active_shelvings_xforms_poses[f'env_{env_id}'][active_shelf]
+            for item in items[f'env_{env_id}'][active_shelf].values():
+                item_state = item.data.default_root_state.clone()
 
-    # set into the physics simulation
-    asset.write_root_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
-    asset.write_root_velocity_to_sim(velocities, env_ids=env_ids)
+                rand_samples = math_utils.sample_uniform(pos_ranges[:, 0], pos_ranges[:, 1], (1, 6), device=item.device)
+                
+                # poses
+                positions = item_state[:, 0:3] + env.scene.env_origins[None, env_id] + shelf_p + rand_samples[:, 0:3]
+                orientations_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
+                orientations = math_utils.quat_mul(shelf_q, math_utils.quat_mul(item_state[:, 3:7], orientations_delta))
+
+                # velocities
+                rand_samples = math_utils.sample_uniform(vel_ranges[:, 0], vel_ranges[:, 1], (1, 6), device=item.device)
+
+                velocities = item_state[:, 7:13] + rand_samples
+
+                 # set into the physics simulation
+                item.write_root_pose_to_sim(
+                    torch.cat([positions, orientations], dim=-1),
+                    env_ids=torch.tensor([0], device=item.device))
+                item.write_root_velocity_to_sim(
+                    velocities,
+                    env_ids=torch.tensor([0], device=item.device))
+                
+
+    # env_id = 0
+    # scene_cfg = env.cfg.scene.dsynth_multi_scene
+    # asset: RigidObject = scene_cfg.spawn.data[f'/World/envs/env_{env_id}'].obj
+    # env_ids = torch.tensor([env_id], device=env.device)
+    # asset_2 = env.scene[asset_cfg.name]
+    # # get default root state
+
+    # root_states = asset.data.default_root_state.clone()
+    # assert root_states.shape[0] == 1
+
+    # # poses
+    # range_list = [pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
+    # ranges = torch.tensor(range_list, device=asset.device)
+    # rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=asset.device)
+
+    # positions = root_states[:, 0:3] + env.scene.env_origins[env_ids] + rand_samples[:, 0:3]
+    # orientations_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
+    # orientations = math_utils.quat_mul(root_states[:, 3:7], orientations_delta)
+    # # velocities
+    # range_list = [velocity_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
+    # ranges = torch.tensor(range_list, device=asset.device)
+    # rand_samples = math_utils.sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), 6), device=asset.device)
+
+    # velocities = root_states[:, 7:13] + rand_samples
+
+    # # set into the physics simulation
+    # asset.write_root_pose_to_sim(torch.cat([positions, orientations], dim=-1), env_ids=env_ids)
+    # asset.write_root_velocity_to_sim(velocities, env_ids=env_ids)
     
-    print("WTF!")
+    # print("WTF!")

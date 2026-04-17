@@ -84,12 +84,11 @@ class FetchEventCfg:
     # )
 
     reset_cube = EventTerm(
-        func=fetch_events.reset_root_state_uniform,
+        func=fetch_events.reset_items_uniform,
         mode="reset",
         params={
             "pose_range": {},
             "velocity_range": {},
-            "asset_cfg": SceneEntityCfg("cube"),
         },
     )
 
@@ -107,20 +106,20 @@ class FetchEventCfg:
     #         "event_name": "cube_texture_randomizer",
     #     },
     # )
-    cube_texture_randomizer_reset = EventTerm(
-        func=mdp.randomize_visual_texture_material,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("cube"),
-            "texture_paths": [
-                "assets/textures/walls/apricot_texture.PNG",
-                "assets/textures/walls/green_texture.PNG",
-                "assets/textures/walls/white_bricks.png",
-                "assets/textures/walls/Bricks058_1K-JPG_Color.jpg"
-            ],
-            "event_name": "cube_texture_randomizer_reset",
-        },
-    )
+    # cube_texture_randomizer_reset = EventTerm(
+    #     func=mdp.randomize_visual_texture_material,
+    #     mode="reset",
+    #     params={
+    #         "asset_cfg": SceneEntityCfg("cube"),
+    #         "texture_paths": [
+    #             "assets/textures/walls/apricot_texture.PNG",
+    #             "assets/textures/walls/green_texture.PNG",
+    #             "assets/textures/walls/white_bricks.png",
+    #             "assets/textures/walls/Bricks058_1K-JPG_Color.jpg"
+    #         ],
+    #         "event_name": "cube_texture_randomizer_reset",
+    #     },
+    # )
 
     wall_texture_randomizer_reset = EventTerm(
         func=fetch_events.randomize_visual_texture_material,

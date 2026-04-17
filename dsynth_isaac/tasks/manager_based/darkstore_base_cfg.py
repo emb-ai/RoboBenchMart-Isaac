@@ -16,7 +16,7 @@ from isaaclab.sensors import FrameTransformerCfg
 
 import isaaclab.envs.mdp as mdp
 
-from dsynth_isaac.scene.spawners import DsynthMultiSceneCfg
+from dsynth_isaac.scene.spawners import DsynthSceneCfg
 from dsynth_isaac.scene.scene_loader import load_scene
 @configclass
 class DarkstoreSceneCfg(InteractiveSceneCfg):
@@ -33,10 +33,9 @@ class DarkstoreSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.GroundPlaneCfg(size=(100.0, 100.0)),
     )
 
-
-    dsynth_multi_scene = AssetBaseCfg(
+    dsynth_scene = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/dsynth_scene",
-        spawn=DsynthMultiSceneCfg(
+        spawn=DsynthSceneCfg(
             config_dir_path=MISSING
         ),
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),

@@ -33,7 +33,7 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
     env_cfg.seed=42
-    env_cfg.scene.dsynth_multi_scene.spawn.config_dir_path = "generated_envs/isaac_sample"
+    env_cfg.scene.dsynth_scene.spawn.config_dir_path = "generated_envs/isaac_sample"
     # setup base environment
     env = ManagerBasedEnv(cfg=env_cfg)
 
@@ -45,8 +45,8 @@ def main():
         with torch.inference_mode():
             # joint_efforts = torch.randn_like(env.action_manager.action)
             action = env.action_manager.action
-            # action[:, -2] = 10.0
-            # action[:, -1] = 10.0
+            action[:, -2] = 10.0
+            action[:, -1] = 10.0
             # action[0, 0] =  0.0
             # action[0, 1] =  -0.002
             # action[0, 2] =  0.0
