@@ -11,7 +11,8 @@ from isaacsim.core.prims import XFormPrim
 import isaaclab.sim as sim_utils
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.sim.spawners import materials
-
+from isaacsim.core.prims import XFormPrim
+from isaaclab.sim.utils.stage import get_current_stage
 
 from dsynth_isaac.core.assets.asset import load_assets_lib
 from dsynth_isaac.core.scene_gen.utils import flatten_dict
@@ -59,8 +60,11 @@ class SceneManager:
                 layout_json_path=scene_config_paths[i % num_max_scenes],
                 prim_path=f"{prim_path}/{dsynth_target_path}",
             )
-
+        
+        
     def _build_env(self, layout_json_path: str, prim_path: str):
+        sim_utils.create_prim(prim_path, "Xform")
+
         env_entities = {'prim_path': prim_path}
         with open(Path(self.config_dir_path) / layout_json_path, "r") as f:
             scene_data = json.load(f)
@@ -75,6 +79,15 @@ class SceneManager:
         self._build_lamps(scene_data, prim_path, lamps_coords)
 
         env_entities['door'] = self._build_door(scene_data, prim_path)
+
+        # stage = get_current_stage()
+        # prim = stage.GetPrimAtPath(prim_path)
+        # result = sim_utils.standardize_xform_ops(prim)
+        # if result:
+        #     print("Transform stack standardized successfully")
+        # else:
+        #     print("Transform stack standardization failed")
+
         return env_entities
 
     def _build_door(self, scene_data, prim_path):
