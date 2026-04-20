@@ -113,7 +113,7 @@ def main() -> None:
         env_cfg = remove_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
 
-    env_cfg.scene.dsynth_multi_scene.spawn.config_dir_path = "generated_envs/isaac_sample"
+    env_cfg.scene.dsynth_scene.spawn.config_dir_path = "generated_envs/isaac_sample"
 
     try:
         # create environment
@@ -253,28 +253,28 @@ def main() -> None:
 
     # simulate environment
     while simulation_app.is_running():
-        try:
-            # run everything in inference mode
-            with torch.inference_mode():
-                # get device command
-                action = teleop_interface.advance()
-                # Only apply teleop commands when active
-                if teleoperation_active:
-                    # process actions
-                    actions = action.repeat(env.num_envs, 1)
-                    # apply actions
-                    env.step(actions)
-                else:
-                    env.sim.render()
+        # try:
+        # run everything in inference mode
+        with torch.inference_mode():
+            # get device command
+            action = teleop_interface.advance()
+            # Only apply teleop commands when active
+            if teleoperation_active:
+                # process actions
+                actions = action.repeat(env.num_envs, 1)
+                # apply actions
+                env.step(actions)
+            else:
+                env.sim.render()
 
-                if should_reset_recording_instance:
-                    env.reset()
-                    teleop_interface.reset()
-                    should_reset_recording_instance = False
-                    print("Environment reset complete")
-        except Exception as e:
-            logger.error(f"Error during simulation step: {e}")
-            break
+            if should_reset_recording_instance:
+                env.reset()
+                teleop_interface.reset()
+                should_reset_recording_instance = False
+                print("Environment reset complete")
+        # except Exception as e:
+        #     logger.error(f"Error during simulation step: {e}")
+        #     break
 
     # close the simulator
     env.close()

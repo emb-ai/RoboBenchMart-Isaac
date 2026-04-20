@@ -16,6 +16,8 @@ import isaaclab.sim as sim_utils
 from isaaclab.utils.version import compare_versions
 from isaaclab.sim.utils.stage import get_current_stage
 import isaaclab.utils.math as math_utils
+from isaaclab.assets import Articulation
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -29,6 +31,30 @@ def set_default_joint_pose(
     # Set the default pose for robots in all envs
     asset = env.scene[asset_cfg.name]
     asset.data.default_joint_pos = torch.tensor(default_pose, device=env.device).repeat(env.num_envs, 1)
+
+def reset_joints(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    asset: Articulation = env.scene[asset_cfg.name]
+
+    # Add gaussian noise to joint states
+    joint_pos = asset.data.default_joint_pos[env_ids].clone()
+    joint_vel = asset.data.default_joint_vel[env_ids].clone()
+    # joint_pos += math_utils.sample_gaussian(mean, std, joint_pos.shape, joint_pos.device)
+
+    # Clamp joint pos to limits
+    # joint_pos_limits = asset.data.soft_joint_pos_limits[env_ids]
+    # joint_pos = joint_pos.clamp_(joint_pos_limits[..., 0], joint_pos_limits[..., 1])
+
+    # # Don't noise the gripper poses
+    # joint_pos[:, -2:] = asset.data.default_joint_pos[env_ids, -2:]
+
+    # Set into the physics simulation
+    asset.set_joint_position_target(joint_pos, env_ids=env_ids)
+    asset.set_joint_velocity_target(joint_vel, env_ids=env_ids)
+    asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
 
 def set_default_base_pose(
@@ -50,7 +76,6 @@ def set_default_base_pose(
         
     asset.data.default_root_state[env_ids_list, :3] = base_p[env_ids_list] + shift_p
     asset.data.default_root_state[env_ids_list, 3:7] = math_utils.quat_mul(base_q[env_ids_list], rot_q)
-
 
 
 class randomize_visual_texture_material(ManagerTermBase):

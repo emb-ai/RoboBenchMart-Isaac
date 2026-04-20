@@ -14,6 +14,7 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab_tasks.manager_based.manipulation.stack.mdp import observations as stack_obs_mdp
 
 import isaaclab.envs.mdp as mdp
 
@@ -25,7 +26,7 @@ class DarkstoreSceneCfg(InteractiveSceneCfg):
     # robots: will be populated by agent env cfg
     robot: ArticulationCfg = MISSING
     # end-effector sensor: will be populated by agent env cfg
-    # ee_frame: FrameTransformerCfg = MISSING
+    ee_frame: FrameTransformerCfg = MISSING
 
     #==== RoboBenchMart scene ====
     dsynth_scene = AssetBaseCfg(
@@ -195,9 +196,9 @@ class ObservationsCfg:
         actions = ObsTerm(func=mdp.last_action)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)
-        # eef_pos = ObsTerm(func=mdp.ee_frame_pos)
-        # eef_quat = ObsTerm(func=mdp.ee_frame_quat)
-        # gripper_pos = ObsTerm(func=mdp.gripper_pos)
+        eef_pos = ObsTerm(func=stack_obs_mdp.ee_frame_pos)
+        eef_quat = ObsTerm(func=stack_obs_mdp.ee_frame_quat)
+        gripper_pos = ObsTerm(func=stack_obs_mdp.gripper_pos)
 
         def __post_init__(self):
             self.enable_corruption = False

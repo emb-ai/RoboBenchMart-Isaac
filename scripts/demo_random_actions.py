@@ -36,6 +36,7 @@ from isaaclab_tasks.utils import parse_env_cfg
 import sys
 sys.path.append('.')
 import dsynth_isaac.tasks.manager_based
+from isaaclab_tasks.manager_based.manipulation.stack.config.franka.stack_ik_rel_env_cfg import FrankaCubeStackEnvCfg
 
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
