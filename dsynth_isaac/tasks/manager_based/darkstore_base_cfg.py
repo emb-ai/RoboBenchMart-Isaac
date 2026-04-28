@@ -3,6 +3,7 @@ from dataclasses import MISSING
 import os
 from pathlib import Path
 from typing import Optional
+from functools import partial
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
@@ -15,12 +16,14 @@ from isaaclab.utils import configclass
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab_tasks.manager_based.manipulation.stack.mdp import observations as stack_obs_mdp
+from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
 
 import isaaclab.envs.mdp as mdp
 
 from dsynth_isaac.scene.spawners import DsynthSceneCfg
 from dsynth_isaac.scene.scene_loader import load_scene
 import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events
+import dsynth_isaac.tasks.manager_based.mdp.ds_observations as ds_obs
 @configclass
 class DarkstoreSceneCfg(InteractiveSceneCfg):
     # robots: will be populated by agent env cfg
@@ -198,6 +201,10 @@ class ObservationsCfg:
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)
         eef_pos = ObsTerm(func=stack_obs_mdp.ee_frame_pos)
         eef_quat = ObsTerm(func=stack_obs_mdp.ee_frame_quat)
+        eef_pos_base = ObsTerm(func=partial(stack_obs_mdp.ee_frame_pose_in_base_frame, return_key="pos"))
+        eef_quat_base = ObsTerm(func=partial(stack_obs_mdp.ee_frame_pose_in_base_frame, return_key="quat"))
+        base_pos = ObsTerm(func=ds_obs.base_pos)
+        base_quat = ObsTerm(func=ds_obs.base_quat)
         gripper_pos = ObsTerm(func=stack_obs_mdp.gripper_pos)
 
         def __post_init__(self):
