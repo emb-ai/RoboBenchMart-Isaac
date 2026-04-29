@@ -34,6 +34,8 @@ def set_default_base_pose(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    p = [0, 0, 0],
+    q = [1, 0, 0, 0]
 ):
     # Set the default pose for robots in all envs
     asset = env.scene[asset_cfg.name]
@@ -42,9 +44,12 @@ def set_default_base_pose(
     
     manager = env.scene.cfg.dsynth_scene.spawn.manager
     base_p, base_q = manager.get_robot_default_poses()
+    shift_p = torch.tensor([p for _ in env_ids_list], dtype=torch.float32, device=base_p.device)
+    rot_q = torch.tensor([q for _ in env_ids_list], dtype=torch.float32, device=base_p.device)
         
-    asset.data.default_root_state[env_ids_list, :3] = base_p[env_ids_list]
-    asset.data.default_root_state[env_ids_list, 3:7] = base_q[env_ids_list]
+    asset.data.default_root_state[env_ids_list, :3] = base_p[env_ids_list] + shift_p
+    asset.data.default_root_state[env_ids_list, 3:7] = math_utils.quat_mul(base_q[env_ids_list], rot_q)
+
 
 
 class randomize_visual_texture_material(ManagerTermBase):
