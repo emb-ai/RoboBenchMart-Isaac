@@ -49,8 +49,8 @@ def main():
         with torch.inference_mode():
             # joint_efforts = torch.randn_like(env.action_manager.action)
             action = env.action_manager.action
-            action[:, -2] = 10.0
-            action[:, -1] = 10.0
+            # action[:, -2] = 10.0
+            # action[:, -1] = 10.0
             # action[0, 0] =  0.0
             # action[0, 1] =  -0.002
             # action[0, 2] =  0.0

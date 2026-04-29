@@ -70,14 +70,14 @@ class WorkerBaseEnvCfg(DarkstoreBaseEnvCfg):
         self.scene.robot.init_state.pos = (0, 0, 0)
 
         self.scene.head_camera = CameraCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/femto_holder_link/head_camera",
+            prim_path="{ENV_REGEX_NS}/Robot/femto_holder_link/camera_3_base_link/head_camera",
             height=480,
             width=640,
             data_types=["rgb",],
             spawn=sim_utils.PinholeCameraCfg(
                 focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 1.0e5)
             ),
-            offset=CameraCfg.OffsetCfg(pos=(0.05, 0.0, 0.0), convention="ros"),
+            offset=CameraCfg.OffsetCfg(pos=(0.05, 0.0, 0.0), rot=(0.5004, -0.5, 0.5, -0.5), convention="ros"),
         )
 
         self.observations.rgb_camera.head_img = ObsTerm(
