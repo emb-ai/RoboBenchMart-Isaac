@@ -29,10 +29,11 @@ import sys
 sys.path.append('.')
 from dsynth_isaac.tasks.manager_based.fetch_base_env_cfg import FetchBaseEnvCfg
 # from dsynth_isaac.tasks.manager_based.panda_base_env_cfg import PandaBaseEnvCfg
+from dsynth_isaac.tasks.manager_based.worker_base_env_cfg import WorkerBaseEnvCfg
 import dsynth_isaac.tasks.manager_based
 
 def main():
-    env_cfg = FetchBaseEnvCfg()
+    env_cfg = WorkerBaseEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
     env_cfg.seed=42
