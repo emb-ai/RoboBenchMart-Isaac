@@ -4,17 +4,24 @@ This repository is an **Isaac Sim / Isaac Lab** port of [RoboBenchMart](https://
 
 ## Installation
 
-1. **Install [NVIDIA Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)** for your platform, following NVIDIA’s official instructions.
+1. **Install [NVIDIA Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)** and **install [Isaac Lab](https://isaac-sim.github.io/IsaacLab/)**.
 
-2. **Install [Isaac Lab](https://isaac-sim.github.io/IsaacLab/)** in the Python environment you use with that Isaac Sim build (clone Isaac Lab, run its installer, and use the Isaac Sim–compatible interpreter it documents).
+   ```bash
+   conda create -n env_isaaclab python=3.11
+   conda activate env_isaaclab
 
-3. **Install this repo’s Python dependencies** (from the repository root, with the same environment activated):
+   pip install isaaclab[isaacsim,all]==2.3.2.post1 --extra-index-url https://pypi.nvidia.com
+
+   pip install -U torch==2.7.0 torchvision==0.22.0 --index-url https://download.pytorch.org/whl/cu128
+   ```
+
+2. **Install requirements**
 
    ```bash
    pip install -r requirements.txt
    ```
 
-4. **Download USD assets** used by the Isaac workflows (requires the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli) / `hf`):
+3. **Download USD assets** used by the Isaac workflows (requires the [Hugging Face CLI](https://huggingface.co/docs/huggingface_hub/guides/cli) / `hf`):
 
    ```bash
    hf download emb-ai/RoboBenchMart_assets_usd --repo-type dataset --local-dir assets_usd
