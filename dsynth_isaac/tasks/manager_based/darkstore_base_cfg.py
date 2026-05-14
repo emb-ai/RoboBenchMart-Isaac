@@ -165,6 +165,13 @@ class DsEventCfg:
         },
     )
 
+    lights_randomizer_reset = EventTerm(
+        func=ds_events.randomize_lights,
+        mode="reset",
+        params={
+        },
+    )
+
 
 ##
 # MDP settings

@@ -6,6 +6,8 @@ import re
 from typing import TYPE_CHECKING
 
 import carb
+from pxr import UsdLux, Gf
+from isaaclab.sim.utils import get_prim_at_path
 from isaacsim.core.utils.extensions import enable_extension
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
@@ -14,7 +16,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.utils.version import compare_versions
 from isaaclab.sim.utils.stage import get_current_stage
 import isaaclab.utils.math as math_utils
-
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -238,4 +239,46 @@ def reset_items_uniform(
                 item.write_root_velocity_to_sim(
                     velocities,
                     env_ids=torch.tensor([0], device=item.device))
-                
+
+def randomize_lights(env, env_ids, intensity_range=(10000.0, 30000.0),
+                     color_range=((0.5, 0.5, 0.5), (1.0, 1.0, 1.0))):
+    """Randomize per‑env lights for Isaac Lab 2.3.0 / Isaac Sim 5.1.
+
+    Args:
+        env: DirectRLEnv instance (self in your task).
+        env_ids: 1D tensor of env indices to randomize.
+        intensity_range: (min, max) intensity.
+        color_range: ((r_min, g_min, b_min), (r_max, g_max, b_max)).
+    """
+    device = env.device
+    env_ids = env_ids.to(device)
+    num = env_ids.shape[0]
+
+    # Sample intensities and colors in torch
+    min_I, max_I = intensity_range
+    intensities = torch.rand(num, device=device) * (max_I - min_I) + min_I
+
+    min_c = torch.tensor(color_range[0], device=device)
+    max_c = torch.tensor(color_range[1], device=device)
+    colors = torch.rand(num, 3, device=device) * (max_c - min_c) + min_c
+    
+    # Apply to each env light
+    for i, env_id in enumerate(env_ids.tolist()):
+        prim_path = f"/World/envs/env_{env_id}/dsynth_scene/light_.*"
+        prim_paths = sim_utils.find_matching_prim_paths(prim_path)
+        for path in prim_paths:
+            stage = sim_utils.get_current_stage()
+            prim = stage.GetPrimAtPath(path)
+            if not prim or not prim.IsValid():
+                continue
+
+            light_api = UsdLux.LightAPI(prim)
+            if not light_api:
+                carb.log_warn(f"Prim is not a UsdLux light, skipping randomization: {path}")
+                continue
+
+            light_api.CreateIntensityAttr().Set(float(intensities[i].item()))
+            col = colors[i]
+            light_api.CreateColorAttr().Set(
+                Gf.Vec3f(float(col[0].item()), float(col[1].item()), float(col[2].item()))
+            )
