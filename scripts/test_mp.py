@@ -46,6 +46,9 @@ from dsynth_isaac.tasks.manager_based.fetch_base_env_cfg import FetchBaseEnvCfg,
 from dsynth_isaac.tasks.manager_based.panda_base_env_cfg import PandaBaseEnvCfg, PandaDsynthIKRelMimicEnvCfg
 import dsynth_isaac.tasks.manager_based
 from dsynth_isaac import DSYNTH_ISAAC_PATH
+from dsynth_isaac.scene.scene_manager import SceneManager
+from dsynth_isaac.planning.utils import compute_box_grasp_thin_side_info, build_grasp_pose
+
 
 GRIPPER_OPEN_CMD: float = 1.0
 GRIPPER_CLOSE_CMD: float = -1.0
@@ -156,7 +159,12 @@ class DsynthCuroboPlannerCfg(CuroboPlannerCfg):
         config.approach_distance = 0.05
         config.retreat_distance = 0.05
         config.surface_sphere_radius = 0.01
-        # config.world_ignore_substrings = config.world_ignore_substrings + ['/World/envs/env_0/dsynth_scene/wall_0']
+        config.world_ignore_substrings = config.world_ignore_substrings + [
+            '/World/envs/env_0/dsynth_scene/wall_0',
+            '/World/envs/env_0/dsynth_scene/wall_1',
+            '/World/envs/env_0/dsynth_scene/wall_2',
+            '/World/envs/env_0/dsynth_scene/wall_3'
+            ]
         config.world_config_file = f'{DSYNTH_ISAAC_PATH}/planning/dsynth_scene.yaml'
         config.get_world_config = lambda: config._get_world_config_with_table_adjustment()
         return config
@@ -169,6 +177,49 @@ def _pose_from_xy_quat(xy: torch.Tensor, z: float, quat: torch.Tensor) -> torch.
     rot = math_utils.matrix_from_quat(quat.to(device).unsqueeze(0))[0]
     return math_utils.make_pose(pos, rot)
 
+def np_make_pose(pos, quat):
+    return math_utils.make_pose(torch.tensor(pos), math_utils.matrix_from_quat(torch.tensor(quat))).cpu().numpy()
+
+def get_item_bbox(prim_path: str):
+    stage = omni.usd.get_context().get_stage()
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        raise ValueError(f"Invalid prim path: {prim_path}")
+
+    xformable = UsdGeom.Xformable(prim)
+    T_world = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())  # Gf.Matrix4d
+    prim_world_pos = T_world.ExtractTranslation()
+    prim_world_quat = T_world.ExtractRotationQuat()
+    prim_world_quat = [prim_world_quat.GetReal(), *prim_world_quat.GetImaginary()]
+    T = np_make_pose(prim_world_pos, prim_world_quat)
+
+    bbox_cache = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(),
+        includedPurposes=[UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy],
+        useExtentsHint=True,
+    )
+    # Object-space bbox (before world/parent transforms)
+    world_bbox = bbox_cache.ComputeWorldBound(prim)
+    aabb = world_bbox.ComputeAlignedBox()
+    bbox_min = np.array(aabb.GetMin())      # (x_min, y_min, z_min)
+    bbox_max = np.array(aabb.GetMax())      
+    bbox_center = 0.5 * (bbox_min + bbox_max)
+    T[:3, 3] = bbox_center
+    
+    local_bbox = bbox_cache.ComputeLocalBound(prim)
+    local_aabb = local_bbox.ComputeAlignedBox()
+    bbox_min_local = np.array(local_aabb.GetMin())
+    bbox_max_local = np.array(local_aabb.GetMax())
+    bbox_extents_local = bbox_max_local - bbox_min_local
+    
+    target_bbox = {
+        "center": bbox_center,
+        "transform": T,
+        "extents": bbox_extents_local
+    }
+    print(target_bbox)
+    return target_bbox
+
 
 def main():
     random.seed(SEED)
@@ -180,6 +231,11 @@ def main():
     env_cfg.scene.num_envs = 1
     env_cfg.scene.dsynth_scene.spawn.config_dir_path = "generated_envs/isaac_sample"
 
+    env_cfg.viewer.origin_type = 'asset_root'
+    env_cfg.viewer.asset_name = 'robot'
+    env_cfg.viewer.eye = (1.0, 1.0, 1.0)
+    env_cfg.viewer.lookat = (0.4, 0.0, 0.6)
+
     for frame in env_cfg.scene.ee_frame.target_frames:
         if frame.name == "end_effector":
             print(f"Setting end effector offset from {frame.offset.pos} to (0.0, 0.0, 0.0) for SkillGen parity")
@@ -190,19 +246,30 @@ def main():
         cfg=env_cfg,
         headless=headless,
     ).unwrapped
-    # env_cfg = FrankaCubeStackIKRelMimicEnvCfg()
-    # env_cfg.scene.num_envs = 1
-    # for frame in env_cfg.scene.ee_frame.target_frames:
-    #     if frame.name == "end_effector":
-    #         print(f"Setting end effector offset from {frame.offset.pos} to (0.0, 0.0, 0.0) for SkillGen parity")
-    #         frame.offset.pos = (0.0, 0.0, 0.0)
-
-    # env: ManagerBasedEnv = gym.make(
-    #     "Isaac-Stack-Cube-Franka-IK-Rel-Mimic-v0",
-    #     cfg=env_cfg,
-    #     headless=headless,
-    # ).unwrapped
     env.reset()
+
+    manager: SceneManager = env.scene.cfg.dsynth_scene.spawn.manager
+
+    target_shelf_name = "isaac_sample_addfa169_0_mixed_shelf"
+    target_item_name = "food_CEREALS_NestleHoneyStars_0_1_0_0"
+    shelving_xforms = manager.get_active_shelvings_xforms_poses()
+    item_entities = manager.get_item_entities()
+    target_shelf_pose = shelving_xforms['env_0'][target_shelf_name]
+    target_rigid_object = item_entities[f'env_0'][target_shelf_name][target_item_name]
+    target_shelf_direction = math_utils.make_pose(target_shelf_pose[0], math_utils.matrix_from_quat(target_shelf_pose[1]))[0, :3, 1]
+
+    target_path = target_rigid_object.cfg.prim_path
+    target_bbox = get_item_bbox(target_path)
+    grasp_infos = compute_box_grasp_thin_side_info(
+        target_bbox, 
+        ee_direction=target_shelf_direction,
+        depth=0.05,
+    )
+    print(grasp_infos)
+    grasp_closing, grasp_center, grasp_approaching = grasp_infos["closing"], grasp_infos["center"], grasp_infos["approaching"]
+    grasp_pose = build_grasp_pose(grasp_approaching, grasp_closing, grasp_center)
+    grasp_pose = torch.tensor(grasp_pose, dtype=torch.float32, device=target_rigid_object.device)
+    print(f"grasp pose: {grasp_pose}")
 
     robot: Articulation = env.scene["robot"]
     planner_cfg = DsynthCuroboPlannerCfg.franka_dsynth_config()
@@ -227,30 +294,21 @@ def main():
         marker_cfg.markers["frame"].scale = (0.1, 0.1, 0.1)
         goal_pose_visualizer = VisualizationMarkers(marker_cfg)
     
-    # stage = omni.usd.get_context().get_stage()
-
-    # prim = stage.GetPrimAtPath("/World/envs/env_0/dsynth_scene/active_shelf_isaac_sample_ef1d9efe_0_mixed_shelf_0/food_dairy_products_milkCarton_0_1_0_0")
-    # if prim.IsValid():
-    #     xformable = UsdGeom.Xformable(prim)
-    #     world_transform: Gf.Matrix4d = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())
-    #     translation = world_transform.ExtractTranslation()   # Gf.Vec3d
-    #     rotation_quat = world_transform.ExtractRotationQuat()  # Gf.Quatd  (real, i, j, k)
-    #     print(f"Translation: {translation}")
-    #     print(f"Rotation: {rotation_quat}")
-    # manager = env.scene.cfg.dsynth_scene.spawn.manager
-    # entities = manager.get_item_entities()['env_0']
+   
     base_pose = get_base_pose(env)[0]
     print(f"base pose: {base_pose}")
     curr_pose, curr_pose_wrt_base = get_robot_eef_pose(env, _eef_name(env))
     curr_pose, curr_pose_wrt_base = curr_pose[0], curr_pose_wrt_base[0]
 
     target_shift = torch.eye(4, device=curr_pose_wrt_base.device)
-    target_shift[0, 3] = 0.05
-    target_shift[0, 2] = 0.1
-
+    target_shift[1, 3] = -0.1
+    
     target_pose = curr_pose @ target_shift
-    target_pose_wrt_base = curr_pose_wrt_base @ target_shift
-    print(f"current pose: {curr_pose_wrt_base}")
+    # pre_grasp_pose = grasp_pose @ target_shift
+    # target_pose_wrt_base = curr_pose_wrt_base @ target_shift
+    target_pose_wrt_base = base_pose.inverse() @ target_pose
+    # pre_grasp_pose_wrt_base = base_pose.inverse() @ pre_grasp_pose
+    print(f"current pose: {target_pose}")
     print(f"Pre-grasp pose: {target_pose_wrt_base}")
     if not headless:
         pos_pg = target_pose[:3, 3].detach().cpu()
