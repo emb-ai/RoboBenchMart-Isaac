@@ -18,6 +18,8 @@ from isaaclab.sim.utils.stage import get_current_stage
 import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
 
+from dsynth_isaac.scene.scene_manager import SceneManager
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -69,7 +71,7 @@ def set_default_base_pose(
     
     env_ids_list = list(range(env.num_envs)) if env_ids is None else env_ids.tolist()
     
-    manager = env.scene.cfg.dsynth_scene.spawn.manager
+    manager: SceneManager = env.scene.cfg.dsynth_scene.spawn.manager
     base_p, base_q = manager.get_robot_default_poses()
     shift_p = torch.tensor([p for _ in env_ids_list], dtype=torch.float32, device=base_p.device)
     rot_q = torch.tensor([q for _ in env_ids_list], dtype=torch.float32, device=base_p.device)
@@ -230,7 +232,7 @@ def reset_items_uniform(
         velocity_range: dict[str, tuple[float, float]],
         asset_cfg: SceneEntityCfg = None,
     ):
-    manager = env.scene.cfg.dsynth_scene.spawn.manager
+    manager: SceneManager = env.scene.cfg.dsynth_scene.spawn.manager
     active_shelvings_xforms_poses = manager.get_active_shelvings_xforms_poses()
     items = manager.get_item_entities()
 
@@ -246,11 +248,15 @@ def reset_items_uniform(
                 item_state = item.data.default_root_state.clone()
 
                 rand_samples = math_utils.sample_uniform(pos_ranges[:, 0], pos_ranges[:, 1], (1, 6), device=item.device)
+                orientations_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
                 
                 # poses
-                positions = item_state[:, 0:3] + env.scene.env_origins[None, env_id] + shelf_p + rand_samples[:, 0:3]
-                orientations_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
-                orientations = math_utils.quat_mul(shelf_q, math_utils.quat_mul(item_state[:, 3:7], orientations_delta))
+                position_wrt_world, or_wrt_world = math_utils.combine_frame_transforms(
+                    env.scene.env_origins[None, env_id] + shelf_p, 
+                    shelf_q,
+                    item_state[:, 0:3] + rand_samples[:, 0:3],
+                    math_utils.quat_mul(item_state[:, 3:7], orientations_delta)
+                )
 
                 # velocities
                 rand_samples = math_utils.sample_uniform(vel_ranges[:, 0], vel_ranges[:, 1], (1, 6), device=item.device)
@@ -259,7 +265,7 @@ def reset_items_uniform(
 
                  # set into the physics simulation
                 item.write_root_pose_to_sim(
-                    torch.cat([positions, orientations], dim=-1),
+                    torch.cat([position_wrt_world, or_wrt_world], dim=-1),
                     env_ids=torch.tensor([0], device=item.device))
                 item.write_root_velocity_to_sim(
                     velocities,

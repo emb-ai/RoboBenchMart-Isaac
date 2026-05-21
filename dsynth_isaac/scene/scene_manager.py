@@ -195,7 +195,7 @@ class SceneManager:
 
     def _build_rigid_asset(self, prim_path, asset_name,
         p=[0., 0., 0.],
-        q=[0., 0., 0., 1.],
+        q=[1., 0., 0., 0.],
         kinematic_enabled=False
     ):
         asset_cfg = RigidObjectCfg(
