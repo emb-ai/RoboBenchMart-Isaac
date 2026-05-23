@@ -36,6 +36,8 @@ from curobo.geom.types import WorldConfig
 from curobo.util_file import get_robot_configs_path, get_world_configs_path, join_path, load_yaml
 
 import omni.usd
+import omni.appwindow
+import carb
 from pxr import UsdGeom, Usd, Gf
 from collections.abc import Sequence
 
@@ -61,9 +63,10 @@ def _action_from_pose(
     env: ManagerBasedEnv, target_pose: torch.Tensor, base_pose: torch.Tensor, gripper_binary_action: float, env_id: int = 0
 ) -> torch.Tensor:
     eef = _eef_name(env)
-    target_pose_wrt_base = base_pose @ target_pose
+    target_pose_wrt_world = base_pose @ target_pose
+    print(f"target_pose_wrt_world: {target_pose_wrt_world[:3, 3]}")
     play_action = env.target_eef_pose_to_action(
-        target_eef_pose_dict={eef: target_pose_wrt_base},
+        target_eef_pose_dict={eef: target_pose_wrt_world},
         gripper_action_dict={eef: torch.tensor([gripper_binary_action], device=env.device, dtype=torch.float32)},
         env_id=env_id,
     )
@@ -74,6 +77,40 @@ def _action_from_pose(
 
 def _env_step_with_action(env: ManagerBasedEnv, action: torch.Tensor) -> None:
     env.step(action)
+
+def _pause_simulation_until_play(
+    env: ManagerBasedEnv,
+    message: str = "Simulation paused. Focus viewport and press R to continue...",
+) -> None:
+    """Pause script-driven stepping while keeping viewport interactive."""
+    del env  # pause behavior is independent from env internals
+    print(message)
+    app_window = omni.appwindow.get_default_app_window()
+    if app_window is None:
+        print("No app window found; continuing without pause.")
+        return
+
+    input_iface = carb.input.acquire_input_interface()
+    keyboard = app_window.get_keyboard()
+    if keyboard is None:
+        print("No keyboard detected; continuing without pause.")
+        return
+
+    should_resume = False
+
+    def _on_keyboard_event(event, *args, **kwargs):
+        nonlocal should_resume
+        if (
+            event.type == carb.input.KeyboardEventType.KEY_PRESS
+            and event.input == carb.input.KeyboardInput.R
+        ):
+            should_resume = True
+        return True
+
+    sub = input_iface.subscribe_to_keyboard_events(keyboard, _on_keyboard_event)
+    while simulation_app.is_running() and not should_resume:
+        simulation_app.update()
+    input_iface.unsubscribe_to_keyboard_events(keyboard, sub)
 
 def get_robot_eef_pose(env, eef_name: str, env_ids: Sequence[int] | None = None) -> torch.Tensor:
     """
@@ -156,8 +193,8 @@ class DsynthCuroboPlannerCfg(CuroboPlannerCfg):
         config.debug_planner = False
         config.motion_noise_scale = 0.02
         config.collision_activation_distance = 0.01
-        config.approach_distance = 0.05
-        config.retreat_distance = 0.05
+        config.approach_distance = 0.0
+        config.retreat_distance = 0.0
         config.surface_sphere_radius = 0.01
         config.world_ignore_substrings = config.world_ignore_substrings + [
             '/World/envs/env_0/dsynth_scene/wall_0',
@@ -317,17 +354,34 @@ def main():
         goal_pose_visualizer.visualize(translations=pos_pg.unsqueeze(0), orientations=quat_pg.unsqueeze(0))
 
 
+    _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
     res = planner.update_world_and_plan_motion(target_pose_wrt_base)
     if not res:
         print("Failed to plan to pre-grasp pose")
     else:
         # EXECUTE
+        print("Executing planned poses")
         planned_poses = planner.get_planned_poses()
         if not planned_poses:
             return
+
+        eef_name = _eef_name(env)
+        curr_pose = env.get_robot_eef_pose(eef_name, env_ids=[0])[0]
+        curr_pos, curr_rot = PoseUtils.unmake_pose(curr_pose)
+        curr_rot = PoseUtils.axis_angle_from_quat(PoseUtils.quat_from_matrix(curr_rot))
         for pose in planned_poses:
             action = _action_from_pose(env, pose, base_pose, gripper_binary_action=GRIPPER_OPEN_CMD)
+            # print("pose: ", pose, )
+            # curr_pos[0] += 0.1
+            # gripper_action = torch.tensor([GRIPPER_OPEN_CMD], device=env.device, dtype=torch.float32)
+            # action = torch.cat([curr_pos, curr_rot, gripper_action], dim=0).unsqueeze(0)
+            # action = torch.tensor([0.001, 0.0, 0.0, 0.0, 0.0, 0.0, gripper_action], dtype=torch.float32, device=env.device).unsqueeze(0)
             _env_step_with_action(env, action)
+            print("robot eef pose: ", get_robot_eef_pose(env, _eef_name(env))[0][0, :3, 3])
+
+        # print("target_pose_wrt_base: ", target_pose_wrt_base)
+        print("target_pose: ", target_pose[:3, 3])
+        print("Executing finished")
 
     while simulation_app.is_running():
         with torch.inference_mode():
