@@ -68,7 +68,7 @@ class SceneManager:
         env_entities = {'prim_path': prim_path}
         with open(Path(self.config_dir_path) / layout_json_path, "r") as f:
             scene_data = json.load(f)
-        # env_entities['room'] = self._build_room(scene_data, prim_path)
+        env_entities['room'] = self._build_room(scene_data, prim_path)
 
         scene_data = self.choose_and_replace_active_shelving(scene_data)
         env_entities['inactive_shelvings'] = self._build_inactive_shelvings(scene_data, prim_path)
@@ -337,36 +337,36 @@ class SceneManager:
             )
             room['wall_{i}'] = wall_cfg.class_type(wall_cfg)
 
-        ceiling_cfg = RigidObjectCfg(
-            prim_path=f"{prim_path}/ceiling",
-            spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
-                visual_material=sim_utils.MdlFileCfg(
-                    mdl_path="assets_usd/mdl/bricks3/bricks3.mdl",
-                    project_uvw=True,
-                    texture_scale=(1., 1.)
-                ),
-            ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, self.HEIGHT + self.THICKNESS / 2]),
-        )
-        room['ceiling'] = ceiling_cfg.class_type(ceiling_cfg)
+        # ceiling_cfg = RigidObjectCfg(
+        #     prim_path=f"{prim_path}/ceiling",
+        #     spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
+        #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+        #         collision_props=sim_utils.CollisionPropertiesCfg(),
+        #         visual_material=sim_utils.MdlFileCfg(
+        #             mdl_path="assets_usd/mdl/bricks3/bricks3.mdl",
+        #             project_uvw=True,
+        #             texture_scale=(1., 1.)
+        #         ),
+        #     ),
+        #     init_state=RigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, self.HEIGHT + self.THICKNESS / 2]),
+        # )
+        # room['ceiling'] = ceiling_cfg.class_type(ceiling_cfg)
 
-        floor_cfg = RigidObjectCfg(
-            prim_path=f"{prim_path}/floor",
-            spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
-                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-                collision_props=sim_utils.CollisionPropertiesCfg(),
-                visual_material=sim_utils.MdlFileCfg(
-                    mdl_path="assets_usd/mdl/bricks3/bricks3.mdl",
-                    project_uvw=True,
-                    texture_scale=(1., 1.)
-                ),
-                physics_material=materials.RigidBodyMaterialCfg()
-            ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, - self.THICKNESS / 2]),
-        )
-        room['floor'] = floor_cfg.class_type(floor_cfg)
+        # floor_cfg = RigidObjectCfg(
+        #     prim_path=f"{prim_path}/floor",
+        #     spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
+        #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+        #         collision_props=sim_utils.CollisionPropertiesCfg(),
+        #         visual_material=sim_utils.MdlFileCfg(
+        #             mdl_path="assets_usd/mdl/bricks3/bricks3.mdl",
+        #             project_uvw=True,
+        #             texture_scale=(1., 1.)
+        #         ),
+        #         physics_material=materials.RigidBodyMaterialCfg()
+        #     ),
+        #     init_state=RigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, - self.THICKNESS / 2]),
+        # )
+        # room['floor'] = floor_cfg.class_type(floor_cfg)
 
         return room
 

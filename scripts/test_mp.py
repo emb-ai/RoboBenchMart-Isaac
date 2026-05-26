@@ -50,7 +50,7 @@ import dsynth_isaac.tasks.manager_based
 from dsynth_isaac import DSYNTH_ISAAC_PATH
 from dsynth_isaac.scene.scene_manager import SceneManager
 from dsynth_isaac.planning.utils import compute_box_grasp_thin_side_info, build_grasp_pose
-
+from dsynth_isaac.planning.curobo_planner import DsCuroboPlanner
 
 GRIPPER_OPEN_CMD: float = 1.0
 GRIPPER_CLOSE_CMD: float = -1.0
@@ -228,12 +228,12 @@ class DsynthCuroboPlannerCfg(CuroboPlannerCfg):
         config.retreat_distance = 0.05
         config.approach_distance = 0.05
         config.surface_sphere_radius = 0.01
-        config.world_ignore_substrings = config.world_ignore_substrings + [
-            '/World/envs/env_0/dsynth_scene/wall_0',
-            '/World/envs/env_0/dsynth_scene/wall_1',
-            '/World/envs/env_0/dsynth_scene/wall_2',
-            '/World/envs/env_0/dsynth_scene/wall_3'
-            ]
+        # config.world_ignore_substrings = config.world_ignore_substrings + [
+        #     '/World/envs/env_0/dsynth_scene/wall_0',
+        #     '/World/envs/env_0/dsynth_scene/wall_1',
+        #     '/World/envs/env_0/dsynth_scene/wall_2',
+            # '/World/envs/env_0/dsynth_scene/wall_3'
+            # ]
         config.world_config_file = f'{DSYNTH_ISAAC_PATH}/planning/dsynth_scene.yaml'
         config.get_world_config = lambda: config._get_world_config_with_table_adjustment()
         return config
@@ -371,7 +371,7 @@ def main():
     env_cfg = PandaDsynthIKRelMimicEnvCfg()
     env_cfg.scene.num_envs = 1
     env_cfg.scene.dsynth_scene.spawn.config_dir_path = "generated_envs/isaac_sample"
-
+    env_cfg.disable_fabric = True
     env_cfg.viewer.origin_type = 'asset_root'
     env_cfg.viewer.asset_name = 'robot'
     env_cfg.viewer.eye = (1.0, 1.0, 1.0)
@@ -422,7 +422,7 @@ def main():
     planner_cfg.approach_distance = 0.05
     planner_cfg.time_dilation_factor = 1.0
 
-    planner = CuroboPlanner(
+    planner = DsCuroboPlanner(
         env=env,
         robot=robot,
         config=planner_cfg,
