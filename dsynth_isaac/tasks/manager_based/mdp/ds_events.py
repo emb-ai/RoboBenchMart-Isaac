@@ -73,12 +73,32 @@ def set_default_base_pose(
     
     manager: SceneManager = env.scene.cfg.dsynth_scene.spawn.manager
     base_p, base_q = manager.get_robot_default_poses()
-    shift_p = torch.tensor([p for _ in env_ids_list], dtype=torch.float32, device=base_p.device)
-    rot_q = torch.tensor([q for _ in env_ids_list], dtype=torch.float32, device=base_p.device)
-        
-    asset.data.default_root_state[env_ids_list, :3] = base_p[env_ids_list] + shift_p
-    asset.data.default_root_state[env_ids_list, 3:7] = math_utils.quat_mul(base_q[env_ids_list], rot_q)
+    
+    new_poses = []
+    p_offset = torch.tensor(p, device=env.device).unsqueeze(0)
+    q_offset = torch.tensor(q, device=env.device).unsqueeze(0)
+    for env_id in env_ids_list:
+        pos, rot = math_utils.combine_frame_transforms(
+                env.scene.env_origins[None, env_id] + base_p[None, env_id],
+                base_q[None, env_id],
+                p_offset,
+                q_offset
+            )
+        new_poses.append(torch.cat([pos, rot], dim=-1))
+    new_poses = torch.cat(new_poses, dim=-2)
+    velocities = asset.data.default_root_state[env_ids_list, 7:13]
 
+    asset.write_root_pose_to_sim(
+        new_poses,
+        env_ids=torch.tensor(env_ids_list, device=env.device)
+    )
+    asset.write_root_velocity_to_sim(
+                    velocities,
+                    torch.tensor(env_ids_list, device=env.device)
+    )
+
+    # asset.data.default_root_state[env_ids_list, :3] = new_poses[:, :3]
+    # asset.data.default_root_state[env_ids_list, 3:7] = new_poses[:, 3:7]    
 
 class randomize_visual_texture_material(ManagerTermBase):
     """Randomize the visual texture of bodies on an asset using Replicator API.
