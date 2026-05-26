@@ -68,7 +68,7 @@ class SceneManager:
         env_entities = {'prim_path': prim_path}
         with open(Path(self.config_dir_path) / layout_json_path, "r") as f:
             scene_data = json.load(f)
-        env_entities['room'] = self._build_room(scene_data, prim_path)
+        # env_entities['room'] = self._build_room(scene_data, prim_path)
 
         scene_data = self.choose_and_replace_active_shelving(scene_data)
         env_entities['inactive_shelvings'] = self._build_inactive_shelvings(scene_data, prim_path)

@@ -64,8 +64,10 @@ def _action_from_pose(
 ) -> torch.Tensor:
     eef = _eef_name(env)
     target_pose_wrt_world = base_pose @ target_pose
+    # target_pose_wrt_world = target_pose
     print(f"target_pose_wrt_world: {target_pose_wrt_world[:3, 3]}")
-    play_action = env.target_eef_pose_to_action(
+    play_action = target_eef_pose_to_action(
+        env=env,
         target_eef_pose_dict={eef: target_pose_wrt_world},
         gripper_action_dict={eef: torch.tensor([gripper_binary_action], device=env.device, dtype=torch.float32)},
         env_id=env_id,
@@ -77,6 +79,36 @@ def _action_from_pose(
 
 def _env_step_with_action(env: ManagerBasedEnv, action: torch.Tensor) -> None:
     env.step(action)
+
+def _rotation_error_angle(R_target: torch.Tensor, R_current: torch.Tensor) -> torch.Tensor:
+    """Return geodesic rotation error angle in radians."""
+    R_rel = R_target @ R_current.transpose(-1, -2)
+    trace = torch.trace(R_rel)
+    cos_theta = torch.clamp((trace - 1.0) * 0.5, -1.0, 1.0)
+    return torch.acos(cos_theta)
+
+def _drive_to_pose_until_reached(
+    env: ManagerBasedEnv,
+    target_pose_wrt_base: torch.Tensor,
+    base_pose_w: torch.Tensor,
+    gripper_binary_action: float,
+    env_id: int = 0,
+    pos_tol: float = 0.01,
+    rot_tol_rad: float = 0.08,
+    max_steps: int = 40,
+) -> None:
+    """Track one waypoint with repeated IK commands until convergence."""
+    eef_name = _eef_name(env)
+    for _ in range(max_steps):
+        action = _action_from_pose(env, target_pose_wrt_base, base_pose_w, gripper_binary_action, env_id=env_id)
+        _env_step_with_action(env, action)
+
+        curr_pose_w = get_robot_eef_pose(env, eef_name)[0][env_id]
+        curr_pose_b = base_pose_w.inverse() @ curr_pose_w
+        pos_err = torch.linalg.vector_norm(target_pose_wrt_base[:3, 3] - curr_pose_b[:3, 3])
+        rot_err = _rotation_error_angle(target_pose_wrt_base[:3, :3], curr_pose_b[:3, :3])
+        if float(pos_err) < pos_tol and float(rot_err) < rot_tol_rad:
+            break
 
 def _pause_simulation_until_play(
     env: ManagerBasedEnv,
@@ -189,12 +221,12 @@ class DsynthCuroboPlannerCfg(CuroboPlannerCfg):
         """Create configuration for Franka stacking a normal cube."""
         config = cls.franka_config()
         config.static_objects = []
-        config.visualize_plan = False
-        config.debug_planner = False
+        config.visualize_plan = True
+        config.debug_planner = True
         config.motion_noise_scale = 0.02
         config.collision_activation_distance = 0.01
-        config.approach_distance = 0.0
-        config.retreat_distance = 0.0
+        config.retreat_distance = 0.05
+        config.approach_distance = 0.05
         config.surface_sphere_radius = 0.01
         config.world_ignore_substrings = config.world_ignore_substrings + [
             '/World/envs/env_0/dsynth_scene/wall_0',
@@ -257,6 +289,78 @@ def get_item_bbox(prim_path: str):
     print(target_bbox)
     return target_bbox
 
+def target_eef_pose_to_action(
+        env,
+        target_eef_pose_dict: dict,
+        gripper_action_dict: dict,
+        action_noise_dict: dict | None = None,
+        env_id: int = 0,
+    ) -> torch.Tensor:
+        """
+        Takes a target pose and gripper action for the end effector controller and returns an action
+        (usually a normalized delta pose action) to try and achieve that target pose.
+        Noise is added to the target pose action if specified.
+
+        Args:
+            target_eef_pose_dict: Dictionary of 4x4 target eef pose for each end-effector.
+            gripper_action_dict: Dictionary of gripper actions for each end-effector.
+            noise: Noise to add to the action. If None, no noise is added.
+            env_id: Environment index to get the action for.
+
+        Returns:
+            An action torch.Tensor that's compatible with env.step().
+        """
+        robot = env.scene["robot"]
+        root_pos_w = robot.data.root_pos_w[0]
+        root_quat_w = robot.data.root_quat_w[0]
+
+        eef_name = list(env.cfg.subtask_configs.keys())[0]
+
+        # target position and rotation
+        (target_eef_pose,) = target_eef_pose_dict.values()
+        target_pos, target_rot = PoseUtils.unmake_pose(target_eef_pose)
+        target_quat = PoseUtils.quat_from_matrix(target_rot)
+
+        target_pos_b, target_quat_b = PoseUtils.subtract_frame_transforms(
+            root_pos_w.unsqueeze(0),
+            root_quat_w.unsqueeze(0),
+            target_pos.unsqueeze(0),
+            target_quat.unsqueeze(0),
+        )
+
+        target_rot_b = PoseUtils.matrix_from_quat(target_quat_b)[0]
+
+        # current position and rotation
+        curr_pose = env.get_robot_eef_pose(eef_name, env_ids=[env_id])[0]
+        curr_pos, curr_rot = PoseUtils.unmake_pose(curr_pose)
+        curr_quat = PoseUtils.quat_from_matrix(curr_rot.unsqueeze(0))[0]
+        curr_pos_b, curr_quat_b = PoseUtils.subtract_frame_transforms(
+            root_pos_w.unsqueeze(0),
+            root_quat_w.unsqueeze(0),
+            curr_pos.unsqueeze(0),
+            curr_quat.unsqueeze(0),
+        )
+        curr_rot_b = PoseUtils.matrix_from_quat(curr_quat_b)[0]
+
+        # normalized delta position action
+        delta_position = target_pos_b - curr_pos_b
+
+        # normalized delta rotation action
+        delta_rot_mat = target_rot_b.matmul(curr_rot_b.transpose(-1, -2))
+        delta_quat = PoseUtils.quat_from_matrix(delta_rot_mat)
+        delta_rotation = PoseUtils.axis_angle_from_quat(delta_quat)
+
+        # get gripper action for single eef
+        (gripper_action,) = gripper_action_dict.values()
+
+        # add noise to action
+        pose_action = torch.cat([delta_position[0], delta_rotation], dim=0)
+        if action_noise_dict is not None:
+            noise = action_noise_dict[eef_name] * torch.randn_like(pose_action)
+            pose_action += noise
+            pose_action = torch.clamp(pose_action, -1.0, 1.0)
+
+        return torch.cat([pose_action, gripper_action], dim=0)
 
 def main():
     random.seed(SEED)
@@ -311,8 +415,8 @@ def main():
     robot: Articulation = env.scene["robot"]
     planner_cfg = DsynthCuroboPlannerCfg.franka_dsynth_config()
     # planner_cfg = CuroboPlannerCfg.`franka_stack_cube_config`()
-    planner_cfg.visualize_plan = False
-    planner_cfg.visualize_spheres = False
+    planner_cfg.visualize_plan = True
+    planner_cfg.visualize_spheres = True
     planner_cfg.debug_planner = True
     planner_cfg.retreat_distance = 0.05
     planner_cfg.approach_distance = 0.05
@@ -338,24 +442,24 @@ def main():
     curr_pose, curr_pose_wrt_base = curr_pose[0], curr_pose_wrt_base[0]
 
     target_shift = torch.eye(4, device=curr_pose_wrt_base.device)
-    target_shift[1, 3] = -0.1
+    target_shift[2, 3] = -0.2
     
-    target_pose = curr_pose @ target_shift
-    # pre_grasp_pose = grasp_pose @ target_shift
+    # target_pose = curr_pose @ target_shift
+    pre_grasp_pose = grasp_pose @ target_shift
     # target_pose_wrt_base = curr_pose_wrt_base @ target_shift
-    target_pose_wrt_base = base_pose.inverse() @ target_pose
-    # pre_grasp_pose_wrt_base = base_pose.inverse() @ pre_grasp_pose
-    print(f"current pose: {target_pose}")
-    print(f"Pre-grasp pose: {target_pose_wrt_base}")
+    # target_pose_wrt_base = base_pose.inverse() @ target_pose
+    pre_grasp_pose_wrt_base = base_pose.inverse() @ pre_grasp_pose
+    # print(f"current pose: {target_pose}")
+    # print(f"Pre-grasp pose: {target_pose_wrt_base}")
     if not headless:
-        pos_pg = target_pose[:3, 3].detach().cpu()
-        quat_pg = math_utils.quat_from_matrix(target_pose[:3, :3].unsqueeze(0))[0].detach().cpu()
+        pos_pg = pre_grasp_pose[:3, 3].detach().cpu()
+        quat_pg = math_utils.quat_from_matrix(pre_grasp_pose[:3, :3].unsqueeze(0))[0].detach().cpu()
         # self._visualize_goal_pose(pos_pg, quat_pg)
         goal_pose_visualizer.visualize(translations=pos_pg.unsqueeze(0), orientations=quat_pg.unsqueeze(0))
 
 
     _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
-    res = planner.update_world_and_plan_motion(target_pose_wrt_base)
+    res = planner.update_world_and_plan_motion(pre_grasp_pose_wrt_base)
     if not res:
         print("Failed to plan to pre-grasp pose")
     else:
@@ -365,24 +469,68 @@ def main():
         if not planned_poses:
             return
 
-        eef_name = _eef_name(env)
-        curr_pose = env.get_robot_eef_pose(eef_name, env_ids=[0])[0]
-        curr_pos, curr_rot = PoseUtils.unmake_pose(curr_pose)
-        curr_rot = PoseUtils.axis_angle_from_quat(PoseUtils.quat_from_matrix(curr_rot))
+        # eef_name = _eef_name(env)
+        # curr_pose = env.get_robot_eef_pose(eef_name, env_ids=[0])[0]
+        # curr_pos, curr_rot = PoseUtils.unmake_pose(curr_pose)
+        # # curr_rot = PoseUtils.axis_angle_from_quat(PoseUtils.quat_from_matrix(curr_rot))
+        # curr_pos[0] += 0.1
+        # curr_pose = PoseUtils.make_pose(curr_pos, curr_rot)
+        # curr_pose_wrt_base = base_pose.inverse() @ curr_pose 
+
+        # pos_pg = curr_pose[:3, 3].detach().cpu()
+        # quat_pg = math_utils.quat_from_matrix(curr_pose[:3, :3].unsqueeze(0))[0].detach().cpu()
+        # # self._visualize_goal_pose(pos_pg, quat_pg)
+        # goal_pose_visualizer.visualize(translations=pos_pg.unsqueeze(0), orientations=quat_pg.unsqueeze(0))
+
         for pose in planned_poses:
-            action = _action_from_pose(env, pose, base_pose, gripper_binary_action=GRIPPER_OPEN_CMD)
-            # print("pose: ", pose, )
-            # curr_pos[0] += 0.1
-            # gripper_action = torch.tensor([GRIPPER_OPEN_CMD], device=env.device, dtype=torch.float32)
-            # action = torch.cat([curr_pos, curr_rot, gripper_action], dim=0).unsqueeze(0)
-            # action = torch.tensor([0.001, 0.0, 0.0, 0.0, 0.0, 0.0, gripper_action], dtype=torch.float32, device=env.device).unsqueeze(0)
-            _env_step_with_action(env, action)
+            print("pose: ", pose[:3, 3], )
+            _drive_to_pose_until_reached(
+                env=env,
+                target_pose_wrt_base=pose,
+                base_pose_w=base_pose,
+                gripper_binary_action=GRIPPER_OPEN_CMD,
+                env_id=0,
+            )
             print("robot eef pose: ", get_robot_eef_pose(env, _eef_name(env))[0][0, :3, 3])
 
         # print("target_pose_wrt_base: ", target_pose_wrt_base)
-        print("target_pose: ", target_pose[:3, 3])
+        # print("target_pose: ", target_pose[:3, 3])
         print("Executing finished")
 
+    grasp_pose_wrt_base = base_pose.inverse() @ grasp_pose
+    # print(f"current pose: {target_pose}")
+    # print(f"Pre-grasp pose: {target_pose_wrt_base}")
+    if not headless:
+        pos_pg = grasp_pose[:3, 3].detach().cpu()
+        quat_pg = math_utils.quat_from_matrix(grasp_pose[:3, :3].unsqueeze(0))[0].detach().cpu()
+        # self._visualize_goal_pose(pos_pg, quat_pg)
+        goal_pose_visualizer.visualize(translations=pos_pg.unsqueeze(0), orientations=quat_pg.unsqueeze(0))
+
+    _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
+    res = planner.update_world_and_plan_motion(grasp_pose_wrt_base)
+    if not res:
+        print("Failed to plan to pre-grasp pose")
+    else:
+        # EXECUTE
+        print("Executing planned poses")
+        planned_poses = planner.get_planned_poses()
+        if not planned_poses:
+            return
+
+        for pose in planned_poses:
+            print("pose: ", pose[:3, 3], )
+            _drive_to_pose_until_reached(
+                env=env,
+                target_pose_wrt_base=pose,
+                base_pose_w=base_pose,
+                gripper_binary_action=GRIPPER_OPEN_CMD,
+                env_id=0,
+            )
+            print("robot eef pose: ", get_robot_eef_pose(env, _eef_name(env))[0][0, :3, 3])
+
+        print("Executing finished")
+
+    
     while simulation_app.is_running():
         with torch.inference_mode():
             action = torch.zeros_like(env.action_manager.action)

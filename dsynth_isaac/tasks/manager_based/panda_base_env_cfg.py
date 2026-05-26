@@ -1,5 +1,7 @@
 from dataclasses import MISSING
 
+import torch
+
 import isaaclab.sim as sim_utils
 from isaaclab.managers import EventTermCfg as EventTerm
 
@@ -19,6 +21,7 @@ from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.keyboard import Se3Keyboard, Se3KeyboardCfg
 from isaaclab.managers import SceneEntityCfg
 from isaaclab_mimic.envs.franka_stack_ik_rel_mimic_env_cfg import FrankaCubeStackIKRelMimicEnvCfg
+import isaaclab.utils.math as PoseUtils
 
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg, DsEventCfg
 from dsynth_isaac.robots.fetch_cfg import FETCH_CONFIG
@@ -31,9 +34,9 @@ class PandaEventCfg(DsEventCfg):
     """Configuration for events."""
     init_robot_base_pose = EventTerm(
         func=ds_events.set_default_base_pose,
-        mode="startup",
+        mode="reset",
         params={
-            "p": [0., -0.0, 0.,]
+            "p": [0.5, 0.0, 0.,]
         },
     )
     
@@ -66,6 +69,7 @@ class PandaBaseEnvCfg(DarkstoreBaseEnvCfg):
         self.scene.robot = FRANKA_PANDA_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
         self.scene.robot.init_state.pos = (0, 0, 0)
+        # self.scene.robot.init_state.rot = (0.7073883, 0, 0, 0.7068252)
 
         self.events = PandaEventCfg()
 
@@ -120,7 +124,7 @@ class PandaIKBaseEnvCfg(PandaBaseEnvCfg):
         # post init of parent
         super().__post_init__()
         self.scene.robot = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-
+        # self.scene.robot.init_state.rot = (0.7073883, 0, 0, 0.7068252)
         self.actions.arm_action = DifferentialInverseKinematicsActionCfg(
             asset_name="robot",
             joint_names=["panda_joint.*"],
