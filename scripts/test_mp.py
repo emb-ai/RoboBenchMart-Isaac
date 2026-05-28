@@ -224,7 +224,7 @@ class DsynthCuroboPlannerCfg(CuroboPlannerCfg):
         config.visualize_plan = True
         config.debug_planner = True
         config.motion_noise_scale = 0.02
-        config.collision_activation_distance = 0.01
+        config.collision_activation_distance = 0.02
         config.retreat_distance = 0.05
         config.approach_distance = 0.05
         config.surface_sphere_radius = 0.01
@@ -404,7 +404,7 @@ def main():
     grasp_infos = compute_box_grasp_thin_side_info(
         target_bbox, 
         ee_direction=target_shelf_direction,
-        depth=0.05,
+        depth=0.02,
     )
     print(grasp_infos)
     grasp_closing, grasp_center, grasp_approaching = grasp_infos["closing"], grasp_infos["center"], grasp_infos["approaching"]
@@ -442,8 +442,8 @@ def main():
     curr_pose, curr_pose_wrt_base = curr_pose[0], curr_pose_wrt_base[0]
 
     target_shift = torch.eye(4, device=curr_pose_wrt_base.device)
-    target_shift[2, 3] = -0.2
-    
+    target_shift[2, 3] = -0.1
+    gripper_offset = target_shift.clone()
     # target_pose = curr_pose @ target_shift
     pre_grasp_pose = grasp_pose @ target_shift
     # target_pose_wrt_base = curr_pose_wrt_base @ target_shift
@@ -459,7 +459,7 @@ def main():
 
 
     _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
-    res = planner.update_world_and_plan_motion(pre_grasp_pose_wrt_base)
+    res = planner.update_world_and_plan_motion(pre_grasp_pose_wrt_base @ gripper_offset)
     if not res:
         print("Failed to plan to pre-grasp pose")
     else:
@@ -481,7 +481,7 @@ def main():
         # quat_pg = math_utils.quat_from_matrix(curr_pose[:3, :3].unsqueeze(0))[0].detach().cpu()
         # # self._visualize_goal_pose(pos_pg, quat_pg)
         # goal_pose_visualizer.visualize(translations=pos_pg.unsqueeze(0), orientations=quat_pg.unsqueeze(0))
-
+        _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
         for pose in planned_poses:
             print("pose: ", pose[:3, 3], )
             _drive_to_pose_until_reached(
@@ -490,6 +490,7 @@ def main():
                 base_pose_w=base_pose,
                 gripper_binary_action=GRIPPER_OPEN_CMD,
                 env_id=0,
+                max_steps=10,
             )
             print("robot eef pose: ", get_robot_eef_pose(env, _eef_name(env))[0][0, :3, 3])
 
@@ -497,38 +498,54 @@ def main():
         # print("target_pose: ", target_pose[:3, 3])
         print("Executing finished")
 
-    grasp_pose_wrt_base = base_pose.inverse() @ grasp_pose
-    # print(f"current pose: {target_pose}")
-    # print(f"Pre-grasp pose: {target_pose_wrt_base}")
-    if not headless:
-        pos_pg = grasp_pose[:3, 3].detach().cpu()
-        quat_pg = math_utils.quat_from_matrix(grasp_pose[:3, :3].unsqueeze(0))[0].detach().cpu()
-        # self._visualize_goal_pose(pos_pg, quat_pg)
-        goal_pose_visualizer.visualize(translations=pos_pg.unsqueeze(0), orientations=quat_pg.unsqueeze(0))
+    n_tries = 20
+    grasp_infos = compute_box_grasp_thin_side_info(
+        target_bbox, 
+        ee_direction=target_shelf_direction,
+        depth=0.02,
+        n_grasps=n_tries,
+        approaching_angles_range=[-np.pi/4, np.pi/4],
+    )
+    for n_try, grasp_info in enumerate(grasp_infos):
+        grasp_closing, grasp_center, grasp_approaching = grasp_info["closing"], grasp_info["center"], grasp_info["approaching"]
+        grasp_pose = build_grasp_pose(grasp_approaching, grasp_closing, grasp_center)
+        grasp_pose = torch.tensor(grasp_pose, dtype=torch.float32, device=target_rigid_object.device)
 
-    _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
-    res = planner.update_world_and_plan_motion(grasp_pose_wrt_base)
-    if not res:
-        print("Failed to plan to pre-grasp pose")
-    else:
-        # EXECUTE
-        print("Executing planned poses")
-        planned_poses = planner.get_planned_poses()
-        if not planned_poses:
-            return
+        grasp_pose_wrt_base = base_pose.inverse() @ grasp_pose
+        # print(f"current pose: {target_pose}")
+        # print(f"Pre-grasp pose: {target_pose_wrt_base}")
+        if not headless:
+            pos_pg = grasp_pose[:3, 3].detach().cpu()
+            quat_pg = math_utils.quat_from_matrix(grasp_pose[:3, :3].unsqueeze(0))[0].detach().cpu()
+            # self._visualize_goal_pose(pos_pg, quat_pg)
+            goal_pose_visualizer.visualize(translations=pos_pg.unsqueeze(0), orientations=quat_pg.unsqueeze(0))
 
-        for pose in planned_poses:
-            print("pose: ", pose[:3, 3], )
-            _drive_to_pose_until_reached(
-                env=env,
-                target_pose_wrt_base=pose,
-                base_pose_w=base_pose,
-                gripper_binary_action=GRIPPER_OPEN_CMD,
-                env_id=0,
-            )
-            print("robot eef pose: ", get_robot_eef_pose(env, _eef_name(env))[0][0, :3, 3])
+    # _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
+        res = planner.update_world_and_plan_motion(grasp_pose_wrt_base @ gripper_offset)
+        if not res:
+            print(f"Failed to plan to pre-grasp pose! Try #{n_try + 1} of {n_tries}")
+        else:
+            print(f"Successed grasp!`")
+            # EXECUTE
+            print("Executing planned poses")
+            planned_poses = planner.get_planned_poses()
+            if not planned_poses:
+                return
 
-        print("Executing finished")
+            _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
+            for pose in planned_poses:
+                print("pose: ", pose[:3, 3], )
+                _drive_to_pose_until_reached(
+                    env=env,
+                    target_pose_wrt_base=pose,
+                    base_pose_w=base_pose,
+                    gripper_binary_action=GRIPPER_OPEN_CMD,
+                    env_id=0,
+                )
+                print("robot eef pose: ", get_robot_eef_pose(env, _eef_name(env))[0][0, :3, 3])
+
+            print("Executing finished")
+            break
 
     
     while simulation_app.is_running():
