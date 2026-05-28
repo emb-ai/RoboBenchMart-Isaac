@@ -49,6 +49,22 @@ class DsCuroboPlanner(CuroboPlanner):
         self.usd_helper.load_stage(self.env.scene.stage)
         self.usd_helper.load_robot(self.robot)
 
+        if self.visualize_plan:
+            from isaaclab_mimic.motion_planners.curobo.plan_visualizer import PlanVisualizer
+
+            # Use env-local base translation for multi-env rendering consistency
+            # env_origin = self.env.scene.env_origins[self.env_id, :3]
+            # base_translation = (self.robot.data.root_pos_w[self.env_id, :3] - env_origin).detach().cpu().numpy()
+            base_translation = np.zeros(3)
+            self.plan_visualizer = PlanVisualizer(
+                robot_name=self.config.robot_name,
+                recording_id=f"curobo_plan_{self.env_id}",
+                debug=self.config.debug_planner,
+                base_translation=base_translation,
+            )
+
+            self.plan_visualizer.set_motion_generator_reference(self.motion_gen)
+
         self._initialize_static_world()
 
     def _create_sphere_config(self, sphere_idx: int, sphere, robot_link_count: int) -> dict:
@@ -75,10 +91,10 @@ class DsCuroboPlanner(CuroboPlanner):
         # Calculate position in world frame (do not use env_origin)
         root_translation = (self.robot.data.root_pos_w[self.env_id, :3]).detach().cpu().numpy()
         # root_rotation = self.robot.data.root_quat_w[self.env_id, :4]
-        root_rotation = PoseUtils.matrix_from_quat(self.robot.data.root_quat_w)[0].detach().cpu().numpy()
+        root_rotation = PoseUtils.matrix_from_quat(self.robot.data.root_quat_w)[self.env_id].detach().cpu().numpy()
         position = sphere.position.cpu().numpy() if hasattr(sphere.position, "cpu") else sphere.position
-        if not is_attached:
-            position = root_rotation @ position
+        # if not is_attached:
+        #     position = root_rotation @ position
 
         return {
             "position": position,
