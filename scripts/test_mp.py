@@ -110,6 +110,17 @@ def _drive_to_pose_until_reached(
         if float(pos_err) < pos_tol and float(rot_err) < rot_tol_rad:
             break
 
+def _execute_gripper_action(
+    env: ManagerBasedEnv, robot: Articulation, base_pose_w, gripper_offset, gripper_binary_action: float, steps: int = 12, env_id: int = 0
+) -> None:
+    """Hold current EEF pose and toggle gripper for a few steps."""
+    eef = _eef_name(env)
+    curr_pose = env.get_robot_eef_pose(eef_name=eef, env_ids=[env_id])[0]
+    curr_pose_wrt_base = base_pose_w.inverse() @ curr_pose
+    for _ in range(steps):
+        action = _action_from_pose(env, curr_pose_wrt_base @ gripper_offset, base_pose_w, gripper_binary_action, env_id=env_id)
+        _env_step_with_action(env, action)
+
 def _pause_simulation_until_play(
     env: ManagerBasedEnv,
     message: str = "Simulation paused. Focus viewport and press R to continue...",
@@ -387,16 +398,20 @@ def main():
         cfg=env_cfg,
         headless=headless,
     ).unwrapped
+    manager: SceneManager = env.scene.cfg.dsynth_scene.spawn.manager
+    shelving_xforms = manager.get_active_shelvings_xforms_poses()['env_0']
+    item_entities = manager.get_item_entities()['env_0']
+    scene_items = dict()
+    for active_shelf in item_entities.keys():
+        scene_items.update(item_entities[active_shelf])
+    env.scene._rigid_objects = scene_items
     env.reset()
 
-    manager: SceneManager = env.scene.cfg.dsynth_scene.spawn.manager
 
     target_shelf_name = "isaac_sample_addfa169_0_mixed_shelf"
     target_item_name = "food_CEREALS_NestleHoneyStars_0_1_0_0"
-    shelving_xforms = manager.get_active_shelvings_xforms_poses()
-    item_entities = manager.get_item_entities()
-    target_shelf_pose = shelving_xforms['env_0'][target_shelf_name]
-    target_rigid_object = item_entities[f'env_0'][target_shelf_name][target_item_name]
+    target_shelf_pose = shelving_xforms[target_shelf_name]
+    target_rigid_object = item_entities[target_shelf_name][target_item_name]
     target_shelf_direction = math_utils.make_pose(target_shelf_pose[0], math_utils.matrix_from_quat(target_shelf_pose[1]))[0, :3, 1]
 
     target_path = target_rigid_object.cfg.prim_path
@@ -404,7 +419,7 @@ def main():
     grasp_infos = compute_box_grasp_thin_side_info(
         target_bbox, 
         ee_direction=target_shelf_direction,
-        depth=0.02,
+        depth=0.04,
     )
     print(grasp_infos)
     grasp_closing, grasp_center, grasp_approaching = grasp_infos["closing"], grasp_infos["center"], grasp_infos["approaching"]
@@ -442,8 +457,9 @@ def main():
     curr_pose, curr_pose_wrt_base = curr_pose[0], curr_pose_wrt_base[0]
 
     target_shift = torch.eye(4, device=curr_pose_wrt_base.device)
-    target_shift[2, 3] = -0.1
-    gripper_offset = target_shift.clone()
+    target_shift[2, 3] = -0.4
+    gripper_offset = torch.eye(4, device=curr_pose_wrt_base.device)
+    gripper_offset[2, 3] = -0.1
     # target_pose = curr_pose @ target_shift
     pre_grasp_pose = grasp_pose @ target_shift
     # target_pose_wrt_base = curr_pose_wrt_base @ target_shift
@@ -458,7 +474,7 @@ def main():
         goal_pose_visualizer.visualize(translations=pos_pg.unsqueeze(0), orientations=quat_pg.unsqueeze(0))
 
 
-    _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
+    # _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
     res = planner.update_world_and_plan_motion(pre_grasp_pose_wrt_base @ gripper_offset)
     if not res:
         print("Failed to plan to pre-grasp pose")
@@ -469,19 +485,6 @@ def main():
         if not planned_poses:
             return
 
-        # eef_name = _eef_name(env)
-        # curr_pose = env.get_robot_eef_pose(eef_name, env_ids=[0])[0]
-        # curr_pos, curr_rot = PoseUtils.unmake_pose(curr_pose)
-        # # curr_rot = PoseUtils.axis_angle_from_quat(PoseUtils.quat_from_matrix(curr_rot))
-        # curr_pos[0] += 0.1
-        # curr_pose = PoseUtils.make_pose(curr_pos, curr_rot)
-        # curr_pose_wrt_base = base_pose.inverse() @ curr_pose 
-
-        # pos_pg = curr_pose[:3, 3].detach().cpu()
-        # quat_pg = math_utils.quat_from_matrix(curr_pose[:3, :3].unsqueeze(0))[0].detach().cpu()
-        # # self._visualize_goal_pose(pos_pg, quat_pg)
-        # goal_pose_visualizer.visualize(translations=pos_pg.unsqueeze(0), orientations=quat_pg.unsqueeze(0))
-        _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
         for pose in planned_poses:
             print("pose: ", pose[:3, 3], )
             _drive_to_pose_until_reached(
@@ -502,7 +505,7 @@ def main():
     grasp_infos = compute_box_grasp_thin_side_info(
         target_bbox, 
         ee_direction=target_shelf_direction,
-        depth=0.02,
+        depth=0.04,
         n_grasps=n_tries,
         approaching_angles_range=[-np.pi/4, np.pi/4],
     )
@@ -532,7 +535,7 @@ def main():
             if not planned_poses:
                 return
 
-            _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
+            # _pause_simulation_until_play(env, "Paused before planning. Focus viewport and press R to continue...")
             for pose in planned_poses:
                 print("pose: ", pose[:3, 3], )
                 _drive_to_pose_until_reached(
@@ -546,6 +549,31 @@ def main():
 
             print("Executing finished")
             break
+    
+    _execute_gripper_action(env, robot, base_pose, gripper_offset, GRIPPER_CLOSE_CMD)
+
+    res = planner.update_world_and_plan_motion(pre_grasp_pose_wrt_base @ gripper_offset, expected_attached_object=target_item_name)
+    if not res:
+        print("Failed to plan to pre-grasp pose")
+    else:
+        # EXECUTE
+        print("Executing planned poses")
+        planned_poses = planner.get_planned_poses()
+        if not planned_poses:
+            return
+
+        for pose in planned_poses:
+            _drive_to_pose_until_reached(
+                env=env,
+                target_pose_wrt_base=pose,
+                base_pose_w=base_pose,
+                gripper_binary_action=GRIPPER_CLOSE_CMD,
+                env_id=0,
+                max_steps=10,
+            )
+            print("robot eef pose: ", get_robot_eef_pose(env, _eef_name(env))[0][0, :3, 3])
+
+        print("Executing finished")
 
     
     while simulation_app.is_running():
@@ -560,7 +588,7 @@ def main():
             # action[0, 3] =  0.0
             # action[0, 4] =  0.0
             # action[0, 5] =  0.0
-            # action[0, 6] = 0.0
+            action[0, 6] = GRIPPER_CLOSE_CMD
 # tensor([[-0.6635,  0.6894,  0.2776, -0.0860]], device='cuda:0')
             _ = env.step(action)
     # target_product_pose = 
