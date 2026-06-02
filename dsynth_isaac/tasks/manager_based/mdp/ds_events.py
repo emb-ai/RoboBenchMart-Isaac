@@ -75,8 +75,8 @@ def set_default_base_pose(
     base_p, base_q = manager.get_robot_default_poses()
     
     new_poses = []
-    p_offset = torch.tensor(p, device=env.device).unsqueeze(0)
-    q_offset = torch.tensor(q, device=env.device).unsqueeze(0)
+    p_offset = torch.tensor(p, device=env.device, dtype=torch.float32).unsqueeze(0)
+    q_offset = torch.tensor(q, device=env.device, dtype=torch.float32).unsqueeze(0)
     for env_id in env_ids_list:
         pos, rot = math_utils.combine_frame_transforms(
                 env.scene.env_origins[None, env_id] + base_p[None, env_id],
