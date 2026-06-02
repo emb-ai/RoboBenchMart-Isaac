@@ -18,6 +18,8 @@ from dsynth_isaac.core.assets.asset import load_assets_lib
 from dsynth_isaac.core.scene_gen.utils import flatten_dict
 from dsynth_isaac.scene.utils import _get_absolute_matrix, _get_pq
 
+from dsynth_isaac.scene.env_subset_rigid_object_cfg import EnvSubsetRigidObjectCfg
+
 PI = np.pi # for brevity
 @dataclass
 class SceneManager:
@@ -59,10 +61,11 @@ class SceneManager:
             self._entities[f'env_{i}'] = self._build_env(
                 layout_json_path=scene_config_paths[i % num_max_scenes],
                 prim_path=f"{prim_path}/{dsynth_target_path}",
+                env_id=i
             )
         
         
-    def _build_env(self, layout_json_path: str, prim_path: str):
+    def _build_env(self, layout_json_path: str, prim_path: str, env_id: int):
         sim_utils.create_prim(prim_path, "Xform")
 
         env_entities = {'prim_path': prim_path}
@@ -71,14 +74,14 @@ class SceneManager:
         env_entities['room'] = self._build_room(scene_data, prim_path)
 
         scene_data = self.choose_and_replace_active_shelving(scene_data)
-        env_entities['inactive_shelvings'] = self._build_inactive_shelvings(scene_data, prim_path)
-        env_entities['active_shelving'] = self._build_active_shelving(scene_data, prim_path)
+        env_entities['inactive_shelvings'] = self._build_inactive_shelvings(scene_data, prim_path, env_id)
+        env_entities['active_shelving'] = self._build_active_shelving(scene_data, prim_path, env_id)
         # env_entities['lights'] = self._build_lighting(scene_data, prim_path)
         lamps_coords = self._get_lamps_coords(scene_data['size_x'], scene_data['size_y'])
         self._build_lighting(scene_data, prim_path, lamps_coords)
-        self._build_lamps(scene_data, prim_path, lamps_coords)
+        self._build_lamps(scene_data, prim_path, lamps_coords, env_id)
 
-        env_entities['door'] = self._build_door(scene_data, prim_path)
+        env_entities['door'] = self._build_door(scene_data, prim_path, env_id)
 
         # stage = get_current_stage()
         # prim = stage.GetPrimAtPath(prim_path)
@@ -90,23 +93,25 @@ class SceneManager:
 
         return env_entities
 
-    def _build_door(self, scene_data, prim_path):
+    def _build_door(self, scene_data, prim_path, env_id: int):
         return self._build_rigid_asset(
             f"{prim_path}/door",
             'fixtures.door',
             p=[scene_data['size_x'] - self.THICKNESS, scene_data['size_y'] - self._assets_lib['fixtures.door'].extents[1], 0],
             q=[1, 0, 0, 0],
-            kinematic_enabled=True
+            kinematic_enabled=True,
+            env_id=env_id
         )
 
-    def _build_lamps(self, scene_data, prim_path, lamps_coords):
+    def _build_lamps(self, scene_data, prim_path, lamps_coords, env_id: int):
         for i, (x, y) in enumerate(lamps_coords):
             self._build_rigid_asset(
                 f"{prim_path}/lamp_{i}",
                 'fixtures.lamp',
                 p=[x, y, self.HEIGHT],
                 q=[1, 0, 0, 0],
-                kinematic_enabled=True
+                kinematic_enabled=True,
+                env_id=env_id
             )
 
     def _build_lighting(self, scene_data, prim_path, lamps_coords, intensity=30000.0):
@@ -160,7 +165,7 @@ class SceneManager:
             return scene_data
         raise ValueError("No active shelvings!")
 
-    def _build_inactive_shelvings(self, scene_data: dict, prim_path: str):
+    def _build_inactive_shelvings(self, scene_data: dict, prim_path: str, env_id: int):
         inactive_fixtures_categories = [
             "inactive_shelvings",
             "inactive_wall_shelvings",
@@ -188,7 +193,8 @@ class SceneManager:
                     f"{prim_path}/{item_name}",
                     shelf_asset_name,
                     p=p, q=q,
-                    kinematic_enabled=True
+                    kinematic_enabled=True,
+                    env_id=env_id
                 )
 
         return inactive_shelvings
@@ -196,20 +202,22 @@ class SceneManager:
     def _build_rigid_asset(self, prim_path, asset_name,
         p=[0., 0., 0.],
         q=[1., 0., 0., 0.],
-        kinematic_enabled=False
+        kinematic_enabled=False,
+        env_id=0
     ):
-        asset_cfg = RigidObjectCfg(
+        asset_cfg = EnvSubsetRigidObjectCfg(
             prim_path=prim_path,
+            env_ids=[env_id],
             spawn=sim_utils.UsdFileCfg(
                 usd_path=self._assets_lib[asset_name].asset_file_path,
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=kinematic_enabled),
                 # collision_props=sim_utils.CollisionPropertiesCfg(),
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=p, rot=q),
+            init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=p, rot=q),
         )
         return asset_cfg.class_type(asset_cfg)
 
-    def _build_active_shelving(self, scene_data: dict, prim_path: str):
+    def _build_active_shelving(self, scene_data: dict, prim_path: str, env_id: int):
         active_fixtures_categories = [
             "active_shelvings",
             "active_wall_shelvings"
@@ -251,12 +259,14 @@ class SceneManager:
                 active_shelvings['shelvings'][fixture_name] = self._build_rigid_asset(
                     shelf_prim_path,
                     shelf_asset_name,
-                    kinematic_enabled=True
+                    kinematic_enabled=True,
+                    env_id=env_id
                 )
 
                 active_shelvings['items'][fixture_name] = self._build_arrangement(
                     shelf_xform_prim_path,
                     fixture_name,
+                    env_id=env_id
                 )
 
 
@@ -272,7 +282,7 @@ class SceneManager:
 
         return active_shelvings
 
-    def _build_arrangement(self, prim_path, fixture_name):
+    def _build_arrangement(self, prim_path, fixture_name, env_id):
         with open(Path(self.config_dir_path) / f'{fixture_name}.json') as f:
             shelf_arrangement = json.load(f)
 
@@ -298,6 +308,7 @@ class SceneManager:
                     f"{prim_path}/{obj_name.replace(':', '_').replace('.', '_')}",
                     asset_name,
                     p=p, q=q,
+                    env_id=env_id
                 )
 
         return arrangement
