@@ -66,10 +66,10 @@ def main():
     
     seed = args_cli.seed
     for n_episode in range(args_cli.num_episodes):
-        print(">>> reset")
-        env.reset(seed=seed)
-        for t in range(args_cli.episode_len):
-            with torch.inference_mode():
+        with torch.inference_mode():
+            print(">>> reset")
+            env.reset(seed=seed)
+            for t in range(args_cli.episode_len):
                 # joint_efforts = torch.randn_like(env.action_manager.action)
                 action = env.unwrapped.action_manager.action
                 action[:, -2] = 10.0
