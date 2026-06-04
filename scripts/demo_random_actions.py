@@ -41,7 +41,7 @@ from isaaclab_tasks.manager_based.manipulation.stack.config.franka.stack_ik_rel_
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.seed=args_cli.seed
-    env_cfg.scene.dsynth_scene.spawn.config_dir_path = args_cli.config_dir_path
+    env_cfg.scene.scene_config_dir_path = args_cli.config_dir_path
 
     if args_cli.video:
         env_cfg.viewer.origin_type = 'asset_root'
@@ -50,7 +50,7 @@ def main():
         env_cfg.viewer.lookat = (0.4, 0.0, 1.6)
     
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
-
+    
     if args_cli.video:
         new_traj_name = time.strftime("%Y%m%d_%H%M%S")
         video_folder = Path(args_cli.config_dir_path) / 'videos'

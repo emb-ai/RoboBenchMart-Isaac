@@ -24,21 +24,14 @@ from dsynth_isaac.scene.spawners import DsynthSceneCfg
 from dsynth_isaac.scene.scene_loader import load_scene
 import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events
 import dsynth_isaac.tasks.manager_based.mdp.ds_observations as ds_obs
+from dsynth_isaac.scene.env_subset_rigid_object_cfg import EnvSubsetRigidObjectCfg
+from dsynth_isaac.scene.darkstore_scene_cfg import DarkstoreInteractiveSceneCfg
 @configclass
-class DarkstoreSceneCfg(InteractiveSceneCfg):
+class DarkstoreSceneCfg(DarkstoreInteractiveSceneCfg):
     # robots: will be populated by agent env cfg
     robot: ArticulationCfg = MISSING
     # end-effector sensor: will be populated by agent env cfg
     ee_frame: FrameTransformerCfg = MISSING
-
-    #==== RoboBenchMart scene ====
-    dsynth_scene = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/dsynth_scene",
-        spawn=DsynthSceneCfg(
-            config_dir_path=MISSING
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
-    )
 
     dome_light = AssetBaseCfg(
         prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=1000.0, color=(0.35, 0.35, 0.35))

@@ -33,7 +33,6 @@ class EnvSubsetRigidObject(RigidObject):
             raise RuntimeError(f"Env ids {self.env_ids} are not unique.")
         
         self.env_ids = self.env_ids.tolist()
-        self.env_ids_pt = torch.from_numpy(self.env_ids).to(dtype=torch.int32, device=self.device)
 
         matching_prims = sim_utils.find_matching_prims(self.cfg.prim_path)
         if len(matching_prims) != len(self.env_ids):
@@ -231,3 +230,7 @@ class EnvSubsetRigidObject(RigidObject):
             indices,
             is_global
         )
+
+    def _create_buffers(self):
+        super()._create_buffers()
+        self.env_ids_pt = torch.tensor(self.env_ids, dtype=torch.int32, device=self.device)

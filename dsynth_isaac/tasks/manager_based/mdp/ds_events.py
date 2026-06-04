@@ -18,7 +18,8 @@ from isaaclab.sim.utils.stage import get_current_stage
 import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation
 
-from dsynth_isaac.scene.scene_manager import SceneManager
+from dsynth_isaac.scene.scene_builder import SceneBuilder
+from dsynth_isaac.scene.darkstore_scene import DarkstoreInteractiveScene
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -70,9 +71,9 @@ def set_default_base_pose(
     asset = env.scene[asset_cfg.name]
     
     env_ids_list = list(range(env.num_envs)) if env_ids is None else env_ids.tolist()
-    
-    manager: SceneManager = env.scene.cfg.dsynth_scene.spawn.manager
-    base_p, base_q = manager.get_robot_default_poses()
+    scene: DarkstoreInteractiveScene = env.scene
+    scene_builder: SceneBuilder = scene.scene_builder
+    base_p, base_q = scene_builder.get_robot_default_poses()
     
     new_poses = []
     p_offset = torch.tensor(p, device=env.device, dtype=torch.float32).unsqueeze(0)
@@ -252,9 +253,9 @@ def reset_items_uniform(
         velocity_range: dict[str, tuple[float, float]],
         asset_cfg: SceneEntityCfg = None,
     ):
-    manager: SceneManager = env.scene.cfg.dsynth_scene.spawn.manager
-    active_shelvings_xforms_poses = manager.get_active_shelvings_xforms_poses()
-    items = manager.get_item_entities()
+    scene_builder: SceneBuilder = env.scene.scene_builder
+    active_shelvings_xforms_poses = scene_builder.get_active_shelvings_xforms_poses()
+    items = scene_builder.get_item_entities()
 
     range_list = [pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
     pos_ranges = torch.tensor(range_list, device=env.device)
@@ -286,10 +287,10 @@ def reset_items_uniform(
                  # set into the physics simulation
                 item.write_root_pose_to_sim(
                     torch.cat([position_wrt_world, or_wrt_world], dim=-1),
-                    env_ids=torch.tensor([0], device=item.device))
+                    env_ids=torch.tensor([env_id], device=item.device))
                 item.write_root_velocity_to_sim(
                     velocities,
-                    env_ids=torch.tensor([0], device=item.device))
+                    env_ids=torch.tensor([env_id], device=item.device))
 
 def randomize_lights(env, env_ids, intensity_range=(10000.0, 30000.0),
                      color_range=((0.5, 0.5, 0.5), (1.0, 1.0, 1.0))):

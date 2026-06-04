@@ -5,7 +5,7 @@ from pxr import Usd
 from isaaclab.utils import configclass
 from isaaclab.sim.spawners.spawner_cfg import SpawnerCfg
 
-from dsynth_isaac.scene.scene_manager import SceneManager
+from dsynth_isaac.scene.scene_builder import SceneBuilder
 
  
 def load_dsynth_scene(prim_path: str,

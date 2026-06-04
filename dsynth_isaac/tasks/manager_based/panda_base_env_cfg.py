@@ -40,23 +40,23 @@ class PandaEventCfg(DsEventCfg):
         },
     )
     
-    init_franka_arm_pose = EventTerm(
-        func=franka_stack_events.set_default_joint_pose,
-        mode="reset",
-        params={
-            "default_pose": [0.0444, -0.1894, -0.1107, -2.5148, 0.0044, 2.3775, 0.6952, 0.0400, 0.0400],
-        },
-    )
+    # init_franka_arm_pose = EventTerm(
+    #     func=franka_stack_events.set_default_joint_pose,
+    #     mode="reset",
+    #     params={
+    #         "default_pose": [0.0444, -0.1894, -0.1107, -2.5148, 0.0044, 2.3775, 0.6952, 0.0400, 0.0400],
+    #     },
+    # )
 
-    randomize_franka_joint_state = EventTerm(
-        func=franka_stack_events.randomize_joint_by_gaussian_offset,
-        mode="reset",
-        params={
-            "mean": 0.0,
-            "std": 0.0,
-            "asset_cfg": SceneEntityCfg("robot"),
-        },
-    )
+    # randomize_franka_joint_state = EventTerm(
+    #     func=franka_stack_events.randomize_joint_by_gaussian_offset,
+    #     mode="reset",
+    #     params={
+    #         "mean": 0.0,
+    #         "std": 0.0,
+    #         "asset_cfg": SceneEntityCfg("robot"),
+    #     },
+    # )
     
 
 
