@@ -22,7 +22,7 @@ from dsynth_isaac.scene.env_subset_rigid_object_cfg import EnvSubsetRigidObjectC
 
 PI = np.pi # for brevity
 @dataclass
-class SceneManager:
+class SceneBuilder:
     config_dir_path: str = MISSING
     max_scenes: Optional[int] = None
     seed: int = 42
@@ -71,7 +71,7 @@ class SceneManager:
         env_entities = {'prim_path': prim_path}
         with open(Path(self.config_dir_path) / layout_json_path, "r") as f:
             scene_data = json.load(f)
-        env_entities['room'] = self._build_room(scene_data, prim_path)
+        env_entities['room'] = self._build_room(scene_data, prim_path, env_id)
 
         scene_data = self.choose_and_replace_active_shelving(scene_data)
         env_entities['inactive_shelvings'] = self._build_inactive_shelvings(scene_data, prim_path, env_id)
@@ -313,7 +313,7 @@ class SceneManager:
 
         return arrangement
 
-    def _build_room(self, scene_data: dict, prim_path: str):
+    def _build_room(self, scene_data: dict, prim_path: str, env_id: int):
         x_size = scene_data['size_x']
         y_size = scene_data['size_y']
 
@@ -333,8 +333,9 @@ class SceneManager:
 
         room = {}
         for i, (size, translation) in enumerate(zip(sizes, translations)):
-            wall_cfg = RigidObjectCfg(
+            wall_cfg = EnvSubsetRigidObjectCfg(
                 prim_path=f"{prim_path}/wall_{i}",
+                env_ids=[env_id],
                 spawn=sim_utils.CuboidCfg(size=size,
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                     collision_props=sim_utils.CollisionPropertiesCfg(),
@@ -344,12 +345,13 @@ class SceneManager:
                         texture_scale=(1., 1.)
                     ),
                 ),
-                init_state=RigidObjectCfg.InitialStateCfg(pos=translation),
+                init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=translation),
             )
-            room['wall_{i}'] = wall_cfg.class_type(wall_cfg)
+            room[f'wall_{i}'] = wall_cfg.class_type(wall_cfg)
 
-        # ceiling_cfg = RigidObjectCfg(
+        # ceiling_cfg = EnvSubsetRigidObjectCfg(
         #     prim_path=f"{prim_path}/ceiling",
+        #     env_ids=[env_id],
         #     spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
         #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
         #         collision_props=sim_utils.CollisionPropertiesCfg(),
@@ -359,12 +361,13 @@ class SceneManager:
         #             texture_scale=(1., 1.)
         #         ),
         #     ),
-        #     init_state=RigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, self.HEIGHT + self.THICKNESS / 2]),
+        #     init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, self.HEIGHT + self.THICKNESS / 2]),
         # )
         # room['ceiling'] = ceiling_cfg.class_type(ceiling_cfg)
 
-        floor_cfg = RigidObjectCfg(
+        floor_cfg = EnvSubsetRigidObjectCfg(
             prim_path=f"{prim_path}/floor",
+            env_ids=[env_id],
             spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
@@ -375,7 +378,7 @@ class SceneManager:
                 ),
                 physics_material=materials.RigidBodyMaterialCfg()
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, - self.THICKNESS / 2]),
+            init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, - self.THICKNESS / 2]),
         )
         room['floor'] = floor_cfg.class_type(floor_cfg)
 
@@ -404,6 +407,26 @@ class SceneManager:
             for active_shelf in self._entities[env_id]['active_shelving']['items'].keys():
                 item_entities[env_id][active_shelf] = self._entities[env_id]['active_shelving']['items'][active_shelf]
         return item_entities
+
+    def get_rigid_bodies(self):
+        rigid_bodies = {}
+        for env_id in self._entities.keys():
+            if not 'env_' in env_id:
+                continue
+            for active_shelf in self._entities[env_id]['active_shelving']['items'].keys():
+                rigid_body_key = f'[{env_id}]_[{active_shelf}]'
+                for item_name in self._entities[env_id]['active_shelving']['items'][active_shelf].keys():
+                    item_rigid_body_key = f'{rigid_body_key}_[{item_name}]'
+                    rigid_bodies[item_rigid_body_key] = self._entities[env_id]['active_shelving']['items'][active_shelf][item_name]
+                rigid_bodies[rigid_body_key] = self._entities[env_id]['active_shelving']['shelvings'][active_shelf]
+            for inactive_shelf in self._entities[env_id]['inactive_shelvings'].keys():
+                rigid_body_key = f'[{env_id}]_[{inactive_shelf}]'
+                rigid_bodies[rigid_body_key] = self._entities[env_id]['inactive_shelvings'][inactive_shelf]
+            
+            for scene_fixture in self._entities[env_id]['room'].keys():
+                rigid_body_key = f'[{env_id}]_[{scene_fixture}]'
+                rigid_bodies[rigid_body_key] = self._entities[env_id]['room'][scene_fixture]
+        return rigid_bodies
 
     # def get_items_poses(self):
     #     items_poses = {}
