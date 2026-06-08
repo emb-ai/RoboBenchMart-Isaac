@@ -1,5 +1,8 @@
 import numpy as np
+import torch
 
+from pxr import UsdGeom, Usd
+import omni.usd
 import isaaclab.utils.math as math_utils
 
 def np_normalize_vector(v):
@@ -102,3 +105,45 @@ def build_grasp_pose(approaching, closing, center):
     T[:3, :3] = np.stack([ortho, closing, approaching], axis=1)
     T[:3, 3] = center
     return T
+
+def np_make_pose(pos, quat):
+    return math_utils.make_pose(torch.tensor(pos), math_utils.matrix_from_quat(torch.tensor(quat))).cpu().numpy()
+
+def get_item_bbox(prim_path: str):
+    stage = omni.usd.get_context().get_stage()
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim.IsValid():
+        raise ValueError(f"Invalid prim path: {prim_path}")
+
+    xformable = UsdGeom.Xformable(prim)
+    T_world = xformable.ComputeLocalToWorldTransform(Usd.TimeCode.Default())  # Gf.Matrix4d
+    prim_world_pos = T_world.ExtractTranslation()
+    prim_world_quat = T_world.ExtractRotationQuat()
+    prim_world_quat = [prim_world_quat.GetReal(), *prim_world_quat.GetImaginary()]
+    T = np_make_pose(prim_world_pos, prim_world_quat)
+
+    bbox_cache = UsdGeom.BBoxCache(
+        Usd.TimeCode.Default(),
+        includedPurposes=[UsdGeom.Tokens.default_, UsdGeom.Tokens.render, UsdGeom.Tokens.proxy],
+        useExtentsHint=True,
+    )
+    # Object-space bbox (before world/parent transforms)
+    world_bbox = bbox_cache.ComputeWorldBound(prim)
+    aabb = world_bbox.ComputeAlignedBox()
+    bbox_min = np.array(aabb.GetMin())      # (x_min, y_min, z_min)
+    bbox_max = np.array(aabb.GetMax())      
+    bbox_center = 0.5 * (bbox_min + bbox_max)
+    T[:3, 3] = bbox_center
+    
+    local_bbox = bbox_cache.ComputeLocalBound(prim)
+    local_aabb = local_bbox.ComputeAlignedBox()
+    bbox_min_local = np.array(local_aabb.GetMin())
+    bbox_max_local = np.array(local_aabb.GetMax())
+    bbox_extents_local = bbox_max_local - bbox_min_local
+    
+    target_bbox = {
+        "center": bbox_center,
+        "transform": T,
+        "extents": bbox_extents_local
+    }
+    return target_bbox

@@ -22,12 +22,13 @@ from isaaclab.envs import ManagerBasedRLEnv
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.ui import ViewportCameraController
 from dsynth_isaac.scene.darkstore_scene import DarkstoreInteractiveScene
+from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
 
 # import logger
 logger = logging.getLogger(__name__)
 
 class DarkstoreManagerBasedRLEnv(ManagerBasedRLEnv):
-    def __init__(self, cfg: ManagerBasedRLEnvCfg, render_mode: str | None = None, **kwargs):
+    def __init__(self, cfg: DarkstoreBaseEnvCfg, render_mode: str | None = None, **kwargs):
         """Initialize the environment.
 
         Args:
