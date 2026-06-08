@@ -17,7 +17,7 @@ from isaaclab.sim.utils.stage import get_current_stage
 from dsynth_isaac.core.assets.asset import load_assets_lib
 from dsynth_isaac.core.scene_gen.utils import flatten_dict
 from dsynth_isaac.scene.utils import _get_absolute_matrix, _get_pq
-
+from dsynth_isaac.core.assets.asset import Asset
 from dsynth_isaac.scene.env_subset_rigid_object_cfg import EnvSubsetRigidObjectCfg
 
 PI = np.pi # for brevity
@@ -31,6 +31,7 @@ class SceneBuilder:
     THICKNESS = 0.2
 
     _entities: Dict[str, Any] = field(default_factory=dict)
+    _product_items: Dict[int, Any] = field(default_factory=dict)
     _assets_lib: Dict[str, Any] = field(default_factory=dict)
     _num_envs: int = 0
 
@@ -286,6 +287,9 @@ class SceneBuilder:
         with open(Path(self.config_dir_path) / f'{fixture_name}.json') as f:
             shelf_arrangement = json.load(f)
 
+        if env_id not in self._product_items:
+            self._product_items[env_id] = []
+
         nodes_dict = {}
         for node in shelf_arrangement["graph"]:
             nodes_dict[node[1]] = node
@@ -299,17 +303,24 @@ class SceneBuilder:
                 # q = [0.525322,  0, 0.8509035, 0]
                 # p += np.array([0.0, 0.0, 3.0])
                 asset_name = f'products_hierarchy.{obj_name.split(":")[0]}'
-                asset = self._assets_lib[asset_name]
+                asset: Asset = self._assets_lib[asset_name]
 
                 # usd api does not like colons and dots in the names
                 obj_name = obj_name.replace(':', '_').replace('.', '_')
+                item_prim_path = f"{prim_path}/{obj_name.replace(':', '_').replace('.', '_')}"
 
                 arrangement[obj_name] = self._build_rigid_asset(
-                    f"{prim_path}/{obj_name.replace(':', '_').replace('.', '_')}",
+                    item_prim_path,
                     asset_name,
                     p=p, q=q,
                     env_id=env_id
                 )
+                self._product_items[env_id].append({
+                    'item_id': f'[{env_id}]_[{fixture_name}]_[{obj_name}]',
+                    'asset_id': asset_name,
+                    'item_name_string': asset.asset_name,
+                    'item_prim_path': item_prim_path,
+                })
 
         return arrangement
 
