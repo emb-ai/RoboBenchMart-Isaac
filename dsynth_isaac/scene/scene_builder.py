@@ -22,7 +22,7 @@ from dsynth_isaac.scene.env_subset_rigid_object_cfg import EnvSubsetRigidObjectC
 
 PI = np.pi # for brevity
 @dataclass
-class SceneBuilder:
+class SceneBuilder: # TODO: redo builder
     config_dir_path: str = MISSING
     max_scenes: Optional[int] = None
     seed: int = 42
@@ -288,7 +288,7 @@ class SceneBuilder:
             shelf_arrangement = json.load(f)
 
         if env_id not in self._product_items:
-            self._product_items[env_id] = []
+            self._product_items[f'env_{env_id}'] = []
 
         nodes_dict = {}
         for node in shelf_arrangement["graph"]:
@@ -315,8 +315,8 @@ class SceneBuilder:
                     p=p, q=q,
                     env_id=env_id
                 )
-                self._product_items[env_id].append({
-                    'item_id': f'[{env_id}]_[{fixture_name}]_[{obj_name}]',
+                self._product_items[f'env_{env_id}'].append({
+                    'item_id': f'[env_{env_id}]_[{fixture_name}]_[{obj_name}]',
                     'asset_id': asset_name,
                     'item_name_string': asset.asset_name,
                     'item_prim_path': item_prim_path,

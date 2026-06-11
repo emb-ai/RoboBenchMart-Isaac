@@ -48,7 +48,7 @@ def main():
         env_cfg.viewer.asset_name = 'robot'
         env_cfg.viewer.eye = (1.0, 1.0, 2.0)
         env_cfg.viewer.lookat = (0.4, 0.0, 1.6)
-    
+    env_cfg.target_item_name_regex = ".*Nestle Honey*"
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
     
     if args_cli.video:
@@ -82,7 +82,8 @@ def main():
                 # action[0, 5] =  0.0
                 # action[0, 6] = 0.0
     # tensor([[-0.6635,  0.6894,  0.2776, -0.0860]], device='cuda:0')
-                _ = env.step(action)
+                obs, reward, terminated, truncated, info = env.step(action)
+                # print(obs)
         seed += 1
     env.close()
 

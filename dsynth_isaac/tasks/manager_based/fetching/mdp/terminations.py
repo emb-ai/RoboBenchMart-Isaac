@@ -11,13 +11,12 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import FrameTransformer
 
 if TYPE_CHECKING:
-    from isaaclab.envs import ManagerBasedRLEnv
+    from dsynth_isaac.tasks.manager_based.fetching.fetching_env import FetchingBaseEnv
 
 def target_object_grasped(
-    env: ManagerBasedRLEnv,
+    env: FetchingBaseEnv,
     robot_cfg: SceneEntityCfg,
     ee_frame_cfg: SceneEntityCfg,
-    object_cfg: SceneEntityCfg,
     diff_threshold: float = 0.06,
     force_threshold: float = 1.0,
 ) -> torch.Tensor: # finished here
@@ -29,11 +28,29 @@ def target_object_grasped(
 
     robot: Articulation = env.scene[robot_cfg.name]
     ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
-    object: RigidObject = env.scene[object_cfg.name]
+    scene = env.scene
+    # object: RigidObject = env.scene[object_cfg.name]
 
-    object_pos = object.data.root_pos_w
+    # object_pos = object.data.root_pos_w
+    # closest_item_ids = []
+    closest_items_pos = []
+    target_item_ids = env.get_target_items_ids()
+    for env_id in range(env.num_envs):
+        min_distance = float('inf')
+        for target_item_id in target_item_ids[env_id]:
+            scene_item = scene[target_item_id]
+            item_pos = scene_item.data.root_pos_w[0]
+            distance = torch.linalg.vector_norm(item_pos - ee_frame.data.target_pos_w[env_id, 0, :])
+            if distance < min_distance:
+                min_distance = distance
+                closest_item_id = target_item_id
+        # closest_item_ids.append(closest_item_id)
+        closest_items_pos.append(scene[closest_item_id].data.root_pos_w[0])
+    # closest_items_pos = torch.ones((env.num_envs, 3), device=env.device, dtype=torch.float32)
+    closest_items_pos = torch.stack(closest_items_pos, dim=0).to(env.device)
+
     end_effector_pos = ee_frame.data.target_pos_w[:, 0, :]
-    pose_diff = torch.linalg.vector_norm(object_pos - end_effector_pos, dim=1)
+    pose_diff = torch.linalg.vector_norm(closest_items_pos - end_effector_pos, dim=1)
 
     if "contact_grasp" in env.scene.keys() and env.scene["contact_grasp"] is not None:
         contact_force_grasp = env.scene["contact_grasp"].data.net_forces_w  # shape:(N, 2, 3) for two fingers
@@ -44,20 +61,20 @@ def target_object_grasped(
             contact_force_norm > force_threshold, dim=1
         )  # both fingers must exceed threshold
         grasped = torch.logical_and(pose_diff < diff_threshold, both_fingers_force_ok)
-    elif (
-        f"contact_grasp_{object_cfg.name}" in env.scene.keys()
-        and env.scene[f"contact_grasp_{object_cfg.name}"] is not None
-    ):
-        contact_force_object = env.scene[
-            f"contact_grasp_{object_cfg.name}"
-        ].data.net_forces_w  # shape:(N, 2, 3) for two fingers
-        contact_force_norm = torch.linalg.vector_norm(
-            contact_force_object, dim=2
-        )  # shape:(N, 2) - force magnitude per finger
-        both_fingers_force_ok = torch.all(
-            contact_force_norm > force_threshold, dim=1
-        )  # both fingers must exceed threshold
-        grasped = torch.logical_and(pose_diff < diff_threshold, both_fingers_force_ok)
+    # elif (
+    #     f"contact_grasp_{object_cfg.name}" in env.scene.keys()
+    #     and env.scene[f"contact_grasp_{object_cfg.name}"] is not None
+    # ):
+    #     contact_force_object = env.scene[
+    #         f"contact_grasp_{object_cfg.name}"
+    #     ].data.net_forces_w  # shape:(N, 2, 3) for two fingers
+    #     contact_force_norm = torch.linalg.vector_norm(
+    #         contact_force_object, dim=2
+    #     )  # shape:(N, 2) - force magnitude per finger
+    #     both_fingers_force_ok = torch.all(
+    #         contact_force_norm > force_threshold, dim=1
+    #     )  # both fingers must exceed threshold
+    #     grasped = torch.logical_and(pose_diff < diff_threshold, both_fingers_force_ok)
     else:
         grasped = (pose_diff < diff_threshold).clone().detach()
 
