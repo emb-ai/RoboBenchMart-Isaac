@@ -28,9 +28,10 @@ from dsynth_isaac.robots.fetch_cfg import FETCH_CONFIG
 import dsynth_isaac.tasks.manager_based.mdp.fetch_events as fetch_events
 from dsynth_isaac.devices.mobile_se3_keyboard import MobileSe3KeyboardCfg
 import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events
+from dsynth_isaac.tasks.manager_based.fetching.fetching_env_cfg import FetchAnyItemEnvCfg
 
 @configclass
-class PandaEventCfg(DsEventCfg):
+class FrankaEventCfg(DsEventCfg):
     """Configuration for events."""
     init_robot_base_pose = EventTerm(
         func=ds_events.set_default_base_pose,
@@ -40,28 +41,28 @@ class PandaEventCfg(DsEventCfg):
         },
     )
     
-    # init_franka_arm_pose = EventTerm(
-    #     func=franka_stack_events.set_default_joint_pose,
-    #     mode="reset",
-    #     params={
-    #         "default_pose": [0.0444, -0.1894, -0.1107, -2.5148, 0.0044, 2.3775, 0.6952, 0.0400, 0.0400],
-    #     },
-    # )
+    init_franka_arm_pose = EventTerm(
+        func=franka_stack_events.set_default_joint_pose,
+        mode="reset",
+        params={
+            "default_pose": [0.0444, -0.1894, -0.1107, -2.5148, 0.0044, 2.3775, 0.6952, 0.0400, 0.0400],
+        },
+    )
 
-    # randomize_franka_joint_state = EventTerm(
-    #     func=franka_stack_events.randomize_joint_by_gaussian_offset,
-    #     mode="reset",
-    #     params={
-    #         "mean": 0.0,
-    #         "std": 0.0,
-    #         "asset_cfg": SceneEntityCfg("robot"),
-    #     },
-    # )
+    randomize_franka_joint_state = EventTerm(
+        func=franka_stack_events.randomize_joint_by_gaussian_offset,
+        mode="reset",
+        params={
+            "mean": 0.0,
+            "std": 0.0,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
+    )
     
 
 
 @configclass
-class PandaBaseEnvCfg(DarkstoreBaseEnvCfg):
+class FrankaFetchAnyItemEnvCfg(FetchAnyItemEnvCfg):
     def __post_init__(self):
         # post init of parent
         super().__post_init__()
@@ -71,7 +72,7 @@ class PandaBaseEnvCfg(DarkstoreBaseEnvCfg):
         self.scene.robot.init_state.pos = (0, 0, 0)
         # self.scene.robot.init_state.rot = (0.7073883, 0, 0, 0.7068252)
 
-        self.events = PandaEventCfg()
+        self.events = FrankaEventCfg()
 
         self.actions.arm_action = mdp.JointPositionActionCfg(
             asset_name="robot", joint_names=["panda_joint.*"], scale=0.5, use_default_offset=True
@@ -82,6 +83,8 @@ class PandaBaseEnvCfg(DarkstoreBaseEnvCfg):
             open_command_expr={"panda_finger_.*": 0.04},
             close_command_expr={"panda_finger_.*": 0.0},
         )
+        self.gripper_open_val = 0.04
+        self.gripper_threshold = 0.005
 
         self.gripper_joint_names = ["panda_finger_.*"]
 
@@ -118,7 +121,7 @@ class PandaBaseEnvCfg(DarkstoreBaseEnvCfg):
         )
 
 @configclass
-class PandaIKBaseEnvCfg(PandaBaseEnvCfg):
+class FrankaIKRelFetchAnyItemEnvCfg(FrankaFetchAnyItemEnvCfg):
 
     def __post_init__(self):
         # post init of parent
@@ -145,7 +148,7 @@ class PandaIKBaseEnvCfg(PandaBaseEnvCfg):
         )
 
 @configclass
-class PandaDsynthIKRelMimicEnvCfg(PandaIKBaseEnvCfg, FrankaCubeStackIKRelMimicEnvCfg):
+class FrankaDsynthIKRelMimicEnvCfg(FrankaIKRelFetchAnyItemEnvCfg, FrankaCubeStackIKRelMimicEnvCfg):
     """
     Isaac Lab Mimic environment config class for Franka Cube Stack IK Rel env.
     """
