@@ -463,3 +463,8 @@ class SceneBuilder: # TODO: redo builder
     def reset_items(self, env_ids: torch.Tensor, env_origins: torch.Tensor):
         pass
 
+    def get_shelf_by_item_id(self, env_id: int, item_id: str):
+        for active_shelf in self._entities[env_id]['active_shelving']['items'].keys():
+            if item_id in self._entities[env_id]['active_shelving']['items'][active_shelf].keys():
+                return active_shelf
+        return None

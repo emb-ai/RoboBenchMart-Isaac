@@ -26,10 +26,11 @@ class FetchingBaseEnv(DarkstoreManagerBasedRLEnv):
     def get_language_instruction(self):
         pass
 
-class FetchAnyItemEnv(FetchingBaseEnv):
+class FetchItemEnv(FetchingBaseEnv):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._cached_target_items = dict()
+        self._grasped_items = {i: None for i in range(self.num_envs)}
 
     def setup_target_items(self, env_ids):
         env_cfg: FetchAnyItemEnvCfg = self.cfg
@@ -57,3 +58,15 @@ class FetchAnyItemEnv(FetchingBaseEnv):
         if len(self._cached_target_items) == 0:
             raise RuntimeError("Target items not setup. Call setup_target_items first.")
         return self._cached_target_items
+
+    def set_grasped_item(self, env_id: int, item_id: str):
+        self._grasped_items[env_id] = item_id
+
+    def get_grasped_item(self, env_id: int):
+        return self._grasped_items[env_id]
+
+    def clear_grasped_item(self, env_id: int):
+        self._grasped_items[env_id] = None
+
+    def get_language_instruction(self):
+        return self.cfg.language_instruction

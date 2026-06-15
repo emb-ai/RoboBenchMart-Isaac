@@ -28,6 +28,7 @@ import torch
 import numpy as np
 from pathlib import Path
 import time
+import tqdm
 import gymnasium as gym
 
 from isaaclab.envs import ManagerBasedEnv
@@ -69,7 +70,7 @@ def main():
         with torch.inference_mode():
             print(">>> reset")
             env.reset(seed=seed)
-            for t in range(args_cli.episode_len):
+            for t in tqdm.tqdm(range(args_cli.episode_len), total=args_cli.episode_len, desc="Elapsed steps"):
                 # joint_efforts = torch.randn_like(env.action_manager.action)
                 action = env.unwrapped.action_manager.action
                 action[:, -2] = 10.0
@@ -83,7 +84,7 @@ def main():
                 # action[0, 6] = 0.0
     # tensor([[-0.6635,  0.6894,  0.2776, -0.0860]], device='cuda:0')
                 obs, reward, terminated, truncated, info = env.step(action)
-                # print(obs)
+                print(info)
         seed += 1
     env.close()
 

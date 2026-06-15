@@ -9,15 +9,24 @@ from isaaclab.managers import SceneEntityCfg
 
 from dsynth_isaac.tasks.manager_based.darkstore_manager_based_rl_env import DarkstoreManagerBasedRLEnv
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
-from dsynth_isaac.tasks.manager_based.fetching.mdp.terminations import target_object_grasped
+import dsynth_isaac.tasks.manager_based.fetching.mdp.terminations as mdp_term
 
 @configclass
-class FetchAnyItemEnvTerminationsCfg:
+class FetchItemEnvCfg(DarkstoreBaseEnvCfg):
+    """Configuration for the fetching environment."""
+
+    # regex for the human-readable name of the target item, e.g. "milk" or ".*Nivea*" etc.
+    target_item_name_regex: str = MISSING
+    language_instruction: str = MISSING
+
+
+@configclass
+class GraspAnyItemEnvTerminationsCfg:
     """Termination terms for the MDP."""
 
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
-    success = DoneTerm(func=target_object_grasped,
+    success = DoneTerm(func=mdp_term.target_object_grasped,
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
@@ -25,13 +34,34 @@ class FetchAnyItemEnvTerminationsCfg:
     )
 
 @configclass
-class FetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
-    """Configuration for the fetching environment."""
-    target_item_name_regex: str = MISSING
+class GraspAnyItemEnvCfg(FetchItemEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.terminations = GraspAnyItemEnvTerminationsCfg()
+        self.language_instruction = f"Grasp any {self.target_item_name_regex} item"
 
+
+@configclass
+class FetchAnyItemEnvTerminationsCfg:
+    """Termination terms for the MDP."""
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+
+    success = DoneTerm(func=mdp_term.target_object_grasped,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+            "ee_frame_cfg": SceneEntityCfg("ee_frame"),
+        },
+    )
+
+    is_pulled = DoneTerm(func=mdp_term.is_pulled,
+        params={
+            "robot_cfg": SceneEntityCfg("robot"),
+        },
+    )
+
+@configclass
+class FetchAnyItemEnvCfg(FetchItemEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.terminations = FetchAnyItemEnvTerminationsCfg()
-
-    
-    
+        self.language_instruction = f"Fetch any {self.target_item_name_regex} item"

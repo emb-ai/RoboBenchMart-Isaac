@@ -28,6 +28,9 @@ from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnv
 logger = logging.getLogger(__name__)
 
 class DarkstoreManagerBasedRLEnv(ManagerBasedRLEnv):
+    """
+    Subclass of ManagerBasedRLEnv but with DarkstoreInteractiveScene instead of InteractiveScene.
+    """
     def __init__(self, cfg: DarkstoreBaseEnvCfg, render_mode: str | None = None, **kwargs):
         """Initialize the environment.
 

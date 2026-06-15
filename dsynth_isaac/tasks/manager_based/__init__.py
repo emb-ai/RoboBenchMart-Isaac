@@ -21,7 +21,7 @@ import gymnasium as gym
 
 gym.register(
     id="Dsynth-Fetch-Any-Item-Franka-v0",
-    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchAnyItemEnv",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
     kwargs={
         "env_cfg_entry_point": f"{__name__}.franka_env_cfg:FrankaFetchAnyItemEnvCfg",
     },
@@ -39,7 +39,7 @@ gym.register(
 
 gym.register(
     id="Dsynth-Fetch-Any-Item-Franka-IK-Rel-v0",
-    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchAnyItemEnv",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
     kwargs={
         "env_cfg_entry_point": f"{__name__}.franka_env_cfg:FrankaIKRelFetchAnyItemEnvCfg",
     },
