@@ -35,6 +35,7 @@ class DarkstoreInteractiveScene(InteractiveScene):
         )
         self.scene_builder.build(f'{self.env_regex_ns}/dsynth_scene')
         self._rigid_objects.update(self.scene_builder.get_rigid_bodies())
+        self._sensors.update(self.scene_builder._contact_grasps)
 
         objects_per_env = {i: [] for i in range(self.cfg.num_envs)}
         for obj_name, obj in self._rigid_objects.items():

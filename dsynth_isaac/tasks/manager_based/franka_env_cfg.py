@@ -68,6 +68,7 @@ class FrankaFetchAnyItemEnvCfg(FetchAnyItemEnvCfg):
         super().__post_init__()
 
         self.scene.robot = FRANKA_PANDA_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.spawn.activate_contact_sensors = True
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
         self.scene.robot.init_state.pos = (0, 0, 0)
         # self.scene.robot.init_state.rot = (0.7073883, 0, 0, 0.7068252)
@@ -127,6 +128,7 @@ class FrankaIKRelFetchAnyItemEnvCfg(FrankaFetchAnyItemEnvCfg):
         # post init of parent
         super().__post_init__()
         self.scene.robot = FRANKA_PANDA_HIGH_PD_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.spawn.activate_contact_sensors = True
         # self.scene.robot.init_state.rot = (0.7073883, 0, 0, 0.7068252)
         self.actions.arm_action = DifferentialInverseKinematicsActionCfg(
             asset_name="robot",

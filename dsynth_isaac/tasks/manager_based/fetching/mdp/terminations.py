@@ -20,8 +20,8 @@ def target_object_grasped(
     env: FetchingBaseEnv,
     robot_cfg: SceneEntityCfg,
     ee_frame_cfg: SceneEntityCfg,
-    diff_threshold: float = 0.06,
     force_threshold: float = 1.0,
+    diff_tol: float = 0.04,
 ) -> torch.Tensor: # finished here
     """
     Check if an object is grasped by the specified robot.
@@ -41,11 +41,15 @@ def target_object_grasped(
     target_item_ids = env.get_target_items_ids()
     for env_id in range(env.num_envs):
         if env.get_grasped_item(env_id) is not None:
+            grasped_item_id = env.get_grasped_item(env_id)
+            # item_bbox = get_item_bbox(scene[grasped_item_id].cfg.prim_path)
+            # diff_threshold = max(item_bbox['extents'])
+            diff_threshold = 0.1
             is_item_grasped = object_grasped(env,
                 robot_cfg,
                 ee_frame_cfg,
-                SceneEntityCfg(env.get_grasped_item(env_id)),
-                diff_threshold=diff_threshold,
+                SceneEntityCfg(grasped_item_id),
+                diff_threshold=diff_threshold / 2 + diff_tol,
                 force_threshold=force_threshold,
             )
             if is_item_grasped:
@@ -63,11 +67,14 @@ def target_object_grasped(
                 min_distance = distance
                 closest_item_id = target_item_id
         # closest_item_ids.append(closest_item_id)
+        # item_bbox = get_item_bbox(scene[closest_item_id].cfg.prim_path)
+        # diff_threshold = max(item_bbox['extents'])
+        diff_threshold = 0.1
         is_item_grasped = object_grasped(env,
                 robot_cfg,
                 ee_frame_cfg,
                 SceneEntityCfg(closest_item_id),
-                diff_threshold=diff_threshold,
+                diff_threshold=diff_threshold / 2 + diff_tol,
                 force_threshold=force_threshold,
             )
         if is_item_grasped:
@@ -106,10 +113,10 @@ def is_pulled(
     for env_id in range(env.num_envs):
         if env.get_grasped_item(env_id) is not None:
             item_id = env.get_grasped_item(env_id)
-            item_bbox = get_item_bbox(scene[item_id].prim_path)
+            item_bbox = get_item_bbox(scene[item_id].cfg.prim_path)
             shelf_name = scene_builder.get_shelf_by_item_id(env_id, item_id)
             shelf = scene[shelf_name]
-            shelf_bbox = get_item_bbox(shelf.prim_path)
+            shelf_bbox = get_item_bbox(shelf.cfg.prim_path)
             if bboxes_intersect(item_bbox, shelf_bbox):
                 pulled[env_id] = True
 

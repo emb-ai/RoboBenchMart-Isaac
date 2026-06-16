@@ -113,8 +113,9 @@ def main() -> None:
         env_cfg = remove_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
 
-    env_cfg.scene.dsynth_scene.spawn.config_dir_path = "generated_envs/isaac_sample"
-
+    env_cfg.scene.scene_config_dir_path = "generated_envs/isaac_sample"
+    env_cfg.target_item_name_regex = ".*Nestle Honey*"
+    
     try:
         # create environment
         env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
@@ -263,7 +264,8 @@ def main() -> None:
                 # process actions
                 actions = action.repeat(env.num_envs, 1)
                 # apply actions
-                env.step(actions)
+                obs, reward, terminated, truncated, info = env.step(actions)
+                print(info)
             else:
                 env.sim.render()
 

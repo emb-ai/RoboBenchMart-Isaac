@@ -20,8 +20,6 @@ from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
 
 import isaaclab.envs.mdp as mdp
 
-from dsynth_isaac.scene.spawners import DsynthSceneCfg
-from dsynth_isaac.scene.scene_loader import load_scene
 import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events
 import dsynth_isaac.tasks.manager_based.mdp.ds_observations as ds_obs
 from dsynth_isaac.scene.env_subset_rigid_object_cfg import EnvSubsetRigidObjectCfg

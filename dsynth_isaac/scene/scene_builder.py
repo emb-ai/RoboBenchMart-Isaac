@@ -13,6 +13,7 @@ from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.sim.spawners import materials
 from isaacsim.core.prims import XFormPrim
 from isaaclab.sim.utils.stage import get_current_stage
+from isaaclab.sensors import ContactSensor, ContactSensorCfg
 
 from dsynth_isaac.core.assets.asset import load_assets_lib
 from dsynth_isaac.core.scene_gen.utils import flatten_dict
@@ -32,6 +33,7 @@ class SceneBuilder: # TODO: redo builder
 
     _entities: Dict[str, Any] = field(default_factory=dict)
     _product_items: Dict[int, Any] = field(default_factory=dict)
+    _contact_grasps: Dict[int, Any] = field(default_factory=dict)
     _assets_lib: Dict[str, Any] = field(default_factory=dict)
     _num_envs: int = 0
 
@@ -204,7 +206,8 @@ class SceneBuilder: # TODO: redo builder
         p=[0., 0., 0.],
         q=[1., 0., 0., 0.],
         kinematic_enabled=False,
-        env_id=0
+        env_id=0,
+        activate_contact_sensors=False,
     ):
         asset_cfg = EnvSubsetRigidObjectCfg(
             prim_path=prim_path,
@@ -212,6 +215,7 @@ class SceneBuilder: # TODO: redo builder
             spawn=sim_utils.UsdFileCfg(
                 usd_path=self._assets_lib[asset_name].asset_file_path,
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=kinematic_enabled),
+                activate_contact_sensors=activate_contact_sensors,
                 # collision_props=sim_utils.CollisionPropertiesCfg(),
             ),
             init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=p, rot=q),
@@ -313,7 +317,8 @@ class SceneBuilder: # TODO: redo builder
                     item_prim_path,
                     asset_name,
                     p=p, q=q,
-                    env_id=env_id
+                    env_id=env_id,
+                    activate_contact_sensors=False,
                 )
                 self._product_items[f'env_{env_id}'].append({
                     'item_id': f'[env_{env_id}]_[{fixture_name}]_[{obj_name}]',
@@ -321,6 +326,25 @@ class SceneBuilder: # TODO: redo builder
                     'item_name_string': asset.asset_name,
                     'item_prim_path': item_prim_path,
                 })
+                # self._contact_grasps[f'contact_grasp_[env_{env_id}]_[{fixture_name}]_[{obj_name}]'] = ContactSensor(
+                #     ContactSensorCfg(
+                #         prim_path=item_prim_path,
+                #         update_period=0.0,
+                #         history_length=6,
+                #         debug_vis=True,
+                #         filter_prim_paths_expr=[f"/World/envs/env_{env_id}/Robot/panda_rightfinger",
+                #         f"/World/envs/env_{env_id}/Robot/panda_leftfinger"],
+                #     )
+                # )
+                self._contact_grasps[f'contact_grasp_[env_{env_id}]_[{fixture_name}]_[{obj_name}]'] = ContactSensor(
+                    ContactSensorCfg(
+                        prim_path=f"/World/envs/env_{env_id}/Robot/panda_.*finger",
+                        update_period=0.2,
+                        history_length=6,
+                        debug_vis=True,
+                        filter_prim_paths_expr=[item_prim_path],
+                    )
+                )
 
         return arrangement
 
