@@ -53,5 +53,10 @@ class FetchItemEnv(FetchingBaseEnv):
             self._cached_target_items[env_id] = [target_item_info['item_id'] for target_item_info in target_items_infos]
             logger.info(f"Found {len(target_items_infos)} target items for env {env_id} with name regex {target_item_name_regex}")
 
+    def get_target_items_ids(self):
+        if len(self._cached_target_items) == 0:
+            raise RuntimeError("Target items not setup. Call setup_target_items first.")
+        return self._cached_target_items
+
     def get_language_instruction(self):
         return self.cfg.language_instruction

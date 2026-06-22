@@ -81,7 +81,6 @@ import sys
 sys.path.append('.')
 import dsynth_isaac.tasks.manager_based
 
-from dsynth_isaac.tasks.manager_based.fetch_base_env_cfg import FetchBaseEnvCfg, FetchIKBaseEnvCfg
 from dsynth_isaac.devices.mobile_se3_keyboard import MobileSe3Keyboard
 
 # import logger

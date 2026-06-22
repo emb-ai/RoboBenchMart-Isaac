@@ -60,39 +60,40 @@ def target_object_grasped(
     grasped = torch.zeros((env.num_envs,), device=env.device, dtype=torch.bool)
     for env_idx in range(env.num_envs):
         contact_sensor_name = f"contact_grasp_[env_{env_idx}]"
-        contact_data = env.scene[contact_sensor_name].data
-        contact_force_grasp = contact_data.net_forces_w # shape:(1, 2, 3) for two fingers
-        contact_force_norm = torch.linalg.vector_norm(
-            contact_force_grasp, dim=2
-        )  # shape:(1, 2) - force magnitude per finger
-        both_fingers_force_ok = torch.all(
-            contact_force_norm > force_threshold, dim=1
-        )  # both fingers must exceed threshold
+        if contact_sensor_name in env.scene.keys():
+            contact_data = env.scene[contact_sensor_name].data
+            contact_force_grasp = contact_data.net_forces_w # shape:(1, 2, 3) for two fingers
+            contact_force_norm = torch.linalg.vector_norm(
+                contact_force_grasp, dim=2
+            )  # shape:(1, 2) - force magnitude per finger
+            both_fingers_force_ok = torch.all(
+                contact_force_norm > force_threshold, dim=1
+            )  # both fingers must exceed threshold
 
-        contact_pos_w = contact_data.contact_pos_w
-        non_nan_ids_left = ~torch.isnan(contact_pos_w[0, 0, :, 0])
-        non_nan_ids_right = ~torch.isnan(contact_pos_w[0, 1, :, 0])
-        non_nan_ids = torch.where(non_nan_ids_left & non_nan_ids_right)[0]
-        if len(non_nan_ids) > 0:
-            obj_id = non_nan_ids[0].item()
-            grapsed_item_path = scene_builder._all_item_prim_paths[f"env_{env_idx}"][obj_id]
-            grasped_item_id = next(
-                (
-                    item_info["item_id"]
-                    for item_info in scene_builder._product_items[f"env_{env_idx}"]
-                    if item_info["item_prim_path"] == grapsed_item_path
-                ),
-                None,
-            )
-            if grasped_item_id is not None and grasped_item_id in target_item_ids[env_idx]:
-                grasped[env_idx] = both_fingers_force_ok[0]
-        
-            if check_if_pulled and grasped_item_id is not None and grasped[env_idx]:
-                grasped_object = scene[grasped_item_id]
-                grasped_object_pos = grasped_object.data.root_pos_w[0]
-                shelf = scene_builder.get_shelf_by_item_id(env_idx, grasped_item_id)
-                shelf_bbox = get_item_bbox(shelf.cfg.prim_path)
-                if point_inside_bbox(grasped_object_pos, shelf_bbox, env.device, outside_distance=outside_distance):
-                    grasped[env_idx] = False
+            contact_pos_w = contact_data.contact_pos_w
+            non_nan_ids_left = ~torch.isnan(contact_pos_w[0, 0, :, 0])
+            non_nan_ids_right = ~torch.isnan(contact_pos_w[0, 1, :, 0])
+            non_nan_ids = torch.where(non_nan_ids_left & non_nan_ids_right)[0]
+            if len(non_nan_ids) > 0:
+                obj_id = non_nan_ids[0].item()
+                grapsed_item_path = scene_builder._all_item_prim_paths[f"env_{env_idx}"][obj_id]
+                grasped_item_id = next(
+                    (
+                        item_info["item_id"]
+                        for item_info in scene_builder._product_items[f"env_{env_idx}"]
+                        if item_info["item_prim_path"] == grapsed_item_path
+                    ),
+                    None,
+                )
+                if grasped_item_id is not None and grasped_item_id in target_item_ids[env_idx]:
+                    grasped[env_idx] = both_fingers_force_ok[0]
+            
+                if check_if_pulled and grasped_item_id is not None and grasped[env_idx]:
+                    grasped_object = scene[grasped_item_id]
+                    grasped_object_pos = grasped_object.data.root_pos_w[0]
+                    shelf = scene_builder.get_shelf_by_item_id(env_idx, grasped_item_id)
+                    shelf_bbox = get_item_bbox(shelf.cfg.prim_path)
+                    if point_inside_bbox(grasped_object_pos, shelf_bbox, env.device, outside_distance=outside_distance):
+                        grasped[env_idx] = False
 
     return grasped

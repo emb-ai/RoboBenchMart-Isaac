@@ -20,10 +20,11 @@ import isaaclab.envs.mdp as mdp
 
 
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg, DsEventCfg
-from dsynth_isaac.robots.fetch_cfg import FETCH_CONFIG
+from dsynth_isaac.robots.fetch_cfg import FETCHBOT_CONFIG
 import dsynth_isaac.tasks.manager_based.mdp.fetch_events as fetch_events
 import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events
 from dsynth_isaac.devices.mobile_se3_keyboard import MobileSe3KeyboardCfg
+from dsynth_isaac.tasks.manager_based.fetching.fetching_env_cfg import FetchAnyItemEnvCfg
 
 ARM_JOINT_NAMES = ["shoulder_pan_joint",
         "shoulder_lift_joint",
@@ -60,19 +61,21 @@ class FetchEventCfg(DsEventCfg):
         func=fetch_events.set_default_joint_pose,
         mode="reset",
         params={
-            "default_pose": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, ],
+            "default_pose": [0.0, 0.0, 0.0, 0.0, 0.0, -1.28, 1.51, 0.35, 1.81, 0.0, 1.47, 0.0, 0.1, 0.1, ],
         },
     )
 
 @configclass
-class FetchBaseEnvCfg(DarkstoreBaseEnvCfg):
+class FetchbotAnyItemEnvCfg(FetchAnyItemEnvCfg):
     def __post_init__(self):
         # post init of parent
         super().__post_init__()
 
-        self.scene.robot = FETCH_CONFIG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot = FETCHBOT_CONFIG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.spawn.activate_contact_sensors = True
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
         self.scene.robot.init_state.pos = (0, 0, 0)
+        self.scene.robot_fingers_contact_prim_path = '{ENV_REGEX_NS}/Robot/fetch/*._gripper_finger_link'
 
         self.scene.head_camera = CameraCfg(
             prim_path="{ENV_REGEX_NS}/Robot/fetch/head_tilt_link/head_camera_link/head_camera_rgb_frame/head_camera_rgb_optical_frame/HeadCameraRGBFrame",
@@ -95,6 +98,8 @@ class FetchBaseEnvCfg(DarkstoreBaseEnvCfg):
 
         self.actions = FetchActionsCfg()
         self.events = FetchEventCfg()
+        self.gripper_open_val = 0.04
+        self.gripper_threshold = 0.005
 
         self.gripper_joint_names = ['l_gripper_finger_joint', 'r_gripper_finger_joint']
 
@@ -119,7 +124,7 @@ class FetchBaseEnvCfg(DarkstoreBaseEnvCfg):
 
 
 @configclass
-class FetchIKBaseEnvCfg(FetchBaseEnvCfg):
+class FetchbotIKRelAnyItemEnvCfg(FetchbotAnyItemEnvCfg):
 
     def __post_init__(self):
         # post init of parent
@@ -144,59 +149,59 @@ class FetchIKBaseEnvCfg(FetchBaseEnvCfg):
             }
         )
 
-@configclass
-class FetchDsynthIKRelMimicEnvCfg(FetchIKBaseEnvCfg, FrankaCubeStackIKRelMimicEnvCfg):
-    """
-    Isaac Lab Mimic environment config class for Franka Cube Stack IK Rel env.
-    """
+# @configclass
+# class FetchDsynthIKRelMimicEnvCfg(FetchIKBaseEnvCfg, FrankaCubeStackIKRelMimicEnvCfg):
+#     """
+#     Isaac Lab Mimic environment config class for Franka Cube Stack IK Rel env.
+#     """
 
-    def __post_init__(self):
-        # post init of parents
-        super().__post_init__()
-        # # TODO: Figure out how we can move this to the MimicEnvCfg class
-        # # The __post_init__() above only calls the init for FrankaCubeStackEnvCfg and not MimicEnvCfg
-        # # https://stackoverflow.com/questions/59986413/achieving-multiple-inheritance-using-python-dataclasses
+#     def __post_init__(self):
+#         # post init of parents
+#         super().__post_init__()
+#         # # TODO: Figure out how we can move this to the MimicEnvCfg class
+#         # # The __post_init__() above only calls the init for FrankaCubeStackEnvCfg and not MimicEnvCfg
+#         # # https://stackoverflow.com/questions/59986413/achieving-multiple-inheritance-using-python-dataclasses
 
-        # Override the existing values
-        self.datagen_config.name = "demo_src_stack_isaac_lab_task_D0"
-        self.datagen_config.generation_guarantee = True
-        self.datagen_config.generation_keep_failed = True
-        self.datagen_config.generation_num_trials = 10
-        self.datagen_config.generation_select_src_per_subtask = True
-        self.datagen_config.generation_transform_first_robot_pose = False
-        self.datagen_config.generation_interpolate_from_last_target_pose = True
-        self.datagen_config.generation_relative = True
-        self.datagen_config.max_num_failures = 25
-        self.datagen_config.seed = 1
+#         # Override the existing values
+#         self.datagen_config.name = "demo_src_stack_isaac_lab_task_D0"
+#         self.datagen_config.generation_guarantee = True
+#         self.datagen_config.generation_keep_failed = True
+#         self.datagen_config.generation_num_trials = 10
+#         self.datagen_config.generation_select_src_per_subtask = True
+#         self.datagen_config.generation_transform_first_robot_pose = False
+#         self.datagen_config.generation_interpolate_from_last_target_pose = True
+#         self.datagen_config.generation_relative = True
+#         self.datagen_config.max_num_failures = 25
+#         self.datagen_config.seed = 1
 
-        # The following are the subtask configurations for the stack task.
-        subtask_configs = []
-        subtask_configs.append(
-            SubTaskConfig(
-                # Each subtask involves manipulation with respect to a single object frame.
-                object_ref="cube_2",
-                # This key corresponds to the binary indicator in "datagen_info" that signals
-                # when this subtask is finished (e.g., on a 0 to 1 edge).
-                subtask_term_signal="grasp_1",
-                # Specifies time offsets for data generation when splitting a trajectory into
-                # subtask segments. Random offsets are added to the termination boundary.
-                subtask_term_offset_range=(10, 20),
-                # Selection strategy for the source subtask segment during data generation
-                selection_strategy="nearest_neighbor_object",
-                # Optional parameters for the selection strategy function
-                selection_strategy_kwargs={"nn_k": 3},
-                # Amount of action noise to apply during this subtask
-                action_noise=0.03,
-                # Number of interpolation steps to bridge to this subtask segment
-                num_interpolation_steps=5,
-                # Additional fixed steps for the robot to reach the necessary pose
-                num_fixed_steps=0,
-                # If True, apply action noise during the interpolation phase and execution
-                apply_noise_during_interpolation=False,
-                description="Grasp red cube",
-                next_subtask_description="Stack red cube on top of blue cube",
-            )
-        )
+#         # The following are the subtask configurations for the stack task.
+#         subtask_configs = []
+#         subtask_configs.append(
+#             SubTaskConfig(
+#                 # Each subtask involves manipulation with respect to a single object frame.
+#                 object_ref="cube_2",
+#                 # This key corresponds to the binary indicator in "datagen_info" that signals
+#                 # when this subtask is finished (e.g., on a 0 to 1 edge).
+#                 subtask_term_signal="grasp_1",
+#                 # Specifies time offsets for data generation when splitting a trajectory into
+#                 # subtask segments. Random offsets are added to the termination boundary.
+#                 subtask_term_offset_range=(10, 20),
+#                 # Selection strategy for the source subtask segment during data generation
+#                 selection_strategy="nearest_neighbor_object",
+#                 # Optional parameters for the selection strategy function
+#                 selection_strategy_kwargs={"nn_k": 3},
+#                 # Amount of action noise to apply during this subtask
+#                 action_noise=0.03,
+#                 # Number of interpolation steps to bridge to this subtask segment
+#                 num_interpolation_steps=5,
+#                 # Additional fixed steps for the robot to reach the necessary pose
+#                 num_fixed_steps=0,
+#                 # If True, apply action noise during the interpolation phase and execution
+#                 apply_noise_during_interpolation=False,
+#                 description="Grasp red cube",
+#                 next_subtask_description="Stack red cube on top of blue cube",
+#             )
+#         )
         # subtask_configs.append(
         #     SubTaskConfig(
         #         # Each subtask involves manipulation with respect to a single object frame.
@@ -265,4 +270,4 @@ class FetchDsynthIKRelMimicEnvCfg(FetchIKBaseEnvCfg, FrankaCubeStackIKRelMimicEn
         #         apply_noise_during_interpolation=False,
         #     )
         # )
-        self.subtask_configs["fetch"] = subtask_configs
+        # self.subtask_configs["fetch"] = subtask_configs
