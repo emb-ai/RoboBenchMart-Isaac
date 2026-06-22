@@ -395,21 +395,21 @@ class SceneBuilder: # TODO: redo builder
             )
             room[f'wall_{i}'] = wall_cfg.class_type(wall_cfg)
 
-        # ceiling_cfg = EnvSubsetRigidObjectCfg(
-        #     prim_path=f"{prim_path}/ceiling",
-        #     env_ids=[env_id],
-        #     spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
-        #         rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-        #         collision_props=sim_utils.CollisionPropertiesCfg(),
-        #         visual_material=sim_utils.MdlFileCfg(
-        #             mdl_path="assets_usd/mdl/bricks3/bricks3.mdl",
-        #             project_uvw=True,
-        #             texture_scale=(1., 1.)
-        #         ),
-        #     ),
-        #     init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, self.HEIGHT + self.THICKNESS / 2]),
-        # )
-        # room['ceiling'] = ceiling_cfg.class_type(ceiling_cfg)
+        ceiling_cfg = EnvSubsetRigidObjectCfg(
+            prim_path=f"{prim_path}/ceiling",
+            env_ids=[env_id],
+            spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
+                rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+                collision_props=sim_utils.CollisionPropertiesCfg(),
+                visual_material=sim_utils.MdlFileCfg(
+                    mdl_path="assets_usd/mdl/bricks3/bricks3.mdl",
+                    project_uvw=True,
+                    texture_scale=(1., 1.)
+                ),
+            ),
+            init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, self.HEIGHT + self.THICKNESS / 2]),
+        )
+        room['ceiling'] = ceiling_cfg.class_type(ceiling_cfg)
 
         floor_cfg = EnvSubsetRigidObjectCfg(
             prim_path=f"{prim_path}/floor",

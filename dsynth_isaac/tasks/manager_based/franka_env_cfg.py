@@ -25,7 +25,6 @@ import isaaclab.utils.math as PoseUtils
 from isaaclab.sensors import ContactSensorCfg
 
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg, DsEventCfg
-from dsynth_isaac.robots.fetch_cfg import FETCH_CONFIG
 import dsynth_isaac.tasks.manager_based.mdp.fetch_events as fetch_events
 from dsynth_isaac.devices.mobile_se3_keyboard import MobileSe3KeyboardCfg
 import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events

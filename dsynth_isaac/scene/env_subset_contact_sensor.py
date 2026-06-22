@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 class EnvSubsetContactSensor(ContactSensor):
     """
-    A rigid object that exists only in a subset of environments.
+    A sensor that exists only in a subset of environments.
     """
 
     cfg: EnvSubsetContactSensorCfg
