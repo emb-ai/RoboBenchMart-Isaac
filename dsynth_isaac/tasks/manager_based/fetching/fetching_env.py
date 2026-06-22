@@ -30,7 +30,6 @@ class FetchItemEnv(FetchingBaseEnv):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._cached_target_items = dict()
-        self._grasped_items = {i: None for i in range(self.num_envs)}
 
     def setup_target_items(self, env_ids):
         env_cfg: FetchAnyItemEnvCfg = self.cfg
@@ -53,20 +52,6 @@ class FetchItemEnv(FetchingBaseEnv):
                 raise RuntimeError(f"No target items found for env {env_id} with name regex {target_item_name_regex}")
             self._cached_target_items[env_id] = [target_item_info['item_id'] for target_item_info in target_items_infos]
             logger.info(f"Found {len(target_items_infos)} target items for env {env_id} with name regex {target_item_name_regex}")
-    
-    def get_target_items_ids(self):
-        if len(self._cached_target_items) == 0:
-            raise RuntimeError("Target items not setup. Call setup_target_items first.")
-        return self._cached_target_items
-
-    def set_grasped_item(self, env_id: int, item_id: str):
-        self._grasped_items[env_id] = item_id
-
-    def get_grasped_item(self, env_id: int):
-        return self._grasped_items[env_id]
-
-    def clear_grasped_item(self, env_id: int):
-        self._grasped_items[env_id] = None
 
     def get_language_instruction(self):
         return self.cfg.language_instruction

@@ -6,6 +6,7 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils import configclass
 import isaaclab.envs.mdp as mdp
 from isaaclab.managers import SceneEntityCfg
+from isaaclab.sensors import ContactSensorCfg
 
 from dsynth_isaac.tasks.manager_based.darkstore_manager_based_rl_env import DarkstoreManagerBasedRLEnv
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
@@ -30,6 +31,7 @@ class GraspAnyItemEnvTerminationsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
+            "check_if_pulled": False,
         },
     )
 
@@ -50,12 +52,7 @@ class FetchAnyItemEnvTerminationsCfg:
         params={
             "robot_cfg": SceneEntityCfg("robot"),
             "ee_frame_cfg": SceneEntityCfg("ee_frame"),
-        },
-    )
-
-    is_pulled = DoneTerm(func=mdp_term.is_pulled,
-        params={
-            "robot_cfg": SceneEntityCfg("robot"),
+            "check_if_pulled": True,
         },
     )
 
@@ -64,4 +61,4 @@ class FetchAnyItemEnvCfg(FetchItemEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.terminations = FetchAnyItemEnvTerminationsCfg()
-        self.language_instruction = f"Fetch any {self.target_item_name_regex} item"
+        self.language_instruction = f"Fetch any {self.target_item_name_regex}"

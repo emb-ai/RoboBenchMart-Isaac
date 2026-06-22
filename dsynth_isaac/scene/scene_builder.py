@@ -20,13 +20,16 @@ from dsynth_isaac.core.scene_gen.utils import flatten_dict
 from dsynth_isaac.scene.utils import _get_absolute_matrix, _get_pq
 from dsynth_isaac.core.assets.asset import Asset
 from dsynth_isaac.scene.env_subset_rigid_object_cfg import EnvSubsetRigidObjectCfg
-
+from dsynth_isaac.scene.env_subset_contact_sensor_cfg import EnvSubsetContactSensorCfg
+from dsynth_isaac.scene.env_subset_contact_sensor import EnvSubsetContactSensor
 PI = np.pi # for brevity
 @dataclass
 class SceneBuilder: # TODO: redo builder
     config_dir_path: str = MISSING
     max_scenes: Optional[int] = None
     seed: int = 42
+
+    robot_fingers_contact_prim_path: str = None
 
     HEIGHT = 3.0
     THICKNESS = 0.2
@@ -42,6 +45,7 @@ class SceneBuilder: # TODO: redo builder
 
     def build(self, dsynth_prim_path):
         self._entities['prim_path'] = dsynth_prim_path
+        self._contact_grasps = {}
         dsynth_parent_path = "/".join(dsynth_prim_path.split('/')[:-1])
         dsynth_target_path = dsynth_prim_path.split('/')[-1]
 
@@ -66,6 +70,27 @@ class SceneBuilder: # TODO: redo builder
                 prim_path=f"{prim_path}/{dsynth_target_path}",
                 env_id=i
             )
+
+        self._all_item_prim_paths = {}
+        for env_id, env_items in self._product_items.items():
+            env_idx = int(env_id.split('_')[-1])
+            self._all_item_prim_paths[env_id] = []
+            for item in env_items:
+                self._all_item_prim_paths[env_id].append(item["item_prim_path"])
+
+            if len(self._all_item_prim_paths[env_id]) > 0 and self.robot_fingers_contact_prim_path is not None:
+                contact_prim_path = self.robot_fingers_contact_prim_path.replace('env_.*', env_id)
+                self._contact_grasps[f"contact_grasp_[{env_id}]"] = EnvSubsetContactSensor(
+                    EnvSubsetContactSensorCfg(
+                        prim_path=contact_prim_path,
+                        update_period=0,
+                        history_length=1,
+                        track_contact_points=True, # track?
+                        debug_vis=True,
+                        filter_prim_paths_expr=self._all_item_prim_paths[env_id],
+                        env_ids=[env_idx],
+                    )
+                )
         
         
     def _build_env(self, layout_json_path: str, prim_path: str, env_id: int):
@@ -298,7 +323,11 @@ class SceneBuilder: # TODO: redo builder
         for node in shelf_arrangement["graph"]:
             nodes_dict[node[1]] = node
 
+        items_prim_path = f"{prim_path}/items"
+        sim_utils.create_prim(items_prim_path, "Xform")
+
         arrangement = {}
+        item_prim_paths = []
         for node in shelf_arrangement["graph"]:
             parent_name, obj_name, props = node
             if '/' not in obj_name and 'SHELF' not in obj_name:
@@ -311,14 +340,14 @@ class SceneBuilder: # TODO: redo builder
 
                 # usd api does not like colons and dots in the names
                 obj_name = obj_name.replace(':', '_').replace('.', '_')
-                item_prim_path = f"{prim_path}/{obj_name.replace(':', '_').replace('.', '_')}"
+                item_prim_path = f"{items_prim_path}/{obj_name.replace(':', '_').replace('.', '_')}"
 
                 arrangement[obj_name] = self._build_rigid_asset(
                     item_prim_path,
                     asset_name,
                     p=p, q=q,
                     env_id=env_id,
-                    activate_contact_sensors=False,
+                    activate_contact_sensors=True,
                 )
                 self._product_items[f'env_{env_id}'].append({
                     'item_id': f'[env_{env_id}]_[{fixture_name}]_[{obj_name}]',
@@ -326,25 +355,7 @@ class SceneBuilder: # TODO: redo builder
                     'item_name_string': asset.asset_name,
                     'item_prim_path': item_prim_path,
                 })
-                # self._contact_grasps[f'contact_grasp_[env_{env_id}]_[{fixture_name}]_[{obj_name}]'] = ContactSensor(
-                #     ContactSensorCfg(
-                #         prim_path=item_prim_path,
-                #         update_period=0.0,
-                #         history_length=6,
-                #         debug_vis=True,
-                #         filter_prim_paths_expr=[f"/World/envs/env_{env_id}/Robot/panda_rightfinger",
-                #         f"/World/envs/env_{env_id}/Robot/panda_leftfinger"],
-                #     )
-                # )
-                self._contact_grasps[f'contact_grasp_[env_{env_id}]_[{fixture_name}]_[{obj_name}]'] = ContactSensor(
-                    ContactSensorCfg(
-                        prim_path=f"/World/envs/env_{env_id}/Robot/panda_.*finger",
-                        update_period=0.2,
-                        history_length=6,
-                        debug_vis=True,
-                        filter_prim_paths_expr=[item_prim_path],
-                    )
-                )
+                item_prim_paths.append(item_prim_path)
 
         return arrangement
 
@@ -463,13 +474,6 @@ class SceneBuilder: # TODO: redo builder
                 rigid_bodies[rigid_body_key] = self._entities[env_id]['room'][scene_fixture]
         return rigid_bodies
 
-    # def get_items_poses(self):
-    #     items_poses = {}
-    #     for env_id in self._entities.keys():
-    #         items_poses[env_id] = {}
-    #         for active_shelf in self._entities[env_id]['active_shelving']['items'].keys():
-    #             items_poses[env_id][active_shelf] = self._entities[env_id]['active_shelving']['items'][active_shelf].get_local_poses()
-    #     return items_poses
 
     def get_item_names(self):
         item_names = {}
@@ -488,7 +492,16 @@ class SceneBuilder: # TODO: redo builder
         pass
 
     def get_shelf_by_item_id(self, env_id: int, item_id: str):
-        for active_shelf in self._entities[env_id]['active_shelving']['items'].keys():
-            if item_id in self._entities[env_id]['active_shelving']['items'][active_shelf].keys():
-                return active_shelf
-        return None
+        try:
+            active_shelf = None
+            shelf_name = item_id.split(']_[')[1]
+            if shelf_name in self._entities[f'env_{env_id}']['active_shelving']['shelvings'].keys():
+                active_shelf = self._entities[f'env_{env_id}']['active_shelving']['shelvings'][shelf_name]
+        except:
+            active_shelf = None
+
+        if active_shelf is None:
+            for active_shelf in self._entities[f'env_{env_id}']['active_shelving']['items'].keys():
+                if item_id in self._entities[f'env_{env_id}']['active_shelving']['items'][active_shelf].keys():
+                    return active_shelf
+        return active_shelf

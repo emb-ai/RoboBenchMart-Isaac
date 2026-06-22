@@ -28,10 +28,14 @@ from dsynth_isaac.scene.scene_builder import SceneBuilder
 class DarkstoreInteractiveScene(InteractiveScene):
     def __init__(self, cfg: DarkstoreInteractiveSceneCfg):
         super().__init__(cfg)
+        robot_fingers_contact_prim_path = cfg.robot_fingers_contact_prim_path
+        if robot_fingers_contact_prim_path is not None:
+            robot_fingers_contact_prim_path = robot_fingers_contact_prim_path.format(ENV_REGEX_NS=self.env_regex_ns)
         self.scene_builder = SceneBuilder(
             config_dir_path=cfg.scene_config_dir_path,
             max_scenes=cfg.max_scenes,
-            seed=cfg.seed
+            seed=cfg.seed,
+            robot_fingers_contact_prim_path=robot_fingers_contact_prim_path
         )
         self.scene_builder.build(f'{self.env_regex_ns}/dsynth_scene')
         self._rigid_objects.update(self.scene_builder.get_rigid_bodies())
