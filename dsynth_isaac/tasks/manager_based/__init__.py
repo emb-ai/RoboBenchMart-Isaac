@@ -37,14 +37,14 @@ gym.register(
     disable_env_checker=True,
 )
 
-# gym.register(
-#     id="Isaac-Dsynth-Panda-IKRelMimic-v0",
-#     entry_point="isaaclab_mimic.envs.franka_stack_ik_rel_mimic_env:FrankaCubeStackIKRelMimicEnv",
-#     kwargs={
-#         "env_cfg_entry_point": f"{__name__}.panda_base_env_cfg:PandaDsynthIKRelMimicEnvCfg",
-#     },
-#     disable_env_checker=True,
-# )
+gym.register(
+    id="Dsynth-Fetch-Any-Item-GR1T2-Abs-v0",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.gr1t2_env_cfg:GR1T2FrankaFetchAnyItemEnvCfg",
+    },
+    disable_env_checker=True,
+)
 
 # gym.register(
 #     id="Isaac-Dsynth-Fetch-IKRelMimic-v0",
