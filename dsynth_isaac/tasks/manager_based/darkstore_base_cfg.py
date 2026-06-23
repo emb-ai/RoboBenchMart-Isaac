@@ -31,6 +31,8 @@ class DarkstoreSceneCfg(DarkstoreInteractiveSceneCfg):
     # end-effector sensor: will be populated by agent env cfg
     ee_frame: FrameTransformerCfg = MISSING
 
+    robot_fingers_contact_prim_path: str = MISSING
+
     dome_light = AssetBaseCfg(
         prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=1000.0, color=(0.35, 0.35, 0.35))
     )
