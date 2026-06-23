@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import torch
 import numpy as np
 from typing import Sequence
@@ -13,7 +14,11 @@ if TYPE_CHECKING:
 
 class EnvSubsetRigidObject(RigidObject):
     """
-    A rigid object that exists only in a subset of environments.
+    Rigid object wrapper for assets instantiated in only selected environments.
+
+    Isaac Lab write/reset APIs receive global environment IDs, while the wrapped
+    `RigidObject` stores data in local instance order. This class maps global
+    env IDs to local instance indices before delegating to parent methods.
     """
 
     cfg: EnvSubsetRigidObjectCfg
@@ -41,10 +46,13 @@ class EnvSubsetRigidObject(RigidObject):
         self._env_ids_to_prims = {}
 
         for matching_prim in matching_prims:
-            env_str = matching_prim.GetPath().pathString.split('/')[3]
-            env_id = int(env_str.replace('env_', ''))
+            prim_path = matching_prim.GetPath().pathString
+            env_match = re.search(r"/env_(\d+)(?:/|$)", prim_path)
+            if env_match is None:
+                raise RuntimeError(f"Could not resolve env id from prim path: {prim_path}")
+            env_id = int(env_match.group(1))
             if env_id not in self.env_ids:
-                raise RuntimeError(f"Env id {env_str} not in {self.env_ids}.")
+                raise RuntimeError(f"Env id {env_id} not in {self.env_ids}.")
             self._env_ids_to_prims[env_id] = matching_prim
         
         if  set(self._env_ids_to_prims.keys()) != set(self.env_ids):
@@ -71,6 +79,8 @@ class EnvSubsetRigidObject(RigidObject):
             env_ids_to_resolve = self.env_ids
         elif isinstance(env_ids, torch.Tensor):
             env_ids_to_resolve = env_ids.detach().cpu().tolist()
+        else:
+            env_ids_to_resolve = list(env_ids)
 
         indices = []
         env_ids_mask = []
@@ -85,7 +95,7 @@ class EnvSubsetRigidObject(RigidObject):
             return None, env_ids_mask
         indices = np.array(indices, dtype=np.int32)
         if isinstance(env_ids, torch.Tensor):
-            indices = torch.from_numpy(indices).to(dtype=torch.int32, device=env_ids.device)
+            indices = torch.from_numpy(indices).to(dtype=torch.long, device=env_ids.device)
         return indices, env_ids_mask
 
     def reset(self, env_ids: Sequence[int] | None = None):
@@ -161,21 +171,6 @@ class EnvSubsetRigidObject(RigidObject):
         if indices is None:
             return
         super().write_root_com_velocity_to_sim(root_velocity[env_ids_mask], indices)
-
-    def write_root_com_velocity_to_sim(self, root_velocity: torch.Tensor, env_ids: Sequence[int] | None = None):
-        """Set the root center of mass velocity over selected environment indices into the simulation.
-
-        The velocity comprises linear velocity (x, y, z) and angular velocity (x, y, z) in that order.
-        NOTE: This sets the velocity of the root's center of mass rather than the roots frame.
-
-        Args:
-            root_velocity: Root center of mass velocities in simulation world frame. Shape is (len(env_ids), 6).
-            env_ids: Environment indices. If None, then all indices are used.
-        """
-        indices, env_ids_mask = self._env_ids_to_indices(env_ids)
-        if indices is None:
-            return
-        super().write_root_com_velocity_to_sim(root_velocity[env_ids_mask], indices)
     
     def write_root_link_velocity_to_sim(self, root_velocity: torch.Tensor, env_ids: Sequence[int] | None = None):
         """Set the root link velocity over selected environment indices into the simulation.
@@ -223,9 +218,10 @@ class EnvSubsetRigidObject(RigidObject):
         if indices is None:
             return
 
+        masked_positions = positions[env_ids_mask] if positions is not None else None
         super().set_external_force_and_torque(forces[env_ids_mask],
             torques[env_ids_mask],
-            positions[env_ids_mask],
+            masked_positions,
             body_ids,
             indices,
             is_global

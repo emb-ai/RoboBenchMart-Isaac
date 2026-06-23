@@ -26,6 +26,8 @@ from .darkstore_scene_cfg import DarkstoreInteractiveSceneCfg
 from dsynth_isaac.scene.scene_builder import SceneBuilder
 
 class DarkstoreInteractiveScene(InteractiveScene):
+    """InteractiveScene with dynamically built darkstore objects and grasp sensors."""
+
     def __init__(self, cfg: DarkstoreInteractiveSceneCfg):
         super().__init__(cfg)
         robot_fingers_contact_prim_path = cfg.robot_fingers_contact_prim_path
@@ -38,8 +40,7 @@ class DarkstoreInteractiveScene(InteractiveScene):
             robot_fingers_contact_prim_path=robot_fingers_contact_prim_path
         )
         self.scene_builder.build(f'{self.env_regex_ns}/dsynth_scene')
-        self._rigid_objects.update(self.scene_builder.get_rigid_bodies())
-        self._sensors.update(self.scene_builder._contact_grasps)
+        self._register_builder_entities()
 
         objects_per_env = {i: [] for i in range(self.cfg.num_envs)}
         for obj_name, obj in self._rigid_objects.items():
@@ -51,14 +52,19 @@ class DarkstoreInteractiveScene(InteractiveScene):
                     objects_per_env[env_id].append(obj_name)
         self._objects_per_env = objects_per_env
 
-    @property
+    def _register_builder_entities(self):
+        """Register dynamic entities created by SceneBuilder into scene registries."""
+        self._rigid_objects.update(self.scene_builder.get_rigid_bodies())
+        self._sensors.update(self.scene_builder.get_contact_grasp_sensors())
+
     def rigid_objects_env(self, env_id: int):
-        """A dictionary of rigid objects in the scene."""
+        """Return rigid objects available in a specific environment."""
         if env_id not in self._objects_per_env:
             raise ValueError(f"Environment {env_id} not found in the scene.")
         return {obj_name: self._rigid_objects[obj_name] for obj_name in self._objects_per_env[env_id]}
 
     def get_state(self, is_relative: bool = False) -> dict[str, dict[str, dict[str, torch.Tensor]]]:
+        """Return scene state including dynamic rigid objects registered by the builder."""
         state = super().get_state(is_relative)
         state["rigid_object"] = dict()
         for asset_name, rigid_object in self._rigid_objects.items():

@@ -224,7 +224,7 @@ class TerminationsCfg:
 
 @configclass
 class DarkstoreBaseEnvCfg(ManagerBasedRLEnvCfg):
-    """Configuration for the stacking environment."""
+    """Base config for darkstore manager-based tasks."""
     # Scene settings
     # scene: DarkstoreSceneCfg = gen_dsynth_scene_cfg_class(config_dir_path, num_envs)(num_envs=num_envs, env_spacing=20.5, replicate_physics=False)
     scene: DarkstoreSceneCfg = DarkstoreSceneCfg(env_spacing=20.5, replicate_physics=False)
@@ -239,7 +239,6 @@ class DarkstoreBaseEnvCfg(ManagerBasedRLEnvCfg):
     # Unused managers
     commands = None
     rewards = None
-    events = None
     curriculum = None
     
     def __post_init__(self):

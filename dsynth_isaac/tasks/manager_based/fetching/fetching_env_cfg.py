@@ -1,20 +1,21 @@
 from typing import Any, Sequence
 from dataclasses import MISSING
 
-from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.utils import configclass
 import isaaclab.envs.mdp as mdp
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.sensors import ContactSensorCfg
 
-from dsynth_isaac.tasks.manager_based.darkstore_manager_based_rl_env import DarkstoreManagerBasedRLEnv
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
 import dsynth_isaac.tasks.manager_based.fetching.mdp.terminations as mdp_term
 
 @configclass
 class FetchItemEnvCfg(DarkstoreBaseEnvCfg):
-    """Configuration for the fetching environment."""
+    """Configuration for darkstore fetching environments.
+
+    `target_item_name_regex` is matched using `re.search`, so partial matches are
+    allowed (for example: `.*milk.*`).
+    """
 
     # regex for the human-readable name of the target item, e.g. "milk" or ".*Nivea*" etc.
     target_item_name_regex: str = MISSING

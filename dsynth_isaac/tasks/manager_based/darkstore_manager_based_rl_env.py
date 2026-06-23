@@ -29,7 +29,10 @@ logger = logging.getLogger(__name__)
 
 class DarkstoreManagerBasedRLEnv(ManagerBasedRLEnv):
     """
-    Subclass of ManagerBasedRLEnv but with DarkstoreInteractiveScene instead of InteractiveScene.
+    Manager-based RL environment wired to `DarkstoreInteractiveScene`.
+
+    The constructor mirrors Isaac Lab's `ManagerBasedRLEnv` initialization flow,
+    but injects `DarkstoreInteractiveScene` during scene creation.
     """
     def __init__(self, cfg: DarkstoreBaseEnvCfg, render_mode: str | None = None, **kwargs):
         """Initialize the environment.
