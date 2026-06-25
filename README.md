@@ -47,6 +47,12 @@ python scripts/demo_random_actions.py --config_dir_path generated_envs/isaac_sam
 
 Use Isaac Lab’s usual `AppLauncher` flags (for example `--headless` or device selection) as documented in Isaac Lab; `demo_random_actions.py` forwards those through `AppLauncher.add_app_launcher_args`.
 
+## Run with Green robot with WASDQE keyboard control
+
+```bash
+python scripts/demo_sberchel_kb.py --config_dir_path generated_envs/isaac_sample
+```
+
 ## Citation
 
 If you use RoboBenchMart in research, cite the project as in the [main RoboBenchMart README](https://github.com/emb-ai/RoboBenchMart/blob/main/README.md#citation).

@@ -54,3 +54,11 @@ gym.register(
 #     },
 #     disable_env_checker=True,
 # )
+gym.register(
+    id="Isaac-Dsynth-Sberchel-Base-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.sberchel_base_env_cfg:SberchelBaseEnvCfg",
+    },
+    disable_env_checker=True,
+)
