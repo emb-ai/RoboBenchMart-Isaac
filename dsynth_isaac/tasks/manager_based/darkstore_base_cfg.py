@@ -3,6 +3,7 @@ from dataclasses import MISSING
 import os
 from pathlib import Path
 from typing import Optional
+from functools import partial
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
@@ -14,27 +15,23 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.utils import configclass
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.managers import EventTermCfg as EventTerm
+from isaaclab_tasks.manager_based.manipulation.stack.mdp import observations as stack_obs_mdp
+from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
 
 import isaaclab.envs.mdp as mdp
 
-from dsynth_isaac.scene.spawners import DsynthSceneCfg
-from dsynth_isaac.scene.scene_loader import load_scene
 import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events
+import dsynth_isaac.tasks.manager_based.mdp.ds_observations as ds_obs
+from dsynth_isaac.scene.env_subset_rigid_object_cfg import EnvSubsetRigidObjectCfg
+from dsynth_isaac.scene.darkstore_scene_cfg import DarkstoreInteractiveSceneCfg
 @configclass
-class DarkstoreSceneCfg(InteractiveSceneCfg):
+class DarkstoreSceneCfg(DarkstoreInteractiveSceneCfg):
     # robots: will be populated by agent env cfg
     robot: ArticulationCfg = MISSING
     # end-effector sensor: will be populated by agent env cfg
-    # ee_frame: FrameTransformerCfg = MISSING
+    ee_frame: FrameTransformerCfg = MISSING
 
-    #==== RoboBenchMart scene ====
-    dsynth_scene = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/dsynth_scene",
-        spawn=DsynthSceneCfg(
-            config_dir_path=MISSING
-        ),
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.0, 0.0)),
-    )
+    robot_fingers_contact_prim_path: str = MISSING
 
     dome_light = AssetBaseCfg(
         prim_path="/World/Light", spawn=sim_utils.DomeLightCfg(intensity=1000.0, color=(0.35, 0.35, 0.35))
@@ -45,18 +42,20 @@ class DsEventCfg:
     """Configuration for events."""
     init_robot_base_pose = EventTerm(
         func=ds_events.set_default_base_pose,
-        mode="startup",
-        params={
-        },
-    )
-    reset_robot_base_pose = EventTerm(
-        func=mdp.reset_root_state_uniform,
         mode="reset",
         params={
-            "pose_range": {},
-            "velocity_range": {},
+            # "p": [-10, -10, 0],
+            # "q": [1, 0, 0, 0],
         },
     )
+    # reset_robot_base_pose = EventTerm(
+    #     func=mdp.reset_root_state_uniform,
+    #     mode="reset",
+    #     params={
+    #         "pose_range": {},
+    #         "velocity_range": {},
+    #     },
+    # )
 
     reset_items = EventTerm(
         func=ds_events.reset_items_uniform,
@@ -195,9 +194,13 @@ class ObservationsCfg:
         actions = ObsTerm(func=mdp.last_action)
         joint_pos = ObsTerm(func=mdp.joint_pos_rel)
         joint_vel = ObsTerm(func=mdp.joint_vel_rel)
-        # eef_pos = ObsTerm(func=mdp.ee_frame_pos)
-        # eef_quat = ObsTerm(func=mdp.ee_frame_quat)
-        # gripper_pos = ObsTerm(func=mdp.gripper_pos)
+        eef_pos = ObsTerm(func=stack_obs_mdp.ee_frame_pos)
+        eef_quat = ObsTerm(func=stack_obs_mdp.ee_frame_quat)
+        eef_pos_base = ObsTerm(func=partial(stack_obs_mdp.ee_frame_pose_in_base_frame, return_key="pos"))
+        eef_quat_base = ObsTerm(func=partial(stack_obs_mdp.ee_frame_pose_in_base_frame, return_key="quat"))
+        base_pos = ObsTerm(func=ds_obs.base_pos)
+        base_quat = ObsTerm(func=ds_obs.base_quat)
+        gripper_pos = ObsTerm(func=stack_obs_mdp.gripper_pos)
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -223,7 +226,7 @@ class TerminationsCfg:
 
 @configclass
 class DarkstoreBaseEnvCfg(ManagerBasedRLEnvCfg):
-    """Configuration for the stacking environment."""
+    """Base config for darkstore manager-based tasks."""
     # Scene settings
     # scene: DarkstoreSceneCfg = gen_dsynth_scene_cfg_class(config_dir_path, num_envs)(num_envs=num_envs, env_spacing=20.5, replicate_physics=False)
     scene: DarkstoreSceneCfg = DarkstoreSceneCfg(env_spacing=20.5, replicate_physics=False)
@@ -238,7 +241,6 @@ class DarkstoreBaseEnvCfg(ManagerBasedRLEnvCfg):
     # Unused managers
     commands = None
     rewards = None
-    events = None
     curriculum = None
     
     def __post_init__(self):

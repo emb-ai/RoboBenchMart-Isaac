@@ -13,29 +13,54 @@ from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.sim.spawners import materials
 from isaacsim.core.prims import XFormPrim
 from isaaclab.sim.utils.stage import get_current_stage
+from isaaclab.sensors import ContactSensor, ContactSensorCfg
 
 from dsynth_isaac.core.assets.asset import load_assets_lib
 from dsynth_isaac.core.scene_gen.utils import flatten_dict
 from dsynth_isaac.scene.utils import _get_absolute_matrix, _get_pq
-
+from dsynth_isaac.core.assets.asset import Asset
+from dsynth_isaac.scene.env_subset_rigid_object_cfg import EnvSubsetRigidObjectCfg
+from dsynth_isaac.scene.env_subset_contact_sensor_cfg import EnvSubsetContactSensorCfg
+from dsynth_isaac.scene.env_subset_contact_sensor import EnvSubsetContactSensor
 PI = np.pi # for brevity
 @dataclass
-class SceneManager:
+class SceneBuilder: # TODO: redo builder
+    """Build per-environment darkstore scene assets from generated layout JSON files.
+
+    The builder supports heterogeneous environment layouts (different product sets
+    per env) and keeps dynamic Isaac Lab entities in a registry keyed by the
+    existing project naming convention:
+    - shelf key: `[env_i]_[shelf_name]`
+    - item key: `[env_i]_[shelf_name]_[item_name]`
+    - contact sensor key: `contact_grasp_[env_i]`
+    """
     config_dir_path: str = MISSING
     max_scenes: Optional[int] = None
     seed: int = 42
+
+    robot_fingers_contact_prim_path: str = None
 
     HEIGHT = 3.0
     THICKNESS = 0.2
 
     _entities: Dict[str, Any] = field(default_factory=dict)
+    _product_items: Dict[int, Any] = field(default_factory=dict)
+    _contact_grasps: Dict[int, Any] = field(default_factory=dict)
+    _rigid_bodies: Dict[str, Any] = field(default_factory=dict)
     _assets_lib: Dict[str, Any] = field(default_factory=dict)
+    _all_item_prim_paths: Dict[str, list[str]] = field(default_factory=dict)
     _num_envs: int = 0
 
     def __post_init__(self):
         self._rng = np.random.default_rng(self.seed)
 
     def build(self, dsynth_prim_path):
+        """Build the scene hierarchy and dynamic entities under `dsynth_prim_path`."""
+        self._entities = {}
+        self._product_items = {}
+        self._contact_grasps = {}
+        self._rigid_bodies = {}
+        self._all_item_prim_paths = {}
         self._entities['prim_path'] = dsynth_prim_path
         dsynth_parent_path = "/".join(dsynth_prim_path.split('/')[:-1])
         dsynth_target_path = dsynth_prim_path.split('/')[-1]
@@ -53,32 +78,80 @@ class SceneManager:
         
         num_max_scenes = min(num_generated_scenes,  self.max_scenes) if  self.max_scenes is not None else num_generated_scenes
         prim_paths = sim_utils.find_matching_prim_paths(dsynth_parent_path)
+        if len(prim_paths) == 0:
+            raise RuntimeError(f"No environment prim paths found for pattern: {dsynth_parent_path}")
         self._num_envs = len(prim_paths)
 
         for i, prim_path in enumerate(prim_paths):
             self._entities[f'env_{i}'] = self._build_env(
                 layout_json_path=scene_config_paths[i % num_max_scenes],
                 prim_path=f"{prim_path}/{dsynth_target_path}",
+                env_id=i
             )
+
+        self._all_item_prim_paths = {}
+        for env_id, env_items in self._product_items.items():
+            env_idx = int(env_id.split('_')[-1])
+            self._all_item_prim_paths[env_id] = []
+            for item in env_items:
+                self._all_item_prim_paths[env_id].append(item["item_prim_path"])
+
+            if len(self._all_item_prim_paths[env_id]) > 0 and self.robot_fingers_contact_prim_path is not None:
+                contact_prim_path = self.robot_fingers_contact_prim_path.replace('env_.*', env_id)
+                self._contact_grasps[f"contact_grasp_[{env_id}]"] = EnvSubsetContactSensor(
+                    EnvSubsetContactSensorCfg(
+                        prim_path=contact_prim_path,
+                        update_period=0,
+                        history_length=1,
+                        track_contact_points=True, # track?
+                        debug_vis=False,
+                        filter_prim_paths_expr=self._all_item_prim_paths[env_id],
+                        env_ids=[env_idx],
+                    )
+                )
+        self._validate_registry()
+
+    def _register_rigid_body(self, key: str, rigid_asset: Any):
+        if key in self._rigid_bodies:
+            raise RuntimeError(f"Duplicate rigid body key generated: {key}")
+        self._rigid_bodies[key] = rigid_asset
+
+    def _validate_registry(self):
+        for env_id in self._entities.keys():
+            if not env_id.startswith("env_"):
+                continue
+            env_index = int(env_id.split("_")[-1])
+            active = self._entities[env_id]["active_shelving"]
+            for shelf_name, shelf in active["shelvings"].items():
+                shelf_key = f"[env_{env_index}]_[{shelf_name}]"
+                if shelf_key not in self._rigid_bodies:
+                    raise RuntimeError(f"Missing shelf rigid body registration: {shelf_key}")
+                if self._rigid_bodies[shelf_key] is not shelf:
+                    raise RuntimeError(f"Shelf rigid body registration mismatch: {shelf_key}")
+                for item_name, item in active["items"][shelf_name].items():
+                    item_key = f"{shelf_key}_[{item_name}]"
+                    if item_key not in self._rigid_bodies:
+                        raise RuntimeError(f"Missing item rigid body registration: {item_key}")
+                    if self._rigid_bodies[item_key] is not item:
+                        raise RuntimeError(f"Item rigid body registration mismatch: {item_key}")
         
-        
-    def _build_env(self, layout_json_path: str, prim_path: str):
+    def _build_env(self, layout_json_path: str, prim_path: str, env_id: int):
         sim_utils.create_prim(prim_path, "Xform")
 
         env_entities = {'prim_path': prim_path}
         with open(Path(self.config_dir_path) / layout_json_path, "r") as f:
             scene_data = json.load(f)
-        env_entities['room'] = self._build_room(scene_data, prim_path)
+        env_entities['room'] = self._build_room(scene_data, prim_path, env_id)
 
         scene_data = self.choose_and_replace_active_shelving(scene_data)
-        env_entities['inactive_shelvings'] = self._build_inactive_shelvings(scene_data, prim_path)
-        env_entities['active_shelving'] = self._build_active_shelving(scene_data, prim_path)
+        env_entities['inactive_shelvings'] = self._build_inactive_shelvings(scene_data, prim_path, env_id)
+        env_entities['active_shelving'] = self._build_active_shelving(scene_data, prim_path, env_id)
         # env_entities['lights'] = self._build_lighting(scene_data, prim_path)
         lamps_coords = self._get_lamps_coords(scene_data['size_x'], scene_data['size_y'])
         self._build_lighting(scene_data, prim_path, lamps_coords)
-        self._build_lamps(scene_data, prim_path, lamps_coords)
+        self._build_lamps(scene_data, prim_path, lamps_coords, env_id)
 
-        env_entities['door'] = self._build_door(scene_data, prim_path)
+        env_entities['door'] = self._build_door(scene_data, prim_path, env_id)
 
         # stage = get_current_stage()
         # prim = stage.GetPrimAtPath(prim_path)
@@ -90,23 +163,27 @@ class SceneManager:
 
         return env_entities
 
-    def _build_door(self, scene_data, prim_path):
+    def _build_door(self, scene_data, prim_path, env_id: int):
         return self._build_rigid_asset(
             f"{prim_path}/door",
             'fixtures.door',
             p=[scene_data['size_x'] - self.THICKNESS, scene_data['size_y'] - self._assets_lib['fixtures.door'].extents[1], 0],
             q=[1, 0, 0, 0],
-            kinematic_enabled=True
+            kinematic_enabled=True,
+            env_id=env_id,
+            registry_key=f"[env_{env_id}]_[door]",
         )
 
-    def _build_lamps(self, scene_data, prim_path, lamps_coords):
+    def _build_lamps(self, scene_data, prim_path, lamps_coords, env_id: int):
         for i, (x, y) in enumerate(lamps_coords):
             self._build_rigid_asset(
                 f"{prim_path}/lamp_{i}",
                 'fixtures.lamp',
                 p=[x, y, self.HEIGHT],
                 q=[1, 0, 0, 0],
-                kinematic_enabled=True
+                kinematic_enabled=True,
+                env_id=env_id,
+                registry_key=f"[env_{env_id}]_[lamp_{i}]",
             )
 
     def _build_lighting(self, scene_data, prim_path, lamps_coords, intensity=30000.0):
@@ -160,7 +237,7 @@ class SceneManager:
             return scene_data
         raise ValueError("No active shelvings!")
 
-    def _build_inactive_shelvings(self, scene_data: dict, prim_path: str):
+    def _build_inactive_shelvings(self, scene_data: dict, prim_path: str, env_id: int):
         inactive_fixtures_categories = [
             "inactive_shelvings",
             "inactive_wall_shelvings",
@@ -188,28 +265,38 @@ class SceneManager:
                     f"{prim_path}/{item_name}",
                     shelf_asset_name,
                     p=p, q=q,
-                    kinematic_enabled=True
+                    kinematic_enabled=True,
+                    env_id=env_id,
+                    registry_key=f"[env_{env_id}]_[{item_name}]",
                 )
 
         return inactive_shelvings
 
     def _build_rigid_asset(self, prim_path, asset_name,
         p=[0., 0., 0.],
-        q=[0., 0., 0., 1.],
-        kinematic_enabled=False
+        q=[1., 0., 0., 0.],
+        kinematic_enabled=False,
+        env_id=0,
+        activate_contact_sensors=False,
+        registry_key: str | None = None,
     ):
-        asset_cfg = RigidObjectCfg(
+        asset_cfg = EnvSubsetRigidObjectCfg(
             prim_path=prim_path,
+            env_ids=[env_id],
             spawn=sim_utils.UsdFileCfg(
                 usd_path=self._assets_lib[asset_name].asset_file_path,
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=kinematic_enabled),
+                activate_contact_sensors=activate_contact_sensors,
                 # collision_props=sim_utils.CollisionPropertiesCfg(),
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=p, rot=q),
+            init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=p, rot=q),
         )
-        return asset_cfg.class_type(asset_cfg)
+        rigid_asset = asset_cfg.class_type(asset_cfg)
+        if registry_key is not None:
+            self._register_rigid_body(registry_key, rigid_asset)
+        return rigid_asset
 
-    def _build_active_shelving(self, scene_data: dict, prim_path: str):
+    def _build_active_shelving(self, scene_data: dict, prim_path: str, env_id: int):
         active_fixtures_categories = [
             "active_shelvings",
             "active_wall_shelvings"
@@ -251,36 +338,55 @@ class SceneManager:
                 active_shelvings['shelvings'][fixture_name] = self._build_rigid_asset(
                     shelf_prim_path,
                     shelf_asset_name,
-                    kinematic_enabled=True
+                    kinematic_enabled=True,
+                    env_id=env_id,
+                    registry_key=f"[env_{env_id}]_[{fixture_name}]",
                 )
 
                 active_shelvings['items'][fixture_name] = self._build_arrangement(
                     shelf_xform_prim_path,
                     fixture_name,
+                    env_id=env_id
                 )
 
 
         # choose random active shelving and set default robot base pose near the shelf
         active_shelvings['start_shelf_name'] = self._rng.choice(sorted(list(active_shelvings['xforms'].keys())))
-        p, q = active_shelvings['xforms'][active_shelvings['start_shelf_name']].get_local_poses()
+        start_xform = active_shelvings['xforms'][active_shelvings['start_shelf_name']]
+        p, q = start_xform.get_local_poses()
                 
         direction_to_shelf = quat2mat(q[0].cpu().numpy().tolist())[:3, 1]
         robot_default_pose_path = f"{prim_path}/robot_default_pose"
         robot_default_p = p[0].cpu().numpy() - 1.4 * direction_to_shelf
-        sim_utils.create_prim(robot_default_pose_path, "Xform", translation=robot_default_p, orientation=euler2quat(0, 0, angle + PI / 2.))
+        yaw = np.arctan2(direction_to_shelf[1], direction_to_shelf[0])
+        sim_utils.create_prim(
+            robot_default_pose_path,
+            "Xform",
+            translation=robot_default_p,
+            orientation=euler2quat(0, 0, yaw),
+        )
         active_shelvings['robot_default_pose'] = XFormPrim(robot_default_pose_path)
 
         return active_shelvings
 
-    def _build_arrangement(self, prim_path, fixture_name):
+    def _build_arrangement(self, prim_path, fixture_name, env_id):
         with open(Path(self.config_dir_path) / f'{fixture_name}.json') as f:
             shelf_arrangement = json.load(f)
+
+        env_key = f'env_{env_id}'
+        if env_key not in self._product_items:
+            self._product_items[f'env_{env_id}'] = []
 
         nodes_dict = {}
         for node in shelf_arrangement["graph"]:
             nodes_dict[node[1]] = node
 
+        items_prim_path = f"{prim_path}/items"
+        sim_utils.create_prim(items_prim_path, "Xform")
+
         arrangement = {}
+        used_item_names = set()
+        item_prim_paths = []
         for node in shelf_arrangement["graph"]:
             parent_name, obj_name, props = node
             if '/' not in obj_name and 'SHELF' not in obj_name:
@@ -289,20 +395,37 @@ class SceneManager:
                 # q = [0.525322,  0, 0.8509035, 0]
                 # p += np.array([0.0, 0.0, 3.0])
                 asset_name = f'products_hierarchy.{obj_name.split(":")[0]}'
-                asset = self._assets_lib[asset_name]
+                asset: Asset = self._assets_lib[asset_name]
 
                 # usd api does not like colons and dots in the names
                 obj_name = obj_name.replace(':', '_').replace('.', '_')
+                unique_obj_name = obj_name
+                suffix = 1
+                while unique_obj_name in used_item_names:
+                    suffix += 1
+                    unique_obj_name = f"{obj_name}_{suffix}"
+                used_item_names.add(unique_obj_name)
+                item_prim_path = f"{items_prim_path}/{unique_obj_name}"
 
-                arrangement[obj_name] = self._build_rigid_asset(
-                    f"{prim_path}/{obj_name.replace(':', '_').replace('.', '_')}",
+                arrangement[unique_obj_name] = self._build_rigid_asset(
+                    item_prim_path,
                     asset_name,
                     p=p, q=q,
+                    env_id=env_id,
+                    activate_contact_sensors=True,
+                    registry_key=f"[env_{env_id}]_[{fixture_name}]_[{unique_obj_name}]",
                 )
+                self._product_items[f'env_{env_id}'].append({
+                    'item_id': f'[env_{env_id}]_[{fixture_name}]_[{unique_obj_name}]',
+                    'asset_id': asset_name,
+                    'item_name_string': asset.asset_name,
+                    'item_prim_path': item_prim_path,
+                })
+                item_prim_paths.append(item_prim_path)
 
         return arrangement
 
-    def _build_room(self, scene_data: dict, prim_path: str):
+    def _build_room(self, scene_data: dict, prim_path: str, env_id: int):
         x_size = scene_data['size_x']
         y_size = scene_data['size_y']
 
@@ -322,8 +445,9 @@ class SceneManager:
 
         room = {}
         for i, (size, translation) in enumerate(zip(sizes, translations)):
-            wall_cfg = RigidObjectCfg(
+            wall_cfg = EnvSubsetRigidObjectCfg(
                 prim_path=f"{prim_path}/wall_{i}",
+                env_ids=[env_id],
                 spawn=sim_utils.CuboidCfg(size=size,
                     rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                     collision_props=sim_utils.CollisionPropertiesCfg(),
@@ -333,12 +457,14 @@ class SceneManager:
                         texture_scale=(1., 1.)
                     ),
                 ),
-                init_state=RigidObjectCfg.InitialStateCfg(pos=translation),
+                init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=translation),
             )
-            room['wall_{i}'] = wall_cfg.class_type(wall_cfg)
+            room[f'wall_{i}'] = wall_cfg.class_type(wall_cfg)
+            self._register_rigid_body(f"[env_{env_id}]_[wall_{i}]", room[f'wall_{i}'])
 
-        ceiling_cfg = RigidObjectCfg(
+        ceiling_cfg = EnvSubsetRigidObjectCfg(
             prim_path=f"{prim_path}/ceiling",
+            env_ids=[env_id],
             spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
@@ -348,12 +474,14 @@ class SceneManager:
                     texture_scale=(1., 1.)
                 ),
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, self.HEIGHT + self.THICKNESS / 2]),
+            init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, self.HEIGHT + self.THICKNESS / 2]),
         )
         room['ceiling'] = ceiling_cfg.class_type(ceiling_cfg)
+        self._register_rigid_body(f"[env_{env_id}]_[ceiling]", room['ceiling'])
 
-        floor_cfg = RigidObjectCfg(
+        floor_cfg = EnvSubsetRigidObjectCfg(
             prim_path=f"{prim_path}/floor",
+            env_ids=[env_id],
             spawn=sim_utils.CuboidCfg(size=[x_size, y_size, self.THICKNESS],
                 rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
                 collision_props=sim_utils.CollisionPropertiesCfg(),
@@ -364,9 +492,10 @@ class SceneManager:
                 ),
                 physics_material=materials.RigidBodyMaterialCfg()
             ),
-            init_state=RigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, - self.THICKNESS / 2]),
+            init_state=EnvSubsetRigidObjectCfg.InitialStateCfg(pos=[x_size / 2, y_size / 2, - self.THICKNESS / 2]),
         )
         room['floor'] = floor_cfg.class_type(floor_cfg)
+        self._register_rigid_body(f"[env_{env_id}]_[floor]", room['floor'])
 
         return room
 
@@ -394,13 +523,14 @@ class SceneManager:
                 item_entities[env_id][active_shelf] = self._entities[env_id]['active_shelving']['items'][active_shelf]
         return item_entities
 
-    # def get_items_poses(self):
-    #     items_poses = {}
-    #     for env_id in self._entities.keys():
-    #         items_poses[env_id] = {}
-    #         for active_shelf in self._entities[env_id]['active_shelving']['items'].keys():
-    #             items_poses[env_id][active_shelf] = self._entities[env_id]['active_shelving']['items'][active_shelf].get_local_poses()
-    #     return items_poses
+    def get_contact_grasp_sensors(self):
+        """Return per-environment grasp contact sensors."""
+        return dict(self._contact_grasps)
+
+    def get_rigid_bodies(self):
+        """Return all dynamic rigid-body entities keyed by scene registry names."""
+        return dict(self._rigid_bodies)
+
 
     def get_item_names(self):
         item_names = {}
@@ -411,6 +541,12 @@ class SceneManager:
             for active_shelf in self._entities[env_id]['active_shelving']['items'].keys():
                 item_names[env_id][active_shelf] = list(self._entities[env_id]['active_shelving']['items'][active_shelf].keys())
         return item_names
+
+    def get_product_items(self, env_id: int | None = None):
+        """Return product item metadata for one env or for all envs."""
+        if env_id is None:
+            return self._product_items
+        return list(self._product_items.get(f"env_{env_id}", []))
     
     # def get_item_default_local_pose(self, env_id: int, item_name: str):
     #     return self._entities[env_id]['active_shelving']['items'][item_name].get_local_poses()
@@ -418,3 +554,22 @@ class SceneManager:
     def reset_items(self, env_ids: torch.Tensor, env_origins: torch.Tensor):
         pass
 
+    def get_shelf_by_item_id(self, env_id: int, item_id: str):
+        """Return the active shelf rigid object for a given item id."""
+        env_key = f"env_{env_id}"
+        active_shelvings = self._entities[env_key]["active_shelving"]["shelvings"]
+        parts = item_id.split("]_[")
+        if len(parts) >= 2:
+            shelf_name = parts[1].rstrip("]")
+            if shelf_name in active_shelvings:
+                return active_shelvings[shelf_name]
+
+        for item_info in self._product_items.get(env_key, []):
+            if item_info["item_id"] == item_id:
+                item_parts = item_id.split("]_[")
+                if len(item_parts) >= 2:
+                    shelf_name = item_parts[1].rstrip("]")
+                    if shelf_name in active_shelvings:
+                        return active_shelvings[shelf_name]
+                break
+        return None

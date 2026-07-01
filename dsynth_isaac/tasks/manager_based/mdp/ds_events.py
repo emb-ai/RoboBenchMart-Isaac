@@ -16,6 +16,11 @@ import isaaclab.sim as sim_utils
 from isaaclab.utils.version import compare_versions
 from isaaclab.sim.utils.stage import get_current_stage
 import isaaclab.utils.math as math_utils
+from isaaclab.assets import Articulation
+
+from dsynth_isaac.scene.scene_builder import SceneBuilder
+from dsynth_isaac.scene.darkstore_scene import DarkstoreInteractiveScene
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -26,9 +31,36 @@ def set_default_joint_pose(
     default_pose: torch.Tensor,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ):
-    # Set the default pose for robots in all envs
+    """Set robot default joint pose for selected environments."""
     asset = env.scene[asset_cfg.name]
-    asset.data.default_joint_pos = torch.tensor(default_pose, device=env.device).repeat(env.num_envs, 1)
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    default_pose_tensor = torch.as_tensor(default_pose, device=env.device, dtype=asset.data.default_joint_pos.dtype)
+    asset.data.default_joint_pos[env_ids] = default_pose_tensor
+
+def reset_joints(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    asset: Articulation = env.scene[asset_cfg.name]
+
+    # Add gaussian noise to joint states
+    joint_pos = asset.data.default_joint_pos[env_ids].clone()
+    joint_vel = asset.data.default_joint_vel[env_ids].clone()
+    # joint_pos += math_utils.sample_gaussian(mean, std, joint_pos.shape, joint_pos.device)
+
+    # Clamp joint pos to limits
+    # joint_pos_limits = asset.data.soft_joint_pos_limits[env_ids]
+    # joint_pos = joint_pos.clamp_(joint_pos_limits[..., 0], joint_pos_limits[..., 1])
+
+    # # Don't noise the gripper poses
+    # joint_pos[:, -2:] = asset.data.default_joint_pos[env_ids, -2:]
+
+    # Set into the physics simulation
+    asset.set_joint_position_target(joint_pos, env_ids=env_ids)
+    asset.set_joint_velocity_target(joint_vel, env_ids=env_ids)
+    asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
 
 def set_default_base_pose(
@@ -42,16 +74,35 @@ def set_default_base_pose(
     asset = env.scene[asset_cfg.name]
     
     env_ids_list = list(range(env.num_envs)) if env_ids is None else env_ids.tolist()
+    scene: DarkstoreInteractiveScene = env.scene
+    scene_builder: SceneBuilder = scene.scene_builder
+    base_p, base_q = scene_builder.get_robot_default_poses()
     
-    manager = env.scene.cfg.dsynth_scene.spawn.manager
-    base_p, base_q = manager.get_robot_default_poses()
-    shift_p = torch.tensor([p for _ in env_ids_list], dtype=torch.float32, device=base_p.device)
-    rot_q = torch.tensor([q for _ in env_ids_list], dtype=torch.float32, device=base_p.device)
-        
-    asset.data.default_root_state[env_ids_list, :3] = base_p[env_ids_list] + shift_p
-    asset.data.default_root_state[env_ids_list, 3:7] = math_utils.quat_mul(base_q[env_ids_list], rot_q)
+    new_poses = []
+    p_offset = torch.tensor(p, device=env.device, dtype=torch.float32).unsqueeze(0)
+    q_offset = torch.tensor(q, device=env.device, dtype=torch.float32).unsqueeze(0)
+    for env_id in env_ids_list:
+        pos, rot = math_utils.combine_frame_transforms(
+                env.scene.env_origins[None, env_id] + base_p[None, env_id],
+                base_q[None, env_id],
+                p_offset,
+                q_offset
+            )
+        new_poses.append(torch.cat([pos, rot], dim=-1))
+    new_poses = torch.cat(new_poses, dim=-2)
+    velocities = asset.data.default_root_state[env_ids_list, 7:13]
 
+    asset.write_root_pose_to_sim(
+        new_poses,
+        env_ids=torch.tensor(env_ids_list, device=env.device)
+    )
+    asset.write_root_velocity_to_sim(
+                    velocities,
+                    torch.tensor(env_ids_list, device=env.device)
+    )
 
+    # asset.data.default_root_state[env_ids_list, :3] = new_poses[:, :3]
+    # asset.data.default_root_state[env_ids_list, 3:7] = new_poses[:, 3:7]    
 
 class randomize_visual_texture_material(ManagerTermBase):
     """Randomize the visual texture of bodies on an asset using Replicator API.
@@ -205,9 +256,9 @@ def reset_items_uniform(
         velocity_range: dict[str, tuple[float, float]],
         asset_cfg: SceneEntityCfg = None,
     ):
-    manager = env.scene.cfg.dsynth_scene.spawn.manager
-    active_shelvings_xforms_poses = manager.get_active_shelvings_xforms_poses()
-    items = manager.get_item_entities()
+    scene_builder: SceneBuilder = env.scene.scene_builder
+    active_shelvings_xforms_poses = scene_builder.get_active_shelvings_xforms_poses()
+    items = scene_builder.get_item_entities()
 
     range_list = [pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]
     pos_ranges = torch.tensor(range_list, device=env.device)
@@ -221,11 +272,15 @@ def reset_items_uniform(
                 item_state = item.data.default_root_state.clone()
 
                 rand_samples = math_utils.sample_uniform(pos_ranges[:, 0], pos_ranges[:, 1], (1, 6), device=item.device)
+                orientations_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
                 
                 # poses
-                positions = item_state[:, 0:3] + env.scene.env_origins[None, env_id] + shelf_p + rand_samples[:, 0:3]
-                orientations_delta = math_utils.quat_from_euler_xyz(rand_samples[:, 3], rand_samples[:, 4], rand_samples[:, 5])
-                orientations = math_utils.quat_mul(shelf_q, math_utils.quat_mul(item_state[:, 3:7], orientations_delta))
+                position_wrt_world, or_wrt_world = math_utils.combine_frame_transforms(
+                    env.scene.env_origins[None, env_id] + shelf_p, 
+                    shelf_q,
+                    item_state[:, 0:3] + rand_samples[:, 0:3],
+                    math_utils.quat_mul(item_state[:, 3:7], orientations_delta)
+                )
 
                 # velocities
                 rand_samples = math_utils.sample_uniform(vel_ranges[:, 0], vel_ranges[:, 1], (1, 6), device=item.device)
@@ -234,11 +289,11 @@ def reset_items_uniform(
 
                  # set into the physics simulation
                 item.write_root_pose_to_sim(
-                    torch.cat([positions, orientations], dim=-1),
-                    env_ids=torch.tensor([0], device=item.device))
+                    torch.cat([position_wrt_world, or_wrt_world], dim=-1),
+                    env_ids=torch.tensor([env_id], device=item.device))
                 item.write_root_velocity_to_sim(
                     velocities,
-                    env_ids=torch.tensor([0], device=item.device))
+                    env_ids=torch.tensor([env_id], device=item.device))
 
 def randomize_lights(env, env_ids, intensity_range=(10000.0, 30000.0),
                      color_range=((0.5, 0.5, 0.5), (1.0, 1.0, 1.0))):

@@ -81,7 +81,6 @@ import sys
 sys.path.append('.')
 import dsynth_isaac.tasks.manager_based
 
-from dsynth_isaac.tasks.manager_based.fetch_base_env_cfg import FetchBaseEnvCfg, FetchIKBaseEnvCfg
 from dsynth_isaac.devices.mobile_se3_keyboard import MobileSe3Keyboard
 
 # import logger
@@ -113,8 +112,9 @@ def main() -> None:
         env_cfg = remove_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
 
-    env_cfg.scene.dsynth_multi_scene.spawn.config_dir_path = "generated_envs/isaac_sample"
-
+    env_cfg.scene.scene_config_dir_path = "generated_envs/isaac_sample"
+    env_cfg.target_item_name_regex = ".*Nestle Honey*"
+    
     try:
         # create environment
         env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
@@ -253,28 +253,29 @@ def main() -> None:
 
     # simulate environment
     while simulation_app.is_running():
-        try:
-            # run everything in inference mode
-            with torch.inference_mode():
-                # get device command
-                action = teleop_interface.advance()
-                # Only apply teleop commands when active
-                if teleoperation_active:
-                    # process actions
-                    actions = action.repeat(env.num_envs, 1)
-                    # apply actions
-                    env.step(actions)
-                else:
-                    env.sim.render()
+        # try:
+        # run everything in inference mode
+        with torch.inference_mode():
+            # get device command
+            action = teleop_interface.advance()
+            # Only apply teleop commands when active
+            if teleoperation_active:
+                # process actions
+                actions = action.repeat(env.num_envs, 1)
+                # apply actions
+                obs, reward, terminated, truncated, info = env.step(actions)
+                print(info)
+            else:
+                env.sim.render()
 
-                if should_reset_recording_instance:
-                    env.reset()
-                    teleop_interface.reset()
-                    should_reset_recording_instance = False
-                    print("Environment reset complete")
-        except Exception as e:
-            logger.error(f"Error during simulation step: {e}")
-            break
+            if should_reset_recording_instance:
+                env.reset()
+                teleop_interface.reset()
+                should_reset_recording_instance = False
+                print("Environment reset complete")
+        # except Exception as e:
+        #     logger.error(f"Error during simulation step: {e}")
+        #     break
 
     # close the simulator
     env.close()

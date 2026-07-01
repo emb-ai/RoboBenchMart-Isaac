@@ -244,3 +244,9 @@ class TestCubeStackPlanner:
         _execute_gripper_action(self.env, self.robot, GRIPPER_OPEN_CMD)
 
         print("Pick-and-place stacking test completed successfully!")
+
+
+test_planner = TestCubeStackPlanner()
+env_cfg = next(cube_stack_test_env())
+test_planner.setup(env_cfg)
+test_planner.test_pick_and_stack()

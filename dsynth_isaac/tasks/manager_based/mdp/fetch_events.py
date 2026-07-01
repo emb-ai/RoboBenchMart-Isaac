@@ -4,7 +4,6 @@ import torch
 from typing import TYPE_CHECKING
 
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.managers import SceneEntityCfg
 
 
 if TYPE_CHECKING:
@@ -17,6 +16,13 @@ def set_default_joint_pose(
     default_pose: torch.Tensor,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ):
-    # Set the default pose for robots in all envs
+    """Set robot default joint pose for selected environments."""
     asset = env.scene[asset_cfg.name]
-    asset.data.default_joint_pos = torch.tensor(default_pose, device=env.device).repeat(env.num_envs, 1)
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    default_pose_tensor = torch.as_tensor(
+        default_pose,
+        device=env.device,
+        dtype=asset.data.default_joint_pos.dtype,
+    )
+    asset.data.default_joint_pos[env_ids] = default_pose_tensor

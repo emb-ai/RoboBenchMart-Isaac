@@ -1,38 +1,56 @@
 import gymnasium as gym
 
 gym.register(
-    id="Isaac-Dsynth-Fetch-Base-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    id="Dsynth-Fetch-Any-Item-Fetchbot-v0",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.fetch_base_env_cfg:FetchBaseEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.fetchbot_env_cfg:FetchbotAnyItemEnvCfg",
     },
     disable_env_checker=True,
 )
 
 
 gym.register(
-    id="Isaac-Dsynth-Fetch-IK-Rel-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    id="Dsynth-Fetch-Any-Item-Fetchbot-IK-Rel-v0",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.fetch_base_env_cfg:FetchIKBaseEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.fetchbot_env_cfg:FetchbotIKRelAnyItemEnvCfg",
     },
     disable_env_checker=True,
 )
 
 gym.register(
-    id="Isaac-Dsynth-Panda-Base-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    id="Dsynth-Fetch-Any-Item-Franka-v0",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.panda_base_env_cfg:PandaBaseEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.franka_env_cfg:FrankaFetchAnyItemEnvCfg",
     },
     disable_env_checker=True,
 )
 
 gym.register(
-    id="Isaac-Dsynth-Worker-Base-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    id="Dsynth-Fetch-Any-Item-Franka-IK-Rel-v0",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.worker_base_env_cfg:WorkerBaseEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.franka_env_cfg:FrankaIKRelFetchAnyItemEnvCfg",
     },
     disable_env_checker=True,
 )
+
+# gym.register(
+#     id="Isaac-Dsynth-Panda-IKRelMimic-v0",
+#     entry_point="isaaclab_mimic.envs.franka_stack_ik_rel_mimic_env:FrankaCubeStackIKRelMimicEnv",
+#     kwargs={
+#         "env_cfg_entry_point": f"{__name__}.panda_base_env_cfg:PandaDsynthIKRelMimicEnvCfg",
+#     },
+#     disable_env_checker=True,
+# )
+
+# gym.register(
+#     id="Isaac-Dsynth-Fetch-IKRelMimic-v0",
+#     entry_point="isaaclab_mimic.envs.franka_stack_ik_rel_mimic_env:FrankaCubeStackIKRelMimicEnv",
+#     kwargs={
+#         "env_cfg_entry_point": f"{__name__}.fetch_base_env_cfg:FetchDsynthIKRelMimicEnvCfg",
+#     },
+#     disable_env_checker=True,
+# )
