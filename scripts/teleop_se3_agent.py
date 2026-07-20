@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -44,12 +44,21 @@ args_cli = parser.parse_args()
 
 app_launcher_args = vars(args_cli)
 
-if args_cli.enable_pinocchio:
-    # Import pinocchio before AppLauncher to force the use of the version installed by IsaacLab and
-    # not the one installed by Isaac Sim pinocchio is required by the Pink IK controllers and the
-    # GR1T2 retargeter
+_use_handtracking = "handtracking" in args_cli.teleop_device.lower()
+if args_cli.enable_pinocchio or _use_handtracking:
+    # Import pinocchio before AppLauncher so Isaac Lab's build is used (Pink IK + GR1T2 retargeter).
     import pinocchio  # noqa: F401
-if "handtracking" in args_cli.teleop_device.lower():
+    
+if _use_handtracking:
+    try:
+        import dex_retargeting  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(
+            "GR1T2 hand-tracking teleop requires the dex-retargeting package. "
+            "Install it with: pip install 'dex-retargeting==0.4.6'"
+        ) from exc
+
+if _use_handtracking:
     app_launcher_args["xr"] = True
 
 # launch omniverse app
@@ -59,13 +68,15 @@ simulation_app = app_launcher.app
 """Rest everything follows."""
 
 
-import gymnasium as gym
 import logging
+
+import gymnasium as gym
 import torch
 
 from isaaclab.devices import Se3Gamepad, Se3GamepadCfg, Se3Keyboard, Se3KeyboardCfg, Se3SpaceMouse, Se3SpaceMouseCfg
 from isaaclab.devices.openxr import remove_camera_configs
 from isaaclab.devices.teleop_device_factory import create_teleop_device
+from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 
 import isaaclab_tasks  # noqa: F401
@@ -100,6 +111,11 @@ def main() -> None:
     # parse configuration
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.env_name = args_cli.task
+    if not isinstance(env_cfg, ManagerBasedRLEnvCfg):
+        raise ValueError(
+            "Teleoperation is only supported for ManagerBasedRLEnv environments. "
+            f"Received environment config type: {type(env_cfg).__name__}"
+        )
     # modify configuration
     env_cfg.terminations.time_out = None
     if "Lift" in args_cli.task:
@@ -118,10 +134,6 @@ def main() -> None:
     try:
         # create environment
         env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
-        # cfg = FetchIKBaseEnvCfg()
-        # cfg.sim.device = args_cli.device
-        # cfg.terminations.time_out = None
-        # env = ManagerBasedEnv(cfg=env_cfg)
         # check environment name (for reach , we don't allow the gripper)
         if "Reach" in args_cli.task:
             logger.warning(
@@ -162,6 +174,11 @@ def main() -> None:
         """
         nonlocal teleoperation_active
         teleoperation_active = True
+        if hasattr(teleop_interface, "_retargeters"):
+            for retargeter in teleop_interface._retargeters:
+                recalibrate = getattr(retargeter, "recalibrate_wrists", None)
+                if callable(recalibrate):
+                    recalibrate()
         print("Teleoperation activated")
 
     def stop_teleoperation() -> None:
@@ -207,7 +224,7 @@ def main() -> None:
             # Create fallback teleop device
             sensitivity = args_cli.sensitivity
             if args_cli.teleop_device.lower() == "keyboard":
-                teleop_interface = Se3SpaceMouse(
+                teleop_interface = Se3Keyboard(
                     Se3KeyboardCfg(pos_sensitivity=0.05 * sensitivity, rot_sensitivity=0.05 * sensitivity)
                 )
             elif args_cli.teleop_device.lower() == "spacemouse":
@@ -253,29 +270,33 @@ def main() -> None:
 
     # simulate environment
     while simulation_app.is_running():
-        # try:
-        # run everything in inference mode
-        with torch.inference_mode():
-            # get device command
-            action = teleop_interface.advance()
-            # Only apply teleop commands when active
-            if teleoperation_active:
-                # process actions
-                actions = action.repeat(env.num_envs, 1)
-                # apply actions
-                obs, reward, terminated, truncated, info = env.step(actions)
-                print(info)
-            else:
-                env.sim.render()
+        try:
+            # run everything in inference mode
+            with torch.inference_mode():
+                # get device command
+                action = teleop_interface.advance()
 
-            if should_reset_recording_instance:
-                env.reset()
-                teleop_interface.reset()
-                should_reset_recording_instance = False
-                print("Environment reset complete")
-        # except Exception as e:
-        #     logger.error(f"Error during simulation step: {e}")
-        #     break
+                # Only apply teleop commands when active
+                if teleoperation_active:
+                    # process actions
+                    actions = action.repeat(env.num_envs, 1)
+                    # apply actions
+                    env.step(actions)
+                else:
+                    env.sim.render()
+
+                if should_reset_recording_instance:
+                    env.reset()
+                    teleop_interface.reset()
+                    for retargeter in getattr(teleop_interface, "_retargeters", []):
+                        recalibrate = getattr(retargeter, "recalibrate_wrists", None)
+                        if callable(recalibrate):
+                            recalibrate()
+                    should_reset_recording_instance = False
+                    print("Environment reset complete")
+        except Exception as e:
+            logger.error(f"Error during simulation step: {e}")
+            break
 
     # close the simulator
     env.close()

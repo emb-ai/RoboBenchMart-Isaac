@@ -81,18 +81,70 @@ class GR1T2SceneCfg(DarkstoreSceneCfg):
 
 @configclass
 class GR1T2EventCfg(DsEventCfg):
-    pass
+    init_robot_base_pose = EventTerm(
+        func=ds_events.set_default_base_pose,
+        mode="reset",
+        params={
+            "p": [0.65, 0, 0.93],
+            # "q": [1, 0, 0, 0],
+        },
+    )
+
+@configclass
+class GR1T2ObservationsCfg:
+    """Observation specifications for the MDP."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """Observations for policy group with state values."""
+
+        actions = ObsTerm(func=mdp.last_action)
+        robot_joint_pos = ObsTerm(
+            func=base_mdp.joint_pos,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+        # robot_root_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("robot")})
+        # robot_root_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("robot")})
+        # object_pos = ObsTerm(func=base_mdp.root_pos_w, params={"asset_cfg": SceneEntityCfg("object")})
+        # object_rot = ObsTerm(func=base_mdp.root_quat_w, params={"asset_cfg": SceneEntityCfg("object")})
+        robot_links_state = ObsTerm(func=mdp.get_all_robot_link_state)
+
+        left_eef_pos = ObsTerm(func=mdp.get_eef_pos, params={"link_name": "left_hand_roll_link"})
+        left_eef_quat = ObsTerm(func=mdp.get_eef_quat, params={"link_name": "left_hand_roll_link"})
+        right_eef_pos = ObsTerm(func=mdp.get_eef_pos, params={"link_name": "right_hand_roll_link"})
+        right_eef_quat = ObsTerm(func=mdp.get_eef_quat, params={"link_name": "right_hand_roll_link"})
+
+        hand_joint_state = ObsTerm(func=mdp.get_robot_joint_state, params={"joint_names": ["R_.*", "L_.*"]})
+        head_joint_state = ObsTerm(
+            func=mdp.get_robot_joint_state,
+            params={"joint_names": ["head_pitch_joint", "head_roll_joint", "head_yaw_joint"]},
+        )
+
+        # object = ObsTerm(
+        #     func=mdp.object_obs,
+        #     params={"left_eef_link_name": "left_hand_roll_link", "right_eef_link_name": "right_hand_roll_link"},
+        # )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = False
+
+    # observation groups
+    policy: PolicyCfg = PolicyCfg()
+
 
 
 @configclass
-class GR1T2FrankaFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
+class GR1T2FetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
     scene: DarkstoreSceneCfg = GR1T2SceneCfg(env_spacing=20.5, replicate_physics=False)
     actions = GR1T2ActionsCfg()
     events = GR1T2EventCfg()
+    observations = GR1T2ObservationsCfg()
 
     xr: XrCfg = XrCfg(
-        anchor_pos=(0.0, 0.0, 0.0),
-        anchor_rot=(1.0, 0.0, 0.0, 0.0),
+         anchor_pos=(4.0, 5.0, 0.0),
+        # anchor_rot=(1.0, 0.0, 0.0, 0.0),
+        anchor_rot=(0, 0, 1, 0 ),
     )
 
     # xr: XrCfg = XrCfg(

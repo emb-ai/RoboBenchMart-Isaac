@@ -41,7 +41,7 @@ gym.register(
     id="Dsynth-Fetch-Any-Item-GR1T2-Abs-v0",
     entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.gr1t2_env_cfg:GR1T2FrankaFetchAnyItemEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.gr1t2_env_cfg:GR1T2FetchAnyItemEnvCfg",
     },
     disable_env_checker=True,
 )
