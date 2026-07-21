@@ -56,7 +56,7 @@ gym.register(
 # )
 gym.register(
     id="Isaac-Dsynth-Sberchel-Base-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
     kwargs={
         "env_cfg_entry_point": f"{__name__}.sberchel_base_env_cfg:SberchelBaseEnvCfg",
     },

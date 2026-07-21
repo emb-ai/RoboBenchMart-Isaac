@@ -22,6 +22,10 @@ demo can still pin it (``--pin``) for a no-policy sanity check.
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.utils import configclass
 import isaaclab.envs.mdp as mdp
+import isaaclab.envs.mdp as base_mdp
+from isaaclab.managers import ObservationGroupCfg as ObsGroup
+from isaaclab.managers import ObservationTermCfg as ObsTerm
+from isaaclab.managers import SceneEntityCfg
 
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg, DsEventCfg
 from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_CONFIG
@@ -131,9 +135,31 @@ class SberchelEventCfg(DsEventCfg):
         params={"p": [0.0, 0.0, SBERCHEL_STAND_HEIGHT]},
     )
 
+@configclass
+class SberchelObservationsCfg:
+    """Observation specifications for the MDP."""
+
+    @configclass
+    class PolicyCfg(ObsGroup):
+        """Observations for policy group with state values."""
+
+        actions = ObsTerm(func=mdp.last_action)
+        robot_joint_pos = ObsTerm(
+            func=base_mdp.joint_pos,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = False
+
+    # observation groups
+    policy: PolicyCfg = PolicyCfg()
 
 @configclass
 class SberchelBaseEnvCfg(DarkstoreBaseEnvCfg):
+    observations: SberchelObservationsCfg = SberchelObservationsCfg()
+    
     def __post_init__(self):
         # build the shared darkstore scene first
         super().__post_init__()
@@ -141,6 +167,8 @@ class SberchelBaseEnvCfg(DarkstoreBaseEnvCfg):
         # --- swap in the sberchel robot (base left FREE for the policy) ---
         self.scene.robot = SBERCHEL_CONFIG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
+        self.scene.robot_fingers_contact_prim_path = None
+        self.scene.ee_frame = None
 
         # --- match green_challenge's control timing so the policy is stable ---
         # (its run.sh default: sim.dt = 1/150, decimation = 1, render_interval = 1)
