@@ -158,7 +158,7 @@ class SberchelEventCfg(DsEventCfg):
     init_robot_base_pose = EventTerm(
         func=ds_events.set_default_base_pose,
         mode="startup",
-        params={"p": [0.0, 0.0, SBERCHEL_STAND_HEIGHT]},
+        params={"p": [0.65, 0.0, SBERCHEL_STAND_HEIGHT]},
     )
 
 @configclass
@@ -211,19 +211,24 @@ class SberchelBaseEnvCfg(DarkstoreBaseEnvCfg):
 # Pink hand action layout (12D) — proximal masters only. Open MJCF drives
 # intermediate/distal via equality mimic constraints; commanding those slaves
 # with PD fights the constraint and locks the finger chain (only thumb_yaw escapes).
+#
+# Order MUST match articulation DOF order: PinkInverseKinematicsAction calls
+# ``find_joints(..., preserve_order=False)``, which returns joints in robot
+# joint order (not this list's written order if they disagree). Mismatch swaps
+# fingers across digits and can look like cross-hand coupling.
 SBERCHEL_HAND_JOINT_NAMES = [
-    "left_pinky_proximal_joint",
-    "left_ring_proximal_joint",
-    "left_middle_proximal_joint",
-    "left_index_proximal_joint",
-    "left_thumb_proximal_pitch_joint",
     "left_thumb_proximal_yaw_joint",
-    "right_pinky_proximal_joint",
-    "right_ring_proximal_joint",
-    "right_middle_proximal_joint",
-    "right_index_proximal_joint",
-    "right_thumb_proximal_pitch_joint",
+    "left_thumb_proximal_pitch_joint",
+    "left_index_proximal_joint",
+    "left_middle_proximal_joint",
+    "left_ring_proximal_joint",
+    "left_pinky_proximal_joint",
     "right_thumb_proximal_yaw_joint",
+    "right_thumb_proximal_pitch_joint",
+    "right_index_proximal_joint",
+    "right_middle_proximal_joint",
+    "right_ring_proximal_joint",
+    "right_pinky_proximal_joint",
 ]
 
 _LEFT_HAND_BASE_FRAME = "left_hand_base_link"
@@ -346,95 +351,95 @@ def _apply_sberchel_teleop_actuator_gains(robot_cfg: ArticulationCfg) -> Articul
     return robot_cfg
 
 
-@configclass
-class SberchelXRActionsCfg:
-    """Legs from the locomotion policy + upper body from Pink IK / XR teleop."""
+# @configclass
+# class SberchelXRActionsCfg:
+#     """Legs from the locomotion policy + upper body from Pink IK / XR teleop."""
 
-    legs_joint_pos = mdp.JointPositionActionCfg(
-        asset_name="robot",
-        joint_names=[
-            "left_hip_pitch_joint",
-            "left_hip_roll_joint",
-            "left_hip_yaw_joint",
-            "left_knee_crank_joint",
-            "left_ankle_u_crank_joint",
-            "left_ankle_b_crank_joint",
-            "right_hip_pitch_joint",
-            "right_hip_roll_joint",
-            "right_hip_yaw_joint",
-            "right_knee_crank_joint",
-            "right_ankle_u_crank_joint",
-            "right_ankle_b_crank_joint",
-        ],
-        scale=1.0,
-        preserve_order=True,
-    )
+#     legs_joint_pos = mdp.JointPositionActionCfg(
+#         asset_name="robot",
+#         joint_names=[
+#             "left_hip_pitch_joint",
+#             "left_hip_roll_joint",
+#             "left_hip_yaw_joint",
+#             "left_knee_crank_joint",
+#             "left_ankle_u_crank_joint",
+#             "left_ankle_b_crank_joint",
+#             "right_hip_pitch_joint",
+#             "right_hip_roll_joint",
+#             "right_hip_yaw_joint",
+#             "right_knee_crank_joint",
+#             "right_ankle_u_crank_joint",
+#             "right_ankle_b_crank_joint",
+#         ],
+#         scale=1.0,
+#         preserve_order=True,
+#     )
 
-    upper_body_ik = PinkInverseKinematicsActionCfg(
-        # Do not command wrist_crank on the closed MJCF: it is disconnected from the
-        # Pink EEF chain and fights the wrist equality constraint (idle shaking).
-        pink_controlled_joint_names=[
-            "left_shoulder_pitch_joint",
-            "left_shoulder_roll_joint",
-            "left_shoulder_yaw_joint",
-            "left_elbow_pitch_joint",
-            "left_elbow_yaw_joint",
-            "left_wrist_roll_joint",
-            "right_shoulder_pitch_joint",
-            "right_shoulder_roll_joint",
-            "right_shoulder_yaw_joint",
-            "right_elbow_pitch_joint",
-            "right_elbow_yaw_joint",
-            "right_wrist_roll_joint",
-        ],
-        hand_joint_names=SBERCHEL_HAND_JOINT_NAMES,
-        target_eef_link_names={
-            "left_wrist": _LEFT_HAND_BASE_FRAME,
-            "right_wrist": _RIGHT_HAND_BASE_FRAME,
-        },
-        asset_name="robot",
-        controller=PinkIKControllerCfg(
-            articulation_name="robot",
-            base_link_name="pelvis_link",
-            num_hand_joints=len(SBERCHEL_HAND_JOINT_NAMES),
-            show_ik_warnings=True,
-            fail_on_joint_limit_violation=False,
-            variable_input_tasks=[
-                FrameTask(
-                    _LEFT_HAND_BASE_FRAME,
-                    position_cost=8.0,
-                    orientation_cost=2.0,
-                    lm_damping=10.0,
-                    gain=0.5,
-                ),
-                FrameTask(
-                    _RIGHT_HAND_BASE_FRAME,
-                    position_cost=8.0,
-                    orientation_cost=2.0,
-                    lm_damping=10.0,
-                    gain=0.5,
-                ),
-                DampingTask(cost=0.5),
-                NullSpacePostureTask(
-                    cost=0.5,
-                    lm_damping=1.0,
-                    gain=0.3,
-                    controlled_frames=[_LEFT_HAND_BASE_FRAME, _RIGHT_HAND_BASE_FRAME],
-                    controlled_joints=[
-                        "left_shoulder_pitch_joint",
-                        "left_shoulder_roll_joint",
-                        "left_shoulder_yaw_joint",
-                        "right_shoulder_pitch_joint",
-                        "right_shoulder_roll_joint",
-                        "right_shoulder_yaw_joint",
-                    ],
-                ),
-            ],
-            fixed_input_tasks=[],
-            xr_enabled=True,
-        ),
-        enable_gravity_compensation=True,
-    )
+#     upper_body_ik = PinkInverseKinematicsActionCfg(
+#         # Do not command wrist_crank on the closed MJCF: it is disconnected from the
+#         # Pink EEF chain and fights the wrist equality constraint (idle shaking).
+#         pink_controlled_joint_names=[
+#             "left_shoulder_pitch_joint",
+#             "left_shoulder_roll_joint",
+#             "left_shoulder_yaw_joint",
+#             "left_elbow_pitch_joint",
+#             "left_elbow_yaw_joint",
+#             "left_wrist_roll_joint",
+#             "right_shoulder_pitch_joint",
+#             "right_shoulder_roll_joint",
+#             "right_shoulder_yaw_joint",
+#             "right_elbow_pitch_joint",
+#             "right_elbow_yaw_joint",
+#             "right_wrist_roll_joint",
+#         ],
+#         hand_joint_names=SBERCHEL_HAND_JOINT_NAMES,
+#         target_eef_link_names={
+#             "left_wrist": _LEFT_HAND_BASE_FRAME,
+#             "right_wrist": _RIGHT_HAND_BASE_FRAME,
+#         },
+#         asset_name="robot",
+#         controller=PinkIKControllerCfg(
+#             articulation_name="robot",
+#             base_link_name="pelvis_link",
+#             num_hand_joints=len(SBERCHEL_HAND_JOINT_NAMES),
+#             show_ik_warnings=True,
+#             fail_on_joint_limit_violation=False,
+#             variable_input_tasks=[
+#                 FrameTask(
+#                     _LEFT_HAND_BASE_FRAME,
+#                     position_cost=8.0,
+#                     orientation_cost=2.0,
+#                     lm_damping=10.0,
+#                     gain=0.5,
+#                 ),
+#                 FrameTask(
+#                     _RIGHT_HAND_BASE_FRAME,
+#                     position_cost=8.0,
+#                     orientation_cost=2.0,
+#                     lm_damping=10.0,
+#                     gain=0.5,
+#                 ),
+#                 DampingTask(cost=0.5),
+#                 NullSpacePostureTask(
+#                     cost=0.5,
+#                     lm_damping=1.0,
+#                     gain=0.3,
+#                     controlled_frames=[_LEFT_HAND_BASE_FRAME, _RIGHT_HAND_BASE_FRAME],
+#                     controlled_joints=[
+#                         "left_shoulder_pitch_joint",
+#                         "left_shoulder_roll_joint",
+#                         "left_shoulder_yaw_joint",
+#                         "right_shoulder_pitch_joint",
+#                         "right_shoulder_roll_joint",
+#                         "right_shoulder_yaw_joint",
+#                     ],
+#                 ),
+#             ],
+#             fixed_input_tasks=[],
+#             xr_enabled=True,
+#         ),
+#         enable_gravity_compensation=True,
+#     )
 
 
 # @configclass
@@ -452,118 +457,118 @@ class SberchelXRActionsCfg:
 #     policy: PolicyCfg = PolicyCfg()
 
 
-@configclass
-class SberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
-    """Sberchel fetching env with XR upper-body teleop and policy-controlled legs."""
+# @configclass
+# class SberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
+#     """Sberchel fetching env with XR upper-body teleop and policy-controlled legs."""
 
-    actions = SberchelXRActionsCfg()
-    events = SberchelEventCfg()
-    observations: SberchelObservationsCfg = SberchelObservationsCfg()
+#     actions = SberchelXRActionsCfg()
+#     events = SberchelEventCfg()
+#     observations: SberchelObservationsCfg = SberchelObservationsCfg()
 
-    # Static world-frame XR origin (same as GR1/H12 darkstore).
-    xr: XrCfg = XrCfg(
-        anchor_pos=(4.0, 5.0, 0.0),
-        anchor_rot=(0.0, 0.0, 1.0, 0.0),
-    )
+#     # Static world-frame XR origin (same as GR1/H12 darkstore).
+#     xr: XrCfg = XrCfg(
+#         anchor_pos=(4.0, 5.0, 0.0),
+#         anchor_rot=(0.0, 0.0, 1.0, 0.0),
+#     )
 
-    NUM_OPENXR_HAND_JOINTS = 26
-    temp_urdf_dir = tempfile.gettempdir()
+#     NUM_OPENXR_HAND_JOINTS = 26
+#     temp_urdf_dir = tempfile.gettempdir()
 
-    # [left_wrist(7), right_wrist(7), hand_joints(12)] — world-frame wxyz.
-    idle_action = torch.tensor(
-        [
-            3.90,
-            5.95,
-            1.15,
-            0.707,
-            0.0,
-            0.0,
-            0.707,
-            4.30,
-            5.95,
-            1.15,
-            0.707,
-            0.0,
-            0.0,
-            0.707,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ]
-    )
+#     # [left_wrist(7), right_wrist(7), hand_joints(12)] — world-frame wxyz.
+#     idle_action = torch.tensor(
+#         [
+#             3.90,
+#             5.95,
+#             1.15,
+#             0.707,
+#             0.0,
+#             0.0,
+#             0.707,
+#             4.30,
+#             5.95,
+#             1.15,
+#             0.707,
+#             0.0,
+#             0.0,
+#             0.707,
+#             0.0,
+#             0.0,
+#             0.0,
+#             0.0,
+#             0.0,
+#             0.0,
+#             0.0,
+#             0.0,
+#             0.0,
+#             0.0,
+#             0.0,
+#             0.0,
+#         ]
+#     )
 
-    def __post_init__(self):
-        super().__post_init__()
+#     def __post_init__(self):
+#         super().__post_init__()
 
-        self.scene.robot = _apply_sberchel_teleop_actuator_gains(
-            sberchel_xr_teleop_robot_cfg().replace(prim_path="{ENV_REGEX_NS}/Robot")
-        )
-        self.scene.robot.spawn.semantic_tags = [("class", "robot")]
-        self.scene.robot_fingers_contact_prim_path = (
-            "{ENV_REGEX_NS}/Robot/root/.*_(index|middle|ring|pinky|thumb).*"
-        )
-        self.scene.ee_frame = None
+#         self.scene.robot = _apply_sberchel_teleop_actuator_gains(
+#             sberchel_xr_teleop_robot_cfg().replace(prim_path="{ENV_REGEX_NS}/Robot")
+#         )
+#         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
+#         self.scene.robot_fingers_contact_prim_path = (
+#             "{ENV_REGEX_NS}/Robot/root/.*_(index|middle|ring|pinky|thumb).*"
+#         )
+#         self.scene.ee_frame = None
 
-        # Keep policy timing from the base Sberchel env.
-        self.sim.dt = 1.0 / 150.0
-        self.decimation = 1
-        self.sim.render_interval = 1
-        self.episode_length_s = 20.0
+#         # Keep policy timing from the base Sberchel env.
+#         self.sim.dt = 1.0 / 150.0
+#         self.decimation = 1
+#         self.sim.render_interval = 1
+#         self.episode_length_s = 20.0
 
-        pink_urdf_path, pink_mesh_dir, raw_urdf_path = _prepare_sberchel_pink_ik_urdf(
-            _resolve_sberchel_spawn_usd_path(self.scene.robot.spawn)
-        )
-        self.actions.upper_body_ik.controller.urdf_path = pink_urdf_path
-        self.actions.upper_body_ik.controller.mesh_path = pink_mesh_dir
+#         pink_urdf_path, pink_mesh_dir, raw_urdf_path = _prepare_sberchel_pink_ik_urdf(
+#             _resolve_sberchel_spawn_usd_path(self.scene.robot.spawn)
+#         )
+#         self.actions.upper_body_ik.controller.urdf_path = pink_urdf_path
+#         self.actions.upper_body_ik.controller.mesh_path = pink_mesh_dir
 
-        dex_cache_dir = str(Path(pink_urdf_path).parent.parent)
-        idle = self.idle_action.detach().cpu().numpy()
-        retargeter_kwargs = {
-            "full_robot_urdf_path": raw_urdf_path,
-            "dex_cache_dir": dex_cache_dir,
-            "left_idle_wrist_pose": tuple(idle[0:7].tolist()),
-            "right_idle_wrist_pose": tuple(idle[7:14].tolist()),
-        }
+#         dex_cache_dir = str(Path(pink_urdf_path).parent.parent)
+#         idle = self.idle_action.detach().cpu().numpy()
+#         retargeter_kwargs = {
+#             "full_robot_urdf_path": raw_urdf_path,
+#             "dex_cache_dir": dex_cache_dir,
+#             "left_idle_wrist_pose": tuple(idle[0:7].tolist()),
+#             "right_idle_wrist_pose": tuple(idle[7:14].tolist()),
+#         }
 
-        self.teleop_devices = DevicesCfg(
-            devices={
-                "handtracking": OpenXRDeviceCfg(
-                    retargeters=[
-                        SberchelRetargeterCfg(
-                            enable_visualization=True,
-                            num_open_xr_hand_joints=2 * self.NUM_OPENXR_HAND_JOINTS,
-                            sim_device=self.sim.device,
-                            hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
-                            **retargeter_kwargs,
-                        ),
-                    ],
-                    sim_device=self.sim.device,
-                    xr_cfg=self.xr,
-                ),
-                "manusvive": ManusViveCfg(
-                    retargeters=[
-                        SberchelRetargeterCfg(
-                            enable_visualization=True,
-                            num_open_xr_hand_joints=2 * self.NUM_OPENXR_HAND_JOINTS,
-                            sim_device=self.sim.device,
-                            hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
-                            **retargeter_kwargs,
-                        ),
-                    ],
-                    sim_device=self.sim.device,
-                    xr_cfg=self.xr,
-                ),
-            }
-        )
+#         self.teleop_devices = DevicesCfg(
+#             devices={
+#                 "handtracking": OpenXRDeviceCfg(
+#                     retargeters=[
+#                         SberchelRetargeterCfg(
+#                             enable_visualization=True,
+#                             num_open_xr_hand_joints=2 * self.NUM_OPENXR_HAND_JOINTS,
+#                             sim_device=self.sim.device,
+#                             hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
+#                             **retargeter_kwargs,
+#                         ),
+#                     ],
+#                     sim_device=self.sim.device,
+#                     xr_cfg=self.xr,
+#                 ),
+#                 "manusvive": ManusViveCfg(
+#                     retargeters=[
+#                         SberchelRetargeterCfg(
+#                             enable_visualization=True,
+#                             num_open_xr_hand_joints=2 * self.NUM_OPENXR_HAND_JOINTS,
+#                             sim_device=self.sim.device,
+#                             hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
+#                             **retargeter_kwargs,
+#                         ),
+#                     ],
+#                     sim_device=self.sim.device,
+#                     xr_cfg=self.xr,
+#                 ),
+#             }
+#         )
 
 
 @configclass

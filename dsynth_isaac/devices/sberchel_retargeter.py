@@ -211,11 +211,17 @@ def _pack_hand_joint_targets(
     left_targets: dict[str, float],
     right_targets: dict[str, float],
 ) -> np.ndarray:
+    """Pack by ``hand_joint_names`` order (must match Pink ``find_joints`` order)."""
     targets = np.zeros(len(hand_joint_names), dtype=np.float32)
     merged = {**left_targets, **right_targets}
+    missing = []
     for i, name in enumerate(hand_joint_names):
         if name in merged:
             targets[i] = merged[name]
+        else:
+            missing.append(name)
+    if missing:
+        logger.warning("[SberchelRetargeter] missing finger targets for: %s", missing)
     return targets
 
 

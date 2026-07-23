@@ -64,6 +64,35 @@ gym.register(
 )
 
 gym.register(
+    id="Isaac-Dsynth-Sberchel-Converted-Base-v0",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.sberchel_converted_env_cfg:SberchelConvertedBaseEnvCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Isaac-Dsynth-Sberchel-Converted-Fixed-Base-v0",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.sberchel_converted_env_cfg:SberchelConvertedFixedBaseEnvCfg",
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
+    id="Dsynth-Fetch-Any-Item-Sberchel-Converted-Upperbody-XR-v0",
+    entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.sberchel_converted_env_cfg:ConvertedUpperbodySberchelXRFetchAnyItemEnvCfg"
+        ),
+    },
+    disable_env_checker=True,
+)
+
+gym.register(
     id="Dsynth-Fetch-Any-Item-Sberchel-XR-v0",
     entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
     kwargs={
