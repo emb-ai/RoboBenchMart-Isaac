@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 from isaaclab.app import AppLauncher
 
@@ -15,10 +17,28 @@ parser.add_argument("--episode_len", type=int, default=100, help="Length of each
 parser.add_argument(
     "--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations."
 )
+parser.add_argument(
+    "--enable_pinocchio",
+    action="store_true",
+    default=False,
+    help="Import Pinocchio before Isaac Sim (required for Pink IK / upper-body XR tasks).",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli = parser.parse_args()
+
+
+def _task_needs_pinocchio(task: str) -> bool:
+    """Registered tasks that use Isaac Lab Pink IK (not generic IK-rel envs)."""
+    task_lower = task.lower()
+    return any(hint in task_lower for hint in ("upperbody", "gr1t2"))
+
+
+if args_cli.enable_pinocchio or _task_needs_pinocchio(args_cli.task):
+    # Must load before AppLauncher so eigenpy registers std::vector bindings for Pinocchio.
+    import pinocchio  # noqa: F401
+
 args_cli.enable_cameras = True
 # launch omniverse app
 app_launcher = AppLauncher(args_cli)
@@ -38,6 +58,36 @@ import sys
 sys.path.append('.')
 import dsynth_isaac.tasks.manager_based
 from isaaclab_tasks.manager_based.manipulation.stack.config.franka.stack_ik_rel_env_cfg import FrankaCubeStackEnvCfg
+
+
+def _pink_hold_action_from_robot(env) -> torch.Tensor | None:
+    """Build a Pink IK hold action from the robot's current wrist poses (world frame).
+
+    Env ``idle_action`` wrist targets are calibrated for the XR anchor, not the
+    darkstore robot spawn pose, so they pull arms the wrong way in demo scripts.
+    """
+    unwrapped = env.unwrapped
+    action_manager = getattr(unwrapped, "action_manager", None)
+    if action_manager is None:
+        return None
+    try:
+        ik_term = action_manager.get_term("upper_body_ik")
+    except (AttributeError, KeyError, ValueError):
+        return None
+    cfg = ik_term.cfg
+    robot = unwrapped.scene[cfg.asset_name]
+    data = robot.data
+
+    left_link = cfg.target_eef_link_names["left_wrist"]
+    right_link = cfg.target_eef_link_names["right_wrist"]
+    left_idx = data.body_names.index(left_link)
+    right_idx = data.body_names.index(right_link)
+
+    left_wrist = data.body_link_state_w[:, left_idx, :7]
+    right_wrist = data.body_link_state_w[:, right_idx, :7]
+    hand_pos = data.joint_pos[:, ik_term._hand_joint_ids]
+    return torch.cat([left_wrist, right_wrist, hand_pos], dim=-1)
+
 
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
@@ -70,19 +120,14 @@ def main():
         with torch.inference_mode():
             print(">>> reset")
             env.reset(seed=seed)
+            hold_action = _pink_hold_action_from_robot(env)
             for t in tqdm.tqdm(range(args_cli.episode_len), total=args_cli.episode_len, desc="Elapsed steps"):
-                # joint_efforts = torch.randn_like(env.action_manager.action)
-                action = env.unwrapped.action_manager.action
-                action[:, 2] = 2.0
-                # action[:, -1] = 10.0
-                # action[0, 0] =  0.0
-                # action[0, 1] =  -0.002
-                # action[0, 2] =  0.0
-                # action[0, 3] =  0.0
-                # action[0, 4] =  0.0 
-                # action[0, 5] =  0.0
-                # action[0, 6] = 0.0
-    # tensor([[-0.6635,  0.6894,  0.2776, -0.0860]], device='cuda:0')
+                if hold_action is not None:
+                    action = hold_action
+                else:
+                    action = env.unwrapped.action_manager.action.clone()
+                    if "fetchbot" in args_cli.task.lower():
+                        action[:, 2] = 2.0
                 obs, reward, terminated, truncated, info = env.step(action)
                 print(info)
         seed += 1

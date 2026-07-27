@@ -22,7 +22,9 @@ from isaaclab.sim.converters import MjcfConverter
 logger = logging.getLogger(__name__)
 
 # Bump when Pink IK URDF export logic changes so cached files are regenerated.
-PINK_URDF_CACHE_VERSION = "v7"
+PINK_URDF_CACHE_VERSION = "v8"
+# Bump when sim spawn settings change and the MJCF USD cache must be regenerated.
+MJCF_USD_CACHE_VERSION = "upperbody_fix_root_v1"
 
 
 def _find_link_prim_path(stage, link_name: str) -> str:
@@ -210,13 +212,22 @@ def resolve_sberchel_mjcf_usd(spawn_cfg) -> tuple[str, str]:
 
     preprocessed_mjcf = preprocess_robot_menagerie_mjcf(original_mjcf)
     resolved_usd = Path(usd_dir) / usd_file_name
+    mjcf_cache_version_path = Path(usd_dir) / ".mjcf_spawn_cache_version"
 
     usd_path = getattr(spawn_cfg, "usd_path", None)
     if not (isinstance(usd_path, str) and usd_path and Path(usd_path).exists()):
         converter_cfg = spawn_cfg.replace(asset_path=preprocessed_mjcf)
-        if resolved_usd.exists() and resolved_usd.stat().st_size < 4096:
+        cache_is_current = (
+            mjcf_cache_version_path.exists()
+            and mjcf_cache_version_path.read_text().strip() == MJCF_USD_CACHE_VERSION
+        )
+        if (
+            not cache_is_current
+            or (resolved_usd.exists() and resolved_usd.stat().st_size < 4096)
+        ):
             converter_cfg = converter_cfg.replace(force_usd_conversion=True)
         usd_path = MjcfConverter(converter_cfg).usd_path
+        mjcf_cache_version_path.write_text(MJCF_USD_CACHE_VERSION)
     else:
         usd_path = str(resolved_usd)
 
@@ -385,21 +396,11 @@ def _sanitize_mjcf_export_urdf_for_pink(urdf_path: Path) -> None:
     urdf_path.write_text(content)
 
 
-def _strip_urdf_collision_geometry(urdf_path: Path, output_path: Path) -> Path:
-    """Remove collision geometry from URDF so Pinocchio skips unreliable collision meshes."""
-    with urdf_path.open() as file:
-        content = file.read()
+def _strip_urdf_mesh_geometry_for_pink(urdf_path: Path, output_path: Path) -> Path:
+    """Drop mesh geometry from URDF; Pink IK only needs link/joint kinematics."""
+    content = urdf_path.read_text()
     content = re.sub(r"<collision>.*?</collision>\s*", "", content, flags=re.DOTALL)
-
-    visual_pattern = re.compile(r"<visual>.*?</visual>\s*", flags=re.DOTALL)
-
-    def _drop_collision_visuals(match: re.Match[str]) -> str:
-        block = match.group(0)
-        if "collisions" in block and ".obj" in block:
-            return ""
-        return block
-
-    content = visual_pattern.sub(_drop_collision_visuals, content)
+    content = re.sub(r"<visual>.*?</visual>\s*", "", content, flags=re.DOTALL)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(content)
     return output_path
@@ -438,16 +439,24 @@ def prepare_sberchel_pink_ik_urdf(
     mesh_dir = cache_dir / "meshes"
 
     cache_is_current = version_path.exists() and version_path.read_text().strip() == PINK_URDF_CACHE_VERSION
-    if pink_urdf_path.exists() and mesh_dir.exists() and cache_is_current and not force_conversion:
-        return str(pink_urdf_path), str(mesh_dir), str(raw_urdf_path)
-
-    if force_conversion or not cache_is_current or not raw_urdf_path.exists() or not mesh_dir.exists():
+    needs_export = (
+        force_conversion
+        or not cache_is_current
+        or not raw_urdf_path.exists()
+        or not mesh_dir.exists()
+    )
+    if needs_export:
+        cache_dir.mkdir(parents=True, exist_ok=True)
         raw_urdf_path, mesh_dir = convert_sberchel_usd_to_urdf(usd_path, cache_dir)
         raw_urdf_path = Path(raw_urdf_path)
         mesh_dir = Path(mesh_dir)
-        cache_dir.mkdir(parents=True, exist_ok=True)
         version_path.write_text(PINK_URDF_CACHE_VERSION)
+    else:
+        raw_urdf_path = Path(raw_urdf_path)
+        mesh_dir = Path(mesh_dir)
 
+    # Idempotent; also repairs legacy caches that skipped triangulation on hit.
     _triangulate_obj_meshes(mesh_dir)
-    pink_urdf_path = _strip_urdf_collision_geometry(raw_urdf_path, pink_urdf_path)
+    _strip_urdf_mesh_geometry_for_pink(raw_urdf_path, pink_urdf_path)
+
     return str(pink_urdf_path), str(mesh_dir), str(raw_urdf_path)

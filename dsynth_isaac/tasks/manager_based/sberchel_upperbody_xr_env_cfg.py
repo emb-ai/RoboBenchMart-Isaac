@@ -137,6 +137,8 @@ class UpperbodySberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
     NUM_OPENXR_HAND_JOINTS = 26
 
     # [left_wrist(7), right_wrist(7), hand_joints(12)] — world-frame wxyz.
+    # Wrist poses are near the XR anchor (see ``xr.anchor_pos``), for inactive teleop / replay.
+    # Demo scripts should sample wrist targets from the live robot after reset instead.
     idle_action = torch.tensor(
         [
             3.90,
@@ -183,9 +185,10 @@ class UpperbodySberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
 
         spawn = self.scene.robot.spawn
         patched_usd_path = resolve_sberchel_spawn_usd_path(spawn)
-        pink_urdf_path, pink_mesh_dir, _raw_urdf_path = prepare_sberchel_pink_ik_urdf(patched_usd_path)
+        pink_urdf_path, _pink_mesh_dir, _raw_urdf_path = prepare_sberchel_pink_ik_urdf(patched_usd_path)
         self.actions.upper_body_ik.controller.urdf_path = pink_urdf_path
-        self.actions.upper_body_ik.controller.mesh_path = pink_mesh_dir
+        # Kinematics-only Pink URDF has no mesh references; avoid Pinocchio OBJ loads.
+        self.actions.upper_body_ik.controller.mesh_path = None
 
         self.teleop_devices = DevicesCfg(
             devices={
