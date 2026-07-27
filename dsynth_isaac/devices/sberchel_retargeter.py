@@ -1,4 +1,4 @@
-"""Sberchel OpenXR retargeter: wrist frame offsets + joint-to-joint fingers."""
+"""Sberchel OpenXR retargeter: wrist frame offsets + VRD-style finger curl."""
 
 from __future__ import annotations
 
@@ -19,20 +19,32 @@ from isaaclab.devices.retargeter_base import RetargeterBase
 logger = logging.getLogger(__name__)
 
 # OpenXR wrist -> Sberchel hand_base_link (wxyz).
-# Derived by scripts/derive_sberchel_openxr_wrist_offset.py (palm-down /
-# fingers-forward equate; OpenXR Khronos wrist axes vs open-MJCF hand_base
-# distal/palm). Composition: desired = openxr_wrist * C_side (VRD-style).
-# Both sides share C because OpenXR and hand_base use the same distal/palm
-# axes bilaterally (unlike H12 Inspire RPY offsets).
 _LEFT_WRIST_FRAME_OFFSET_WXYZ = (0.5, 0.5, 0.5, 0.5)
 _RIGHT_WRIST_FRAME_OFFSET_WXYZ = (0.5, 0.5, 0.5, 0.5)
 
-# Proximal joint limits from Sberchel hand MJCF / dex hand URDFs.
+# Proximal joint spans (MJCF range: 0 = open/extended, upper = closed).
 _DIGIT_PROXIMAL_LIMIT = (0.0, 1.7)
 _THUMB_PITCH_LIMIT = (0.0, 0.5)
 _THUMB_YAW_LIMIT = (-0.1, 1.3)
 
-# OpenXR digit stem -> robot joint stem (little == pinky).
+# VisionRobotDemo ARKitTrackingManager.swift
+_DIGIT_CURL_NORMALIZER = 2.6
+_DIGIT_CURL_DEADZONE = 0.05
+_THUMB_CURL_NORMALIZER = 1.8
+_THUMB_CURL_DEADZONE = 0.05
+_DIGIT_FALLBACK_NORMALIZER = 0.92
+_THUMB_FALLBACK_NORMALIZER = 1.04
+
+# VisionRobotDemo MuJoCoBridge.mm closeFractionAtFullCurl.
+_CLOSE_FRACTION = {
+    "thumb_yaw": 1.0,
+    "thumb_pitch": 1.0,
+    "index": 1.45 / 1.70,
+    "middle": 1.48 / 1.70,
+    "ring": 1.43 / 1.70,
+    "pinky": 1.36 / 1.70,
+}
+
 _DIGIT_STEMS = (
     ("index", "index"),
     ("middle", "middle"),
@@ -40,9 +52,12 @@ _DIGIT_STEMS = (
     ("little", "pinky"),
 )
 
-# Light EMA so single-frame OpenXR dropouts do not snap fingers (borrowed
-# from VRD blend idea; not a curl normalizer).
-_FINGER_BLEND = 0.35
+# VRD finger blend (MuJoCoBridge.mm VRDUpdateFingerTargets).
+_FINGER_BLEND = 0.28
+
+# Palm-plane thumb angle (deg): rest/abduct often near -35..-45° in OpenXR.
+_THUMB_ANGLE_OPEN_DEG = -50.0
+_THUMB_ANGLE_FULL_DEG = 12.0
 
 
 def _pose_matrix_from_7d(pose_7d: np.ndarray) -> torch.Tensor:
@@ -60,10 +75,7 @@ def _pose_7d_from_matrix(pose_matrix: torch.Tensor) -> np.ndarray:
 def _apply_hand_base_frame_offset(
     wrist_7d: np.ndarray, offset_wxyz: tuple[float, float, float, float]
 ) -> np.ndarray:
-    """Map OpenXR wrist pose in world to Sberchel hand_base_link control frame.
-
-    Rotation-only right multiply: ``T_hand_base^world = T_openxr^world * C``.
-    """
+    """Map OpenXR wrist pose in world to Sberchel hand_base_link control frame."""
     openxr_wrist_in_world = _pose_matrix_from_7d(wrist_7d)
     offset_quat = torch.tensor(offset_wxyz, dtype=torch.float32)
     hand_base_in_openxr = PoseUtils.make_pose(
@@ -82,7 +94,6 @@ def _joint_xyz(hand_poses: dict[str, np.ndarray], name: str) -> np.ndarray | Non
 
 
 def _segment_flexion(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float | None:
-    """Angle (rad) between bones a→b and b→c. Straight ≈ 0, flexed > 0."""
     first = b - a
     second = c - b
     n1 = np.linalg.norm(first)
@@ -93,47 +104,105 @@ def _segment_flexion(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> float | Non
     return float(np.arccos(np.clip(cos_ang, -1.0, 1.0)))
 
 
-def _clip_joint(value: float, limits: tuple[float, float]) -> float:
-    return float(np.clip(value, limits[0], limits[1]))
+def _normalized_curl(flexion_sum: float, normalizer: float, deadzone: float) -> float:
+    raw = float(np.clip(flexion_sum / normalizer, 0.0, 1.0))
+    if raw <= deadzone:
+        return 0.0
+    return float(np.clip((raw - deadzone) / (1.0 - deadzone), 0.0, 1.0))
 
 
-def _digit_proximal_flexion(hand_poses: dict[str, np.ndarray], openxr_digit: str) -> float | None:
-    """OpenXR MCP flexion for one digit → maps 1:1 onto robot proximal joint."""
-    metacarpal = _joint_xyz(hand_poses, f"{openxr_digit}_metacarpal")
-    proximal = _joint_xyz(hand_poses, f"{openxr_digit}_proximal")
-    intermediate = _joint_xyz(hand_poses, f"{openxr_digit}_intermediate")
-    distal = _joint_xyz(hand_poses, f"{openxr_digit}_distal")
-    tip = _joint_xyz(hand_poses, f"{openxr_digit}_tip")
+@dataclass
+class _CurlMeasurement:
+    value: float
+    measured_segments: int
+
+
+def _digit_curl(hand_poses: dict[str, np.ndarray], openxr_digit: str) -> _CurlMeasurement:
+    """VisionRobotDemo ``digitCurl`` on OpenXR bone names."""
     wrist = _joint_xyz(hand_poses, "wrist")
+    metacarpal = _joint_xyz(hand_poses, f"{openxr_digit}_metacarpal")
+    knuckle = _joint_xyz(hand_poses, f"{openxr_digit}_proximal")
+    intermediate_base = _joint_xyz(hand_poses, f"{openxr_digit}_intermediate")
+    intermediate_tip = _joint_xyz(hand_poses, f"{openxr_digit}_distal")
+    tip = _joint_xyz(hand_poses, f"{openxr_digit}_tip")
 
-    base = metacarpal if metacarpal is not None else wrist
-    if base is not None and proximal is not None and intermediate is not None:
-        return _segment_flexion(base, proximal, intermediate)
-    if proximal is not None and intermediate is not None and distal is not None:
-        return _segment_flexion(proximal, intermediate, distal)
-    if proximal is not None and intermediate is not None and tip is not None:
-        return _segment_flexion(proximal, intermediate, tip)
-    return None
+    proximal = metacarpal if metacarpal is not None else wrist
+    flexion_sum = 0.0
+    measured = 0
+
+    if proximal is not None and knuckle is not None and intermediate_base is not None:
+        angle = _segment_flexion(proximal, knuckle, intermediate_base)
+        if angle is not None:
+            flexion_sum += angle
+            measured += 1
+    if knuckle is not None and intermediate_base is not None and intermediate_tip is not None:
+        angle = _segment_flexion(knuckle, intermediate_base, intermediate_tip)
+        if angle is not None:
+            flexion_sum += angle
+            measured += 1
+    if intermediate_base is not None and intermediate_tip is not None and tip is not None:
+        angle = _segment_flexion(intermediate_base, intermediate_tip, tip)
+        if angle is not None:
+            flexion_sum += angle
+            measured += 1
+
+    if measured > 0:
+        normalizer = _DIGIT_CURL_NORMALIZER * measured / 3.0
+        return _CurlMeasurement(
+            _normalized_curl(flexion_sum, normalizer, _DIGIT_CURL_DEADZONE), measured
+        )
+
+    if knuckle is not None and intermediate_base is not None and tip is not None:
+        angle = _segment_flexion(knuckle, intermediate_base, tip)
+        if angle is not None:
+            return _CurlMeasurement(
+                _normalized_curl(angle, _DIGIT_FALLBACK_NORMALIZER, _DIGIT_CURL_DEADZONE), 1
+            )
+
+    return _CurlMeasurement(0.0, 0)
 
 
-def _thumb_proximal_pitch(hand_poses: dict[str, np.ndarray]) -> float | None:
-    """Thumb flexion at the proximal joint (metacarpal → proximal → distal)."""
-    metacarpal = _joint_xyz(hand_poses, "thumb_metacarpal")
-    proximal = _joint_xyz(hand_poses, "thumb_proximal")
-    distal = _joint_xyz(hand_poses, "thumb_distal")
+def _thumb_flexion_curl(hand_poses: dict[str, np.ndarray]) -> _CurlMeasurement:
+    """VisionRobotDemo ``thumbFlexionCurl`` (OpenXR has no thumb intermediate)."""
+    knuckle = _joint_xyz(hand_poses, "thumb_metacarpal")
+    if knuckle is None:
+        knuckle = _joint_xyz(hand_poses, "thumb_proximal")
+    intermediate_base = _joint_xyz(hand_poses, "thumb_proximal")
+    intermediate_tip = _joint_xyz(hand_poses, "thumb_distal")
     tip = _joint_xyz(hand_poses, "thumb_tip")
-    if metacarpal is not None and proximal is not None and distal is not None:
-        return _segment_flexion(metacarpal, proximal, distal)
-    if proximal is not None and distal is not None and tip is not None:
-        return _segment_flexion(proximal, distal, tip)
-    return None
+
+    flexion_sum = 0.0
+    measured = 0
+
+    if knuckle is not None and intermediate_base is not None and intermediate_tip is not None:
+        angle = _segment_flexion(knuckle, intermediate_base, intermediate_tip)
+        if angle is not None:
+            flexion_sum += angle
+            measured += 1
+    if intermediate_base is not None and intermediate_tip is not None and tip is not None:
+        angle = _segment_flexion(intermediate_base, intermediate_tip, tip)
+        if angle is not None:
+            flexion_sum += angle
+            measured += 1
+
+    if measured > 0:
+        normalizer = _THUMB_CURL_NORMALIZER * measured / 2.0
+        return _CurlMeasurement(
+            _normalized_curl(flexion_sum, normalizer, _THUMB_CURL_DEADZONE), measured
+        )
+
+    if knuckle is not None and intermediate_base is not None and tip is not None:
+        angle = _segment_flexion(knuckle, intermediate_base, tip)
+        if angle is not None:
+            return _CurlMeasurement(
+                _normalized_curl(angle, _THUMB_FALLBACK_NORMALIZER, _THUMB_CURL_DEADZONE), 1
+            )
+
+    return _CurlMeasurement(0.0, 0)
 
 
-def _thumb_opposition(hand_poses: dict[str, np.ndarray]) -> float | None:
-    """Thumb yaw cue in [0, 1]: 0 = adducted along palm, 1 = opposed.
-
-    Geometry from VisionRobotDemo ``thumbOpposition`` (not total-curl).
-    """
+def _thumb_opposition(hand_poses: dict[str, np.ndarray], side: str) -> tuple[float, float] | None:
+    """OpenXR thumb opposition in the palm plane → [0, 1] via signed angle calibration."""
     wrist = _joint_xyz(hand_poses, "wrist")
     thumb_knuckle = _joint_xyz(hand_poses, "thumb_metacarpal")
     if thumb_knuckle is None:
@@ -166,44 +235,71 @@ def _thumb_opposition(hand_poses: dict[str, np.ndarray]) -> float | None:
     thumb_in_plane = thumb - palm_normal * np.dot(thumb, palm_normal)
     if np.linalg.norm(thumb_in_plane) < 1e-6:
         return None
-    # Negative lateral component → opposition toward the palm center.
-    signed = -float(np.dot(thumb_in_plane / np.linalg.norm(thumb_in_plane), palm_lateral))
-    return float(np.clip(0.5 * (signed + 1.0), 0.0, 1.0))
+    thumb_dir = thumb_in_plane / np.linalg.norm(thumb_in_plane)
+    lat_comp = float(np.dot(thumb_dir, palm_lateral))
+    fwd_comp = float(np.dot(thumb_dir, palm_forward))
+    signed = -lat_comp
+    angle_deg = float(np.rad2deg(np.arctan2(signed, max(fwd_comp, 1e-6))))
+    span = _THUMB_ANGLE_FULL_DEG - _THUMB_ANGLE_OPEN_DEG
+    opposition = float(np.clip((angle_deg - _THUMB_ANGLE_OPEN_DEG) / span, 0.0, 1.0))
+    return opposition, signed
+
+
+def _resolve_curl(measurement: _CurlMeasurement, prev: float | None) -> float:
+    if measurement.measured_segments > 0:
+        return measurement.value
+    if prev is not None:
+        return prev
+    return 0.0
+
+
+def _span_target(open_value: float, closed_value: float, fraction: float) -> float:
+    return open_value + fraction * (closed_value - open_value)
 
 
 def _retarget_one_hand_joints(
     hand_poses: dict[str, np.ndarray],
     side: str,
-    prev: dict[str, float] | None,
-) -> dict[str, float]:
-    """Map OpenXR finger bones to Sberchel proximal joint targets for one hand."""
+    prev_targets: dict[str, float] | None,
+    prev_curls: dict[str, float] | None,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Map OpenXR bones → proximal joint targets (VRD curl → joint span)."""
+    prev_targets = prev_targets or {}
+    prev_curls = prev_curls or {}
+    curls: dict[str, float] = {}
     out: dict[str, float] = {}
-    prev = prev or {}
+
+    thumb_meas = _thumb_flexion_curl(hand_poses)
+    curls["thumb"] = _resolve_curl(thumb_meas, prev_curls.get("thumb"))
 
     for openxr_digit, robot_digit in _DIGIT_STEMS:
-        joint_name = f"{side}_{robot_digit}_proximal_joint"
-        flex = _digit_proximal_flexion(hand_poses, openxr_digit)
-        if flex is None:
-            out[joint_name] = prev.get(joint_name, 0.0)
-        else:
-            out[joint_name] = _clip_joint(flex, _DIGIT_PROXIMAL_LIMIT)
+        meas = _digit_curl(hand_poses, openxr_digit)
+        curls[robot_digit] = _resolve_curl(meas, prev_curls.get(robot_digit))
 
-    pitch_name = f"{side}_thumb_proximal_pitch_joint"
-    pitch = _thumb_proximal_pitch(hand_poses)
-    if pitch is None:
-        out[pitch_name] = prev.get(pitch_name, 0.0)
+    opp_meas = _thumb_opposition(hand_poses, side)
+    if opp_meas is None:
+        opposition = float(prev_curls.get("opposition", 0.0))
+        signed = float(prev_curls.get("opposition_signed", 0.0))
     else:
-        out[pitch_name] = _clip_joint(pitch, _THUMB_PITCH_LIMIT)
+        opposition, signed = opp_meas
+    curls["opposition"] = float(opposition)
+    curls["opposition_signed"] = float(signed)
 
     yaw_name = f"{side}_thumb_proximal_yaw_joint"
-    opposition = _thumb_opposition(hand_poses)
-    if opposition is None:
-        out[yaw_name] = prev.get(yaw_name, 0.0)
-    else:
-        lo, hi = _THUMB_YAW_LIMIT
-        out[yaw_name] = _clip_joint(lo + opposition * (hi - lo), _THUMB_YAW_LIMIT)
+    lo, hi = _THUMB_YAW_LIMIT
+    out[yaw_name] = _span_target(lo, hi, _CLOSE_FRACTION["thumb_yaw"] * curls["opposition"])
 
-    return out
+    pitch_name = f"{side}_thumb_proximal_pitch_joint"
+    lo, hi = _THUMB_PITCH_LIMIT
+    out[pitch_name] = _span_target(lo, hi, _CLOSE_FRACTION["thumb_pitch"] * curls["thumb"])
+
+    for _, robot_digit in _DIGIT_STEMS:
+        joint_name = f"{side}_{robot_digit}_proximal_joint"
+        lo, hi = _DIGIT_PROXIMAL_LIMIT
+        frac = _CLOSE_FRACTION[robot_digit] * curls[robot_digit]
+        out[joint_name] = _span_target(lo, hi, frac)
+
+    return out, curls
 
 
 def _pack_hand_joint_targets(
@@ -211,7 +307,6 @@ def _pack_hand_joint_targets(
     left_targets: dict[str, float],
     right_targets: dict[str, float],
 ) -> np.ndarray:
-    """Pack by ``hand_joint_names`` order (must match Pink ``find_joints`` order)."""
     targets = np.zeros(len(hand_joint_names), dtype=np.float32)
     merged = {**left_targets, **right_targets}
     missing = []
@@ -237,7 +332,7 @@ def _blend_targets(
 
 
 class SberchelRetargeter(GR1T2Retargeter):
-    """Absolute OpenXR wrist poses + joint-to-joint proximal finger mapping."""
+    """Absolute OpenXR wrist poses + VRD-style proximal finger curl mapping."""
 
     def __init__(self, cfg: SberchelRetargeterCfg):
         RetargeterBase.__init__(self, cfg)
@@ -247,6 +342,9 @@ class SberchelRetargeter(GR1T2Retargeter):
         self._sim_device = cfg.sim_device
         self._prev_left_fingers: dict[str, float] | None = None
         self._prev_right_fingers: dict[str, float] | None = None
+        self._prev_left_curls: dict[str, float] | None = None
+        self._prev_right_curls: dict[str, float] | None = None
+        self._last_opposition_signed: dict[str, float] = {"left": 0.0, "right": 0.0}
 
         if self._enable_visualization:
             import isaaclab.sim as sim_utils
@@ -265,12 +363,11 @@ class SberchelRetargeter(GR1T2Retargeter):
 
         print(
             "[SberchelRetargeter] ready — absolute wrist tracking, "
-            f"joint-to-joint fingers ({len(self._hand_joint_names)}): {self._hand_joint_names}",
+            f"VRD finger curl ({len(self._hand_joint_names)}): {self._hand_joint_names}",
             flush=True,
         )
 
     def recalibrate_wrists(self) -> None:
-        """No-op: absolute wrist retargeting has no calibration reference."""
         return
 
     def retarget(self, data: dict) -> torch.Tensor:
@@ -286,12 +383,22 @@ class SberchelRetargeter(GR1T2Retargeter):
             joints_position[1::2] = np.array([pose[:3] for pose in right_hand_poses.values()])
             self._markers.visualize(translations=torch.tensor(joints_position, device=self._sim_device))
 
-        left_raw = _retarget_one_hand_joints(left_hand_poses, "left", self._prev_left_fingers)
-        right_raw = _retarget_one_hand_joints(right_hand_poses, "right", self._prev_right_fingers)
+        left_raw, left_curls = _retarget_one_hand_joints(
+            left_hand_poses, "left", self._prev_left_fingers, self._prev_left_curls
+        )
+        right_raw, right_curls = _retarget_one_hand_joints(
+            right_hand_poses, "right", self._prev_right_fingers, self._prev_right_curls
+        )
         left_targets = _blend_targets(self._prev_left_fingers, left_raw, _FINGER_BLEND)
         right_targets = _blend_targets(self._prev_right_fingers, right_raw, _FINGER_BLEND)
         self._prev_left_fingers = left_targets
         self._prev_right_fingers = right_targets
+        self._prev_left_curls = left_curls
+        self._prev_right_curls = right_curls
+        self._last_opposition_signed = {
+            "left": float(left_curls.get("opposition_signed", 0.0)),
+            "right": float(right_curls.get("opposition_signed", 0.0)),
+        }
 
         retargeted_hand_joints = _pack_hand_joint_targets(
             self._hand_joint_names, left_targets, right_targets
@@ -301,13 +408,14 @@ class SberchelRetargeter(GR1T2Retargeter):
         self._finger_log_counter += 1
         if self._finger_log_counter <= 3 or self._finger_log_counter % 120 == 0:
             msg = (
-                f"[SberchelRetargeter] fingers packed="
-                f"{np.array2string(retargeted_hand_joints, precision=2)}"
+                f"[SberchelRetargeter] curls L={left_curls} R={right_curls} "
+                f"signed L={self._last_opposition_signed['left']:.3f} "
+                f"R={self._last_opposition_signed['right']:.3f} "
+                f"packed={np.array2string(retargeted_hand_joints, precision=2)}"
             )
             print(msg, flush=True)
             logger.info(msg)
 
-        # Absolute world poses: OpenXR wrist * hand_base frame offset C.
         left_wrist_pose = _apply_hand_base_frame_offset(left_wrist, _LEFT_WRIST_FRAME_OFFSET_WXYZ)
         right_wrist_pose = _apply_hand_base_frame_offset(right_wrist, _RIGHT_WRIST_FRAME_OFFSET_WXYZ)
 
@@ -320,15 +428,10 @@ class SberchelRetargeter(GR1T2Retargeter):
 
 @dataclass
 class SberchelRetargeterCfg(GR1T2RetargeterCfg):
-    """Sberchel retargeter config.
-
-    ``full_robot_urdf_path`` / ``dex_cache_dir`` are unused (kept for older env
-    cfgs that still pass them). Fingers use analytic OpenXR joint mapping.
-    """
+    """Sberchel retargeter config."""
 
     full_robot_urdf_path: str = ""
     dex_cache_dir: str = ""
-    # Kept for backward compatibility with older env cfgs; unused by absolute retargeting.
     left_idle_wrist_pose: tuple[float, ...] = (0.0,) * 7
     right_idle_wrist_pose: tuple[float, ...] = (0.0,) * 7
     retargeter_type: type = SberchelRetargeter

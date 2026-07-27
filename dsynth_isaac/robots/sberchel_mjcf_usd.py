@@ -12,6 +12,7 @@ them inside ``spawn_from_mjcf``.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -382,3 +383,71 @@ def _sanitize_mjcf_export_urdf_for_pink(urdf_path: Path) -> None:
         '<joint name="floating_base" type="fixed">',
     )
     urdf_path.write_text(content)
+
+
+def _strip_urdf_collision_geometry(urdf_path: Path, output_path: Path) -> Path:
+    """Remove collision geometry from URDF so Pinocchio skips unreliable collision meshes."""
+    with urdf_path.open() as file:
+        content = file.read()
+    content = re.sub(r"<collision>.*?</collision>\s*", "", content, flags=re.DOTALL)
+
+    visual_pattern = re.compile(r"<visual>.*?</visual>\s*", flags=re.DOTALL)
+
+    def _drop_collision_visuals(match: re.Match[str]) -> str:
+        block = match.group(0)
+        if "collisions" in block and ".obj" in block:
+            return ""
+        return block
+
+    content = visual_pattern.sub(_drop_collision_visuals, content)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(content)
+    return output_path
+
+
+def _triangulate_obj_meshes(mesh_dir: Path) -> None:
+    """Triangulate quad faces in exported OBJ meshes for Pinocchio compatibility."""
+    for obj_path in mesh_dir.glob("*.obj"):
+        triangulated_lines: list[str] = []
+        for line in obj_path.read_text().splitlines():
+            if line.startswith("f "):
+                face_vertices = line.split()[1:]
+                if len(face_vertices) == 4:
+                    triangulated_lines.append(f"f {face_vertices[0]} {face_vertices[1]} {face_vertices[2]}")
+                    triangulated_lines.append(f"f {face_vertices[0]} {face_vertices[2]} {face_vertices[3]}")
+                    continue
+            triangulated_lines.append(line)
+        obj_path.write_text("\n".join(triangulated_lines) + "\n")
+
+
+def resolve_sberchel_spawn_usd_path(spawn_cfg) -> str:
+    """Resolve a patched Sberchel MJCF USD path for Pink IK / URDF export."""
+    usd_path, _ = resolve_sberchel_mjcf_usd(spawn_cfg)
+    return usd_path
+
+
+def prepare_sberchel_pink_ik_urdf(
+    usd_path: str | Path, force_conversion: bool = False
+) -> tuple[str, str, str]:
+    """Convert patched Sberchel USD to cached URDF/meshes usable by Pink IK."""
+    usd_path = Path(usd_path)
+    cache_dir = usd_path.parent / "pink_ik_cache"
+    version_path = cache_dir / ".cache_version"
+    raw_urdf_path = cache_dir / "urdf" / f"{usd_path.stem}.urdf"
+    pink_urdf_path = cache_dir / "urdf" / f"{usd_path.stem}_pink.urdf"
+    mesh_dir = cache_dir / "meshes"
+
+    cache_is_current = version_path.exists() and version_path.read_text().strip() == PINK_URDF_CACHE_VERSION
+    if pink_urdf_path.exists() and mesh_dir.exists() and cache_is_current and not force_conversion:
+        return str(pink_urdf_path), str(mesh_dir), str(raw_urdf_path)
+
+    if force_conversion or not cache_is_current or not raw_urdf_path.exists() or not mesh_dir.exists():
+        raw_urdf_path, mesh_dir = convert_sberchel_usd_to_urdf(usd_path, cache_dir)
+        raw_urdf_path = Path(raw_urdf_path)
+        mesh_dir = Path(mesh_dir)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        version_path.write_text(PINK_URDF_CACHE_VERSION)
+
+    _triangulate_obj_meshes(mesh_dir)
+    pink_urdf_path = _strip_urdf_collision_geometry(raw_urdf_path, pink_urdf_path)
+    return str(pink_urdf_path), str(mesh_dir), str(raw_urdf_path)

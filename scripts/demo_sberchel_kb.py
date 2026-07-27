@@ -139,7 +139,7 @@ def main():
     env.reset(seed=args_cli.seed)
 
     from green_challenge.policy.network import Network
-    net = Network(env, type="zest", device="cpu")
+    net = Network(env, type="zest", device="cpu", closed_kinematics=False)
     net.reset()
 
     kb = WasdKeyboard(args_cli.speed, args_cli.turn, args_cli.strafe)
