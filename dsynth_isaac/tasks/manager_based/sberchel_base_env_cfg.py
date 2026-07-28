@@ -6,6 +6,7 @@ Same store/scene as the Fetch task (``DarkstoreBaseEnvCfg``); only the robot in
 Sberchel is a free-floating biped wired for the green_challenge locomotion policy
 (see ``scripts/demo_sberchel.py``). Upper-body XR teleop lives in
 ``sberchel_upperbody_xr_env_cfg.UpperbodySberchelXRFetchAnyItemEnvCfg``.
+Full-body XR + policy legs: ``sberchel_xr_env_cfg.SberchelXRFetchAnyItemEnvCfg``.
 """
 
 import isaaclab.envs.mdp as mdp

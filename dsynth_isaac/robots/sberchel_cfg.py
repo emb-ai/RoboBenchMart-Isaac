@@ -5,7 +5,8 @@ Reuses robot definitions from ``green_challenge`` (serialized interface JSON +
 ``SBERCHEL_CONFIG_OPEN_KINEMATICS`` uses the ``robot_green_open_source`` package
 (green_challenge open-kinematics robot) with spawn pointed at the serial open
 MJCF file. ``SBERCHEL_UPPERBODY_XR_ROBOT`` adds fixed pelvis + ImplicitActuator
-PD for upper-body XR teleop.
+PD for upper-body XR teleop. ``SBERCHEL_XR_LOCOMOTION_ROBOT`` is free-floating
+open kinematics with policy leg actuators and XR arm PD.
 """
 
 import os
@@ -197,3 +198,158 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
     },
     soft_joint_pos_limit_factor=SBERCHEL_CONFIG_OPEN_KINEMATICS.soft_joint_pos_limit_factor,
 )
+
+# Policy crank names -> open MJCF serial names (legs + wrists).
+_POLICY_TO_OPEN_JOINT = {
+    "left_knee_crank_joint": "left_knee_pitch_joint",
+    "left_ankle_u_crank_joint": "left_ankle_pitch_joint",
+    "left_ankle_b_crank_joint": "left_ankle_roll_joint",
+    "right_knee_crank_joint": "right_knee_pitch_joint",
+    "right_ankle_u_crank_joint": "right_ankle_pitch_joint",
+    "right_ankle_b_crank_joint": "right_ankle_roll_joint",
+    "left_wrist_crank_joint": "left_wrist_pitch_joint",
+    "right_wrist_crank_joint": "right_wrist_pitch_joint",
+}
+
+
+_OPEN_KEY_REMAP = {
+    "knee_crank": "knee_pitch",
+    "ankle_u_crank": "ankle_pitch",
+    "ankle_b_crank": "ankle_roll",
+    "wrist_crank": "wrist_pitch",
+}
+# Upper-body / finger keys in the closed-model motors cfg — not on locomotion group.
+_LOCOMOTION_GAIN_SKIP = (
+    "shoulder",
+    "elbow",
+    "wrist",
+    "thumb",
+    "index",
+    "middle",
+    "ring",
+    "pinky",
+    "intermediate",
+    "distal",
+    "crank",
+)
+
+
+def _remap_locomotion_gain_keys(mapping: dict | None) -> dict | None:
+    """Remap crank joint regexes to open names; keep leg/torso/neck only."""
+    if mapping is None:
+        return None
+    out: dict = {}
+    for key, value in mapping.items():
+        new_key = key
+        for old, new in _OPEN_KEY_REMAP.items():
+            new_key = new_key.replace(old, new)
+        if any(skip in new_key for skip in _LOCOMOTION_GAIN_SKIP):
+            continue
+        out[new_key] = value
+    return out
+
+
+def _open_locomotion_actuators():
+    """Frictional leg/torso actuators + ImplicitActuator arms for XR teleop."""
+    from dataclasses import fields
+
+    motors = _base_open.actuators["motors"]
+    leg_torso_expr = [
+        ".*_hip_pitch_joint",
+        ".*_hip_roll_joint",
+        ".*_hip_yaw_joint",
+        ".*_knee_pitch_joint",
+        ".*_ankle_pitch_joint",
+        ".*_ankle_roll_joint",
+        "torso_yaw_joint",
+        "neck_yaw_joint",
+        "neck_pitch_joint",
+    ]
+    locomotion_overrides = {"joint_names_expr": leg_torso_expr}
+    for field in fields(motors):
+        if field.name in ("class_type", "joint_names_expr"):
+            continue
+        value = getattr(motors, field.name)
+        if isinstance(value, dict):
+            locomotion_overrides[field.name] = _remap_locomotion_gain_keys(value)
+    locomotion = motors.replace(**locomotion_overrides)
+    xr_upper = ImplicitActuatorCfg(
+        joint_names_expr=[
+            ".*_shoulder_pitch_joint",
+            ".*_shoulder_roll_joint",
+            ".*_shoulder_yaw_joint",
+            ".*_elbow_pitch_joint",
+            ".*_elbow_yaw_joint",
+            ".*_wrist_pitch_joint",
+            ".*_wrist_roll_joint",
+            ".*_thumb_proximal_yaw_joint",
+            ".*_thumb_proximal_pitch_joint",
+            ".*_index_proximal_joint",
+            ".*_middle_proximal_joint",
+            ".*_ring_proximal_joint",
+            ".*_pinky_proximal_joint",
+        ],
+        stiffness={
+            ".*_shoulder_.*": _XR_ARM_STIFFNESS,
+            ".*_elbow_.*": _XR_ARM_STIFFNESS,
+            ".*_wrist_.*": _XR_ARM_STIFFNESS,
+            ".*_thumb_proximal_.*": _XR_FINGER_STIFFNESS,
+            ".*_index_proximal_joint": _XR_FINGER_STIFFNESS,
+            ".*_middle_proximal_joint": _XR_FINGER_STIFFNESS,
+            ".*_ring_proximal_joint": _XR_FINGER_STIFFNESS,
+            ".*_pinky_proximal_joint": _XR_FINGER_STIFFNESS,
+        },
+        damping={
+            ".*_shoulder_.*": _XR_ARM_DAMPING,
+            ".*_elbow_.*": _XR_ARM_DAMPING,
+            ".*_wrist_.*": _XR_ARM_DAMPING,
+            ".*_thumb_proximal_.*": _XR_FINGER_DAMPING,
+            ".*_index_proximal_joint": _XR_FINGER_DAMPING,
+            ".*_middle_proximal_joint": _XR_FINGER_DAMPING,
+            ".*_ring_proximal_joint": _XR_FINGER_DAMPING,
+            ".*_pinky_proximal_joint": _XR_FINGER_DAMPING,
+        },
+        effort_limit={
+            ".*_shoulder_pitch_joint": 90.0,
+            ".*_shoulder_roll_joint": 90.0,
+            ".*_shoulder_yaw_joint": 36.0,
+            ".*_elbow_.*": 36.0,
+            ".*_wrist_.*": 16.0,
+            ".*_thumb_proximal_.*": 8.5,
+            ".*_index_proximal_joint": 8.5,
+            ".*_middle_proximal_joint": 8.5,
+            ".*_ring_proximal_joint": 8.5,
+            ".*_pinky_proximal_joint": 8.5,
+        },
+    )
+    return {"locomotion": locomotion, "xr_upper": xr_upper}
+
+
+_xr_locomotion_joint_pos = dict(_upperbody_joint_pos)
+_xr_locomotion_joint_pos[".*_elbow_pitch_joint"] = -1.0
+
+SBERCHEL_XR_LOCOMOTION_ROBOT = ArticulationCfg(
+    spawn=SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn,
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.pos,
+        rot=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.rot,
+        joint_pos=_xr_locomotion_joint_pos,
+        joint_vel=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.joint_vel,
+    ),
+    actuators=_open_locomotion_actuators(),
+    soft_joint_pos_limit_factor=SBERCHEL_CONFIG_OPEN_KINEMATICS.soft_joint_pos_limit_factor,
+)
+
+
+def apply_sberchel_xr_teleop_pd_gains(robot) -> None:
+    """Raise arm/finger PD on the ``xr_upper`` actuator group for Pink IK tracking."""
+    if "xr_upper" not in robot.actuators:
+        return
+    actuator = robot.actuators["xr_upper"]
+    for local_idx, j_name in enumerate(actuator.joint_names):
+        if "shoulder" in j_name or "elbow" in j_name or "wrist" in j_name:
+            actuator.stiffness[:, local_idx] = _XR_ARM_STIFFNESS
+            actuator.damping[:, local_idx] = _XR_ARM_DAMPING
+        elif "proximal" in j_name:
+            actuator.stiffness[:, local_idx] = _XR_FINGER_STIFFNESS
+            actuator.damping[:, local_idx] = _XR_FINGER_DAMPING

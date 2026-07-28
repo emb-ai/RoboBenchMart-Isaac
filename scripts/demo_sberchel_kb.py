@@ -15,6 +15,9 @@ Requires the Isaac Sim GUI window (carb keyboard) — run WITHOUT --headless, an
 click the Isaac window once so it captures your key presses.
 
     python scripts/demo_sberchel_kb.py --config_dir_path generated_envs/isaac_sample
+
+The default XR task uses Pink IK for idle upper-body targets; Pinocchio is loaded
+automatically before Isaac Sim starts (same as ``--enable_pinocchio`` on teleop scripts).
 """
 
 import os
@@ -33,7 +36,7 @@ if _gc_parent not in sys.path:
 
 parser = argparse.ArgumentParser(description="WASD-drive the Sberchel humanoid in a darkstore.")
 parser.add_argument("--config_dir_path", type=str, help="Path to the config directory.")
-parser.add_argument("--task", type=str, default="Isaac-Dsynth-Sberchel-Base-v0", help="Name of the task.")
+parser.add_argument("--task", type=str, default="Dsynth-Fetch-Any-Item-Sberchel-XR-v0", help="Name of the task.")
 parser.add_argument("--seed", type=int, default=42, help="Seed to use.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to spawn.")
 parser.add_argument("--episode_len", type=int, default=-1, help="Steps to run (-1 = until the window is closed).")
@@ -44,8 +47,26 @@ parser.add_argument("--speed", type=float, default=1.0, help="Forward/back speed
 parser.add_argument("--turn", type=float, default=1.5, help="Turn rate for A/D (rad/s). ~1.5 is the practical max.")
 parser.add_argument("--strafe", type=float, default=0.6, help="Strafe speed for Q/E (m/s).")
 parser.add_argument("--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations.")
+parser.add_argument(
+    "--enable_pinocchio",
+    action="store_true",
+    default=False,
+    help="Import Pinocchio before Isaac Sim (auto-enabled for Sberchel XR tasks).",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+
+def _task_needs_pinocchio(task: str) -> bool:
+    """Tasks that register Pink IK actions (idle upper body still initializes Pink)."""
+    task_lower = task.lower()
+    return "sberchel" in task_lower and "xr" in task_lower
+
+
+if args_cli.enable_pinocchio or _task_needs_pinocchio(args_cli.task):
+    # Before AppLauncher so eigenpy registers std::vector bindings for Pinocchio.
+    import pinocchio  # noqa: F401
+
 args_cli.enable_cameras = True
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -57,6 +78,28 @@ from isaaclab_tasks.utils import parse_env_cfg
 
 sys.path.append('.')
 import dsynth_isaac.tasks.manager_based
+
+_LEFT_HAND_BASE = "left_hand_base_link"
+_RIGHT_HAND_BASE = "right_hand_base_link"
+
+
+def _body_pose_7d(robot, body_name: str) -> list[float]:
+    body_ids, _ = robot.find_bodies(body_name)
+    body_id = int(body_ids[0])
+    pose = robot.data.body_link_state_w[0, body_id, :7].detach().cpu().tolist()
+    return [float(v) for v in pose]
+
+
+def _idle_upper_body_action(robot, device) -> torch.Tensor:
+    return torch.tensor(
+        [
+            *_body_pose_7d(robot, _LEFT_HAND_BASE),
+            *_body_pose_7d(robot, _RIGHT_HAND_BASE),
+            *([0.0] * 12),
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
 
 
 class WasdKeyboard:
@@ -138,9 +181,13 @@ def main():
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
     env.reset(seed=args_cli.seed)
 
-    from green_challenge.policy.network import Network
-    net = Network(env, type="zest", device="cpu", closed_kinematics=False)
-    net.reset()
+    from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
+    from dsynth_isaac.robots.sberchel_policy import build_sberchel_locomotion_network, policy_leg_targets
+
+    robot = env.unwrapped.scene["robot"]
+    apply_sberchel_xr_teleop_pd_gains(robot)
+    net = build_sberchel_locomotion_network(env)
+    idle_upper = _idle_upper_body_action(robot, env.unwrapped.device)
 
     kb = WasdKeyboard(args_cli.speed, args_cli.turn, args_cli.strafe)
     print(_HELP, flush=True)
@@ -149,17 +196,11 @@ def main():
     while simulation_app.is_running() and (args_cli.episode_len < 0 or t < args_cli.episode_len):
         with torch.inference_mode():
             vx, vy, wz = kb.command()
-            net.set_command_detailed(vx, vy, wz)
-            net.set_joint_overrides({
-                "torso_joint_pos": [0.0] * 13,
-                "wrist_joint_pos": [0.0] * 4,
-                "finger_joint_pos": [0.0] * 12,
-            })
-            loco = net(net.obs())
-            legs = list(loco["joint_pos"][:12])
-            act_list = legs + [0.0] * 13 + [0.0] * 4 + [0.0] * 12
-            act_tensor = torch.as_tensor(
-                act_list, dtype=torch.float32, device=env.unwrapped.device
+            legs = policy_leg_targets(net, vx, vy, wz)
+            act_tensor = torch.as_tensor(legs, dtype=torch.float32, device=env.unwrapped.device)
+            act_tensor = torch.cat(
+                [act_tensor, idle_upper],
+                dim=0,
             ).unsqueeze(0).repeat(args_cli.num_envs, 1)
             _ = env.step(act_tensor)
         t += 1

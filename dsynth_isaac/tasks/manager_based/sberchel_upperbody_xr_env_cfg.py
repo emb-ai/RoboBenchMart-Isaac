@@ -16,15 +16,54 @@ from isaaclab.utils import configclass
 
 from dsynth_isaac.devices.sberchel_retargeter import SberchelRetargeterCfg
 from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_UPPERBODY_XR_ROBOT
-from dsynth_isaac.robots.sberchel_mjcf_usd import (
-    prepare_sberchel_pink_ik_urdf,
-    resolve_sberchel_spawn_usd_path,
-)
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     SberchelEventCfg,
     SberchelObservationsCfg,
 )
+
+
+def setup_sberchel_xr_pink_and_teleop(cfg) -> None:
+    """Shared Pink URDF export + OpenXR teleop device wiring."""
+    from dsynth_isaac.robots.sberchel_mjcf_usd import (
+        prepare_sberchel_pink_ik_urdf,
+        resolve_sberchel_spawn_usd_path,
+    )
+
+    spawn = cfg.scene.robot.spawn
+    patched_usd_path = resolve_sberchel_spawn_usd_path(spawn)
+    pink_urdf_path, _pink_mesh_dir, _raw_urdf_path = prepare_sberchel_pink_ik_urdf(patched_usd_path)
+    cfg.actions.upper_body_ik.controller.urdf_path = pink_urdf_path
+    cfg.actions.upper_body_ik.controller.mesh_path = None
+
+    cfg.teleop_devices = DevicesCfg(
+        devices={
+            "handtracking": OpenXRDeviceCfg(
+                retargeters=[
+                    SberchelRetargeterCfg(
+                        enable_visualization=True,
+                        num_open_xr_hand_joints=2 * cfg.NUM_OPENXR_HAND_JOINTS,
+                        sim_device=cfg.sim.device,
+                        hand_joint_names=cfg.actions.upper_body_ik.hand_joint_names,
+                    ),
+                ],
+                sim_device=cfg.sim.device,
+                xr_cfg=cfg.xr,
+            ),
+            "manusvive": ManusViveCfg(
+                retargeters=[
+                    SberchelRetargeterCfg(
+                        enable_visualization=True,
+                        num_open_xr_hand_joints=2 * cfg.NUM_OPENXR_HAND_JOINTS,
+                        sim_device=cfg.sim.device,
+                        hand_joint_names=cfg.actions.upper_body_ik.hand_joint_names,
+                    ),
+                ],
+                sim_device=cfg.sim.device,
+                xr_cfg=cfg.xr,
+            ),
+        }
+    )
 
 # Pink ``find_joints`` applies hand targets in articulation DOF order (not MJCF
 # name order). On open MJCF/USD, thumb pitch comes after digit proximals per hand.
@@ -183,38 +222,4 @@ class UpperbodySberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
         self.sim.dt = 1.0 / 120.0
         self.sim.render_interval = 2
 
-        spawn = self.scene.robot.spawn
-        patched_usd_path = resolve_sberchel_spawn_usd_path(spawn)
-        pink_urdf_path, _pink_mesh_dir, _raw_urdf_path = prepare_sberchel_pink_ik_urdf(patched_usd_path)
-        self.actions.upper_body_ik.controller.urdf_path = pink_urdf_path
-        # Kinematics-only Pink URDF has no mesh references; avoid Pinocchio OBJ loads.
-        self.actions.upper_body_ik.controller.mesh_path = None
-
-        self.teleop_devices = DevicesCfg(
-            devices={
-                "handtracking": OpenXRDeviceCfg(
-                    retargeters=[
-                        SberchelRetargeterCfg(
-                            enable_visualization=True,
-                            num_open_xr_hand_joints=2 * self.NUM_OPENXR_HAND_JOINTS,
-                            sim_device=self.sim.device,
-                            hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
-                        ),
-                    ],
-                    sim_device=self.sim.device,
-                    xr_cfg=self.xr,
-                ),
-                "manusvive": ManusViveCfg(
-                    retargeters=[
-                        SberchelRetargeterCfg(
-                            enable_visualization=True,
-                            num_open_xr_hand_joints=2 * self.NUM_OPENXR_HAND_JOINTS,
-                            sim_device=self.sim.device,
-                            hand_joint_names=self.actions.upper_body_ik.hand_joint_names,
-                        ),
-                    ],
-                    sim_device=self.sim.device,
-                    xr_cfg=self.xr,
-                ),
-            }
-        )
+        setup_sberchel_xr_pink_and_teleop(self)

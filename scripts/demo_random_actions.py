@@ -32,7 +32,7 @@ args_cli = parser.parse_args()
 def _task_needs_pinocchio(task: str) -> bool:
     """Registered tasks that use Isaac Lab Pink IK (not generic IK-rel envs)."""
     task_lower = task.lower()
-    return any(hint in task_lower for hint in ("upperbody", "gr1t2"))
+    return any(hint in task_lower for hint in ("upperbody", "gr1t2", "sberchel-xr"))
 
 
 if args_cli.enable_pinocchio or _task_needs_pinocchio(args_cli.task):

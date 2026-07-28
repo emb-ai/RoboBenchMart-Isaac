@@ -116,19 +116,17 @@ from isaaclab_tasks.utils import parse_env_cfg
 sys.path.append(".")
 import dsynth_isaac.tasks.manager_based  # noqa: F401
 
+from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
+from dsynth_isaac.robots.sberchel_policy import (
+    LEGS_ACTION_DIM,
+    build_sberchel_locomotion_network,
+    policy_leg_targets,
+)
+
 logger = logging.getLogger(__name__)
 
-LEGS_ACTION_DIM = 12
 _LEFT_HAND_BASE = "left_hand_base_link"
 _RIGHT_HAND_BASE = "right_hand_base_link"
-
-
-def _build_policy(env):
-    from green_challenge.policy.network import Network
-
-    net = Network(env, type="zest", device="cpu")
-    net.reset()
-    return net
 
 
 def _body_pose_7d(robot, body_name: str) -> list[float]:
@@ -227,18 +225,6 @@ def _station_keep_command(
     return vx, vy, wz
 
 
-def _policy_leg_targets(net, vx: float, vy: float, wz: float) -> list[float]:
-    """Run locomotion policy with the given velocity command; return 12 leg targets."""
-    net.set_command_detailed(vx, vy, wz)
-    net.set_joint_overrides({
-        "torso_joint_pos": [0.0] * 13,
-        "wrist_joint_pos": [0.0] * 4,
-        "finger_joint_pos": [0.0] * 12,
-    })
-    loco = net(net.obs())
-    return list(loco["joint_pos"][:LEGS_ACTION_DIM])
-
-
 def main() -> None:
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     if not isinstance(env_cfg, ManagerBasedRLEnvCfg):
@@ -256,9 +242,7 @@ def main() -> None:
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
     env.reset(seed=args_cli.seed)
 
-    net = _build_policy(env)
-    from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
-
+    net = build_sberchel_locomotion_network(env)
     apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
     robot = env.scene["robot"]
     hold_xy_yaw = _capture_hold_pose(robot)
@@ -339,7 +323,7 @@ def main() -> None:
                     pos_deadzone=args_cli.hold_pos_deadzone,
                     yaw_deadzone=args_cli.hold_yaw_deadzone,
                 )
-                legs = _policy_leg_targets(net, vx, vy, wz)
+                legs = policy_leg_targets(net, vx, vy, wz)
                 legs_tensor = torch.as_tensor(legs, dtype=torch.float32, device=env.device)
                 legs_tensor = legs_tensor.unsqueeze(0).repeat(env.num_envs, 1)
 
