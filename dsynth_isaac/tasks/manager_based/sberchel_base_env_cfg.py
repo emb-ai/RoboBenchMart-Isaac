@@ -16,6 +16,7 @@ from isaaclab.utils import configclass
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
+from isaaclab_tasks.manager_based.manipulation.stack.mdp import franka_stack_events
 
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg, DsEventCfg
 from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_CONFIG
@@ -115,8 +116,18 @@ class SberchelEventCfg(DsEventCfg):
 
     init_robot_base_pose = EventTerm(
         func=ds_events.set_default_base_pose,
-        mode="startup",
+        mode="reset",
         params={"p": [0.65, 0.0, SBERCHEL_STAND_HEIGHT]},
+    )
+
+    randomize_franka_joint_state = EventTerm(
+        func=franka_stack_events.randomize_joint_by_gaussian_offset,
+        mode="reset",
+        params={
+            "mean": 0.0,
+            "std": 0.0,
+            "asset_cfg": SceneEntityCfg("robot"),
+        },
     )
 
 
