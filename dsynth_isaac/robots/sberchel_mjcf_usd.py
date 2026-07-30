@@ -22,9 +22,9 @@ from isaaclab.sim.converters import MjcfConverter
 logger = logging.getLogger(__name__)
 
 # Bump when Pink IK URDF export logic changes so cached files are regenerated.
-PINK_URDF_CACHE_VERSION = "v8"
+PINK_URDF_CACHE_VERSION = "v9_hybrid"
 # Bump when sim spawn settings change and the MJCF USD cache must be regenerated.
-MJCF_USD_CACHE_VERSION = "upperbody_fix_root_v1"
+MJCF_USD_CACHE_VERSION = "hybrid_v1"
 
 
 def _find_link_prim_path(stage, link_name: str) -> str:
@@ -286,7 +286,7 @@ def convert_sberchel_usd_to_urdf(usd_path: str | Path, cache_dir: str | Path) ->
 def _normalize_sberchel_urdf_names(urdf_path: Path) -> None:
     """Strip USD export prefixes so Pink IK frame names match the sim articulation."""
     prefixes = (
-        "tmp_v3_0_alpha_locomanipulator_open_root_",
+        "tmp_v3_0_alpha_locomanipulator_hybrid_root_",
         "tmp_v3_0_alpha_locomanipulator_root_",
         "joints_",
     )

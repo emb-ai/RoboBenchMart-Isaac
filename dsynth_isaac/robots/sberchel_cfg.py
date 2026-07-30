@@ -3,10 +3,10 @@
 Reuses robot definitions from ``green_challenge`` (serialized interface JSON +
 ``ConfigManager``). ``SBERCHEL_CONFIG`` is closed kinematics (``robot_v3_0a``).
 ``SBERCHEL_CONFIG_OPEN_KINEMATICS`` uses the ``robot_green_open_source`` package
-(green_challenge open-kinematics robot) with spawn pointed at the serial open
-MJCF file. ``SBERCHEL_UPPERBODY_XR_ROBOT`` adds fixed pelvis + ImplicitActuator
-PD for upper-body XR teleop. ``SBERCHEL_XR_LOCOMOTION_ROBOT`` is free-floating
-open kinematics with policy leg actuators and XR arm PD.
+with spawn pointed at the hybrid open MJCF (serial upper body + policy-native
+crank leg joints). ``SBERCHEL_UPPERBODY_XR_ROBOT`` adds fixed pelvis +
+ImplicitActuator PD for upper-body XR teleop. ``SBERCHEL_XR_LOCOMOTION_ROBOT``
+is free-floating open kinematics with policy leg actuators and XR arm PD.
 """
 
 import os
@@ -35,48 +35,54 @@ SBERCHEL_CONFIG = _cm.load_config("sberchel_v3_0_alpha_locomanipulation_full")
 
 _cm_open = ConfigManagerGreenOpenSource.instance()
 _base_open = _cm_open.load_config("sberchel_v3_0_alpha_locomanipulation_full")
-_OPEN_MJCF_PATH = (
+_HYBRID_MJCF_PATH = (
     Path(_GREEN_CHALLENGE_ROOT)
     / "assets/robot_v3_0a/dependencies/robots/v3_0_alpha_locomanipulator"
-    / "v3_0_alpha_locomanipulator_open.xml"
+    / "v3_0_alpha_locomanipulator_hybrid.xml"
 )
-_OPEN_MJCF_DIR = _OPEN_MJCF_PATH.parent
-SBERCHEL_CONFIG_OPEN_KINEMATICS = _base_open.replace(
-    spawn=_base_open.spawn.replace(
-        asset_path=str(_OPEN_MJCF_PATH),
-        usd_dir=str(_OPEN_MJCF_DIR / "usd_cache"),
-        usd_file_name="v3_0_alpha_locomanipulator_open.usd",
-    ),
-)
+_HYBRID_MJCF_DIR = _HYBRID_MJCF_PATH.parent
 
-# Closed-only init keys absent from the open MJCF model.
-_OPEN_INIT_JOINT_DROP = (
-    "left_knee_crank_joint",
-    "left_knee_rod_joint",
-    "left_ankle_u_crank_joint",
-    "left_ankle_b_crank_joint",
-    "right_knee_crank_joint",
-    "right_knee_rod_joint",
-    "right_ankle_u_crank_joint",
-    "right_ankle_b_crank_joint",
-)
-_OPEN_INIT_JOINT_REMAP = {
+# green_open_source JSON uses wrist_crank; hybrid MJCF keeps serial wrist_pitch.
+_HYBRID_JOINT_KEY_REMAP = {
     ".*_wrist_crank_joint": ".*_wrist_pitch_joint",
 }
 
 
-def _joint_dict_for_open_kinematics(joint_values: dict | None) -> dict:
-    """Drop closed-only joints and rename wrist_crank → wrist_pitch for open MJCF."""
-    if not joint_values:
-        return {}
-    drop = set(_OPEN_INIT_JOINT_DROP)
-    out: dict = {}
-    for key, value in joint_values.items():
-        if key in drop:
-            continue
-        out[_OPEN_INIT_JOINT_REMAP.get(key, key)] = value
-    return out
+def _remap_hybrid_joint_keys(value):
+    """Remap crank wrist keys to serial wrist_pitch for hybrid MJCF."""
+    if isinstance(value, dict):
+        return {_HYBRID_JOINT_KEY_REMAP.get(k, k): v for k, v in value.items()}
+    if isinstance(value, list):
+        return [_HYBRID_JOINT_KEY_REMAP.get(v, v) for v in value]
+    return value
 
+
+def _hybrid_motors_actuators():
+    """Motors actuator group with wrist_pitch names for hybrid MJCF."""
+    from dataclasses import fields
+
+    motors = _base_open.actuators["motors"]
+    overrides: dict = {}
+    for field in fields(motors):
+        if field.name in ("class_type",):
+            continue
+        attr = getattr(motors, field.name)
+        if isinstance(attr, (dict, list)):
+            overrides[field.name] = _remap_hybrid_joint_keys(attr)
+    return {"motors": motors.replace(**overrides)}
+
+
+_hybrid_init_joint_pos = _remap_hybrid_joint_keys(dict(_base_open.init_state.joint_pos))
+
+SBERCHEL_CONFIG_OPEN_KINEMATICS = _base_open.replace(
+    spawn=_base_open.spawn.replace(
+        asset_path=str(_HYBRID_MJCF_PATH),
+        usd_dir=str(_HYBRID_MJCF_DIR / "usd_cache"),
+        usd_file_name="v3_0_alpha_locomanipulator_hybrid.usd",
+    ),
+    init_state=_base_open.init_state.replace(joint_pos=_hybrid_init_joint_pos),
+    actuators=_hybrid_motors_actuators(),
+)
 
 _XR_ARM_STIFFNESS = 3000.0
 _XR_ARM_DAMPING = 100.0
@@ -85,17 +91,8 @@ _XR_FINGER_DAMPING = 40.0
 _XR_LOCK_STIFFNESS = 10000.0
 _XR_LOCK_DAMPING = 1000.0
 
-_upperbody_joint_pos = _joint_dict_for_open_kinematics(
-    dict(SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.joint_pos)
-)
+_upperbody_joint_pos = dict(SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.joint_pos)
 _upperbody_joint_pos[".*_elbow_pitch_joint"] = -1.0
-# Defaults for serial leg joints (closed crank keys were dropped above).
-_upperbody_joint_pos.setdefault("left_knee_pitch_joint", 0.299)
-_upperbody_joint_pos.setdefault("right_knee_pitch_joint", 0.299)
-_upperbody_joint_pos.setdefault("left_ankle_pitch_joint", -0.2)
-_upperbody_joint_pos.setdefault("right_ankle_pitch_joint", -0.2)
-_upperbody_joint_pos.setdefault("left_ankle_roll_joint", 0.0)
-_upperbody_joint_pos.setdefault("right_ankle_roll_joint", 0.0)
 
 _upperbody_spawn = SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn.replace(
     rigid_props=SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn.rigid_props.replace(disable_gravity=True)
@@ -125,9 +122,9 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
                 ".*_hip_pitch_joint",
                 ".*_hip_roll_joint",
                 ".*_hip_yaw_joint",
-                ".*_knee_pitch_joint",
-                ".*_ankle_pitch_joint",
-                ".*_ankle_roll_joint",
+                ".*_knee_crank_joint",
+                ".*_ankle_u_crank_joint",
+                ".*_ankle_b_crank_joint",
                 "torso_yaw_joint",
                 "neck_yaw_joint",
                 "neck_pitch_joint",
@@ -179,7 +176,7 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
                 ".*_hip_pitch_joint": 380.0,
                 ".*_hip_roll_joint": 330.0,
                 ".*_hip_yaw_joint": 150.0,
-                ".*_knee_pitch_joint": 380.0,
+                ".*_knee_crank_joint": 380.0,
                 ".*_ankle_.*": 90.0,
                 "torso_yaw_joint": 150.0,
                 "neck_.*": 36.0,
@@ -199,26 +196,7 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
     soft_joint_pos_limit_factor=SBERCHEL_CONFIG_OPEN_KINEMATICS.soft_joint_pos_limit_factor,
 )
 
-# Policy crank names -> open MJCF serial names (legs + wrists).
-_POLICY_TO_OPEN_JOINT = {
-    "left_knee_crank_joint": "left_knee_pitch_joint",
-    "left_ankle_u_crank_joint": "left_ankle_pitch_joint",
-    "left_ankle_b_crank_joint": "left_ankle_roll_joint",
-    "right_knee_crank_joint": "right_knee_pitch_joint",
-    "right_ankle_u_crank_joint": "right_ankle_pitch_joint",
-    "right_ankle_b_crank_joint": "right_ankle_roll_joint",
-    "left_wrist_crank_joint": "left_wrist_pitch_joint",
-    "right_wrist_crank_joint": "right_wrist_pitch_joint",
-}
-
-
-_OPEN_KEY_REMAP = {
-    "knee_crank": "knee_pitch",
-    "ankle_u_crank": "ankle_pitch",
-    "ankle_b_crank": "ankle_roll",
-    "wrist_crank": "wrist_pitch",
-}
-# Upper-body / finger keys in the closed-model motors cfg — not on locomotion group.
+# Upper-body / finger keys in motors cfg — not on the locomotion actuator group.
 _LOCOMOTION_GAIN_SKIP = (
     "shoulder",
     "elbow",
@@ -230,48 +208,43 @@ _LOCOMOTION_GAIN_SKIP = (
     "pinky",
     "intermediate",
     "distal",
-    "crank",
 )
 
 
-def _remap_locomotion_gain_keys(mapping: dict | None) -> dict | None:
-    """Remap crank joint regexes to open names; keep leg/torso/neck only."""
+def _locomotion_gain_dict(mapping: dict | None) -> dict | None:
+    """Keep leg/torso/neck gain keys only (for split ``locomotion`` actuators)."""
     if mapping is None:
         return None
-    out: dict = {}
-    for key, value in mapping.items():
-        new_key = key
-        for old, new in _OPEN_KEY_REMAP.items():
-            new_key = new_key.replace(old, new)
-        if any(skip in new_key for skip in _LOCOMOTION_GAIN_SKIP):
-            continue
-        out[new_key] = value
-    return out
+    return {
+        key: value
+        for key, value in mapping.items()
+        if not any(skip in key for skip in _LOCOMOTION_GAIN_SKIP)
+    }
 
 
 def _open_locomotion_actuators():
     """Frictional leg/torso actuators + ImplicitActuator arms for XR teleop."""
     from dataclasses import fields
 
-    motors = _base_open.actuators["motors"]
+    motors = _hybrid_motors_actuators()["motors"]
     leg_torso_expr = [
         ".*_hip_pitch_joint",
         ".*_hip_roll_joint",
         ".*_hip_yaw_joint",
-        ".*_knee_pitch_joint",
-        ".*_ankle_pitch_joint",
-        ".*_ankle_roll_joint",
+        ".*_knee_crank_joint",
+        ".*_ankle_u_crank_joint",
+        ".*_ankle_b_crank_joint",
         "torso_yaw_joint",
         "neck_yaw_joint",
         "neck_pitch_joint",
     ]
-    locomotion_overrides = {"joint_names_expr": leg_torso_expr}
+    locomotion_overrides: dict = {"joint_names_expr": leg_torso_expr}
     for field in fields(motors):
         if field.name in ("class_type", "joint_names_expr"):
             continue
         value = getattr(motors, field.name)
         if isinstance(value, dict):
-            locomotion_overrides[field.name] = _remap_locomotion_gain_keys(value)
+            locomotion_overrides[field.name] = _locomotion_gain_dict(value)
     locomotion = motors.replace(**locomotion_overrides)
     xr_upper = ImplicitActuatorCfg(
         joint_names_expr=[

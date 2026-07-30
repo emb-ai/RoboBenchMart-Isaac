@@ -60,35 +60,6 @@ import dsynth_isaac.tasks.manager_based
 from isaaclab_tasks.manager_based.manipulation.stack.config.franka.stack_ik_rel_env_cfg import FrankaCubeStackEnvCfg
 
 
-def _pink_hold_action_from_robot(env) -> torch.Tensor | None:
-    """Build a Pink IK hold action from the robot's current wrist poses (world frame).
-
-    Env ``idle_action`` wrist targets are calibrated for the XR anchor, not the
-    darkstore robot spawn pose, so they pull arms the wrong way in demo scripts.
-    """
-    unwrapped = env.unwrapped
-    action_manager = getattr(unwrapped, "action_manager", None)
-    if action_manager is None:
-        return None
-    try:
-        ik_term = action_manager.get_term("upper_body_ik")
-    except (AttributeError, KeyError, ValueError):
-        return None
-    cfg = ik_term.cfg
-    robot = unwrapped.scene[cfg.asset_name]
-    data = robot.data
-
-    left_link = cfg.target_eef_link_names["left_wrist"]
-    right_link = cfg.target_eef_link_names["right_wrist"]
-    left_idx = data.body_names.index(left_link)
-    right_idx = data.body_names.index(right_link)
-
-    left_wrist = data.body_link_state_w[:, left_idx, :7]
-    right_wrist = data.body_link_state_w[:, right_idx, :7]
-    hand_pos = data.joint_pos[:, ik_term._hand_joint_ids]
-    return torch.cat([left_wrist, right_wrist, hand_pos], dim=-1)
-
-
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.seed=args_cli.seed
@@ -120,14 +91,8 @@ def main():
         with torch.inference_mode():
             print(">>> reset")
             env.reset(seed=seed)
-            hold_action = _pink_hold_action_from_robot(env)
             for t in tqdm.tqdm(range(args_cli.episode_len), total=args_cli.episode_len, desc="Elapsed steps"):
-                if hold_action is not None:
-                    action = hold_action
-                else:
-                    action = env.unwrapped.action_manager.action.clone()
-                    if "fetchbot" in args_cli.task.lower():
-                        action[:, 2] = 2.0
+                action = env.unwrapped.action_manager.action.clone()
                 obs, reward, terminated, truncated, info = env.step(action)
                 print(info)
         seed += 1

@@ -5,9 +5,9 @@ from isaaclab.devices.openxr import XrCfg
 from isaaclab.utils import configclass
 
 from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_XR_LOCOMOTION_ROBOT
-from dsynth_isaac.robots.sberchel_policy import OPEN_LEG_JOINT_NAMES
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
+    POLICY_LEG_JOINT_NAMES,
     SberchelEventCfg,
     SberchelObservationsCfg,
 )
@@ -23,7 +23,7 @@ class SberchelXRActionsCfg:
 
     legs_joint_pos = mdp.JointPositionActionCfg(
         asset_name="robot",
-        joint_names=OPEN_LEG_JOINT_NAMES,
+        joint_names=POLICY_LEG_JOINT_NAMES,
         scale=1.0,
         preserve_order=True,
     )

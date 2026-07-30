@@ -117,11 +117,11 @@ sys.path.append(".")
 import dsynth_isaac.tasks.manager_based  # noqa: F401
 
 from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
-from dsynth_isaac.robots.sberchel_policy import (
+from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
-    build_sberchel_locomotion_network,
     policy_leg_targets,
 )
+from green_challenge.policy.network import Network
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +242,8 @@ def main() -> None:
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
     env.reset(seed=args_cli.seed)
 
-    net = build_sberchel_locomotion_network(env)
+    net = Network(env, type="zest", device="cpu", closed_kinematics=False)
+    net.reset()
     apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
     robot = env.scene["robot"]
     hold_xy_yaw = _capture_hold_pose(robot)
