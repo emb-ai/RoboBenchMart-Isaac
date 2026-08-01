@@ -17,10 +17,13 @@ from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab_tasks.manager_based.manipulation.stack.mdp import franka_stack_events
+from isaaclab.envs import ManagerBasedRLEnvCfg
 
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg, DsEventCfg
 from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_CONFIG, SBERCHEL_CONFIG_OPEN_KINEMATICS
 import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events
+from dsynth_isaac.scene.sberdemo_scene import SberDemoSceneCfg
+from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import TerminationsCfg
 
 # Root (pelvis) height the robot is placed at so its feet start on the floor.
 SBERCHEL_STAND_HEIGHT = 0.9
@@ -251,3 +254,36 @@ class SberchelOpenKinematicsFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
         self.sim.dt = 1.0 / 150.0
         self.decimation = 1
         self.sim.render_interval = 1
+
+@configclass
+class SberchelOpenKinematicsDemoEnvCfg(ManagerBasedRLEnvCfg):
+    scene: SberDemoSceneCfg = SberDemoSceneCfg(replicate_physics=False, env_spacing=20.5, filter_collisions=False)
+    actions = SberchelOpenKinematicsActionsCfg()
+    observations: SberchelObservationsCfg = SberchelObservationsCfg()
+    terminations: TerminationsCfg = TerminationsCfg()
+
+    events: None
+
+    # Unused managers
+    commands = None
+    rewards = None
+    curriculum = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.robot = SBERCHEL_CONFIG_OPEN_KINEMATICS.replace(
+            prim_path="{ENV_REGEX_NS}/Robot",
+        )
+        self.scene.robot.spawn.semantic_tags = [("class", "robot")]
+        self.scene.robot.init_state.pos = (4.5, 5, SBERCHEL_STAND_HEIGHT)
+        # Pin pelvis_link (articulation root) in world space.
+        # if self.scene.robot.spawn.articulation_props is not None:
+        #     self.scene.robot.spawn.articulation_props = (
+        #         self.scene.robot.spawn.articulation_props.replace(fix_root_link=True)
+        #     )
+        # general settings
+        self.decimation = 2
+        self.episode_length_s = 100000.0
+        # simulation settings
+        self.sim.dt = 0.01  # 100Hz
+        self.sim.render_interval = 2
