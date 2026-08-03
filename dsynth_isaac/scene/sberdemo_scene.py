@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import MISSING
+from collections.abc import Iterator
+from dataclasses import MISSING, dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+import numpy as np
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
@@ -13,7 +16,10 @@ from isaaclab.sim.spawners.spawner_cfg import SpawnerCfg
 from isaaclab.sim.utils import clone, standardize_xform_ops
 from isaaclab.sim.utils.stage import get_current_stage
 from isaaclab.utils import configclass
-from pxr import PhysxSchema, Sdf, Usd, UsdPhysics, UsdShade
+from pxr import PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+
+if TYPE_CHECKING:
+    from isaaclab.sim import SimulationContext
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +122,119 @@ def disable_stray_physics_scenes(stage: Usd.Stage, lab_physics_scene_path: str) 
     return disabled
 
 
+def iter_store_rigid_bodies(
+    stage: Usd.Stage,
+    env_prim_paths: list[str],
+    store_root_name: str = "dsynth_scene",
+) -> Iterator[tuple[Usd.Prim, bool]]:
+    """Yield enabled rigid-body prims under each env's store root as ``(prim, is_kinematic)``."""
+    for env_path in env_prim_paths:
+        store_root = stage.GetPrimAtPath(f"{env_path}/{store_root_name}")
+        if not store_root.IsValid():
+            logger.warning("[SberDemo] Store root missing under %s", env_path)
+            continue
+        for prim in Usd.PrimRange(store_root):
+            if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                continue
+            rb = UsdPhysics.RigidBodyAPI(prim)
+            if not rb.GetRigidBodyEnabledAttr().Get():
+                continue
+            yield prim, rb.GetKinematicEnabledAttr().Get()
+
+
+def _world_pose_wxyz(prim: Usd.Prim, xform_cache: UsdGeom.XformCache) -> tuple[np.ndarray, np.ndarray]:
+    """Return world position (3,) and orientation wxyz (4,) for a prim."""
+    matrix = xform_cache.GetLocalToWorldTransform(prim)
+    translation = matrix.ExtractTranslation()
+    quat = matrix.ExtractRotationQuat()
+    imag = quat.GetImaginary()
+    position = np.array([translation[0], translation[1], translation[2]], dtype=np.float32)
+    orientation = np.array(
+        [quat.GetReal(), imag[0], imag[1], imag[2]],
+        dtype=np.float32,
+    )
+    return position, orientation
+
+
+@dataclass
+class StoreRigidBodySnapshot:
+    """Initial world poses for unregistered store USD rigid bodies."""
+
+    prim_paths: list[str] = field(default_factory=list)
+    positions: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=np.float32))
+    orientations: np.ndarray = field(default_factory=lambda: np.zeros((0, 4), dtype=np.float32))
+    _physx_view: object | None = field(default=None, repr=False)
+
+    def restore(self, sim: SimulationContext) -> int:
+        """Write snapshot poses to PhysX and zero velocities. Returns body count."""
+        if len(self.prim_paths) == 0:
+            return 0
+
+        import torch
+        from isaaclab.utils import math as math_utils
+
+        if self._physx_view is None:
+            self._physx_view = sim.physics_sim_view.create_rigid_body_view(self.prim_paths)
+            if self._physx_view._backend is None:
+                raise RuntimeError(
+                    "[SberDemo] Failed to create rigid-body view for store products. "
+                    "Check that simulation is playing and prim paths are valid."
+                )
+
+        device = sim.device
+        poses_wxyz = torch.cat(
+            [
+                torch.from_numpy(self.positions).to(device=device, dtype=torch.float32),
+                torch.from_numpy(self.orientations).to(device=device, dtype=torch.float32),
+            ],
+            dim=-1,
+        )
+        poses_xyzw = poses_wxyz.clone()
+        poses_xyzw[:, 3:] = math_utils.convert_quat(poses_wxyz[:, 3:], to="xyzw")
+        indices = torch.arange(len(self.prim_paths), device=device, dtype=torch.int32)
+        self._physx_view.set_transforms(poses_xyzw, indices=indices)
+        self._physx_view.set_velocities(
+            torch.zeros(len(self.prim_paths), 6, device=device, dtype=torch.float32),
+            indices=indices,
+        )
+        return len(self.prim_paths)
+
+
+def capture_store_rigid_body_snapshot(
+    scene: InteractiveScene,
+    *,
+    store_root_name: str = "dsynth_scene",
+    dynamic_only: bool = True,
+) -> StoreRigidBodySnapshot:
+    """Capture authoring-time world poses for store rigid bodies from USD."""
+    xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    prim_paths: list[str] = []
+    positions: list[np.ndarray] = []
+    orientations: list[np.ndarray] = []
+
+    for prim, is_kinematic in iter_store_rigid_bodies(scene.stage, scene.env_prim_paths, store_root_name):
+        if dynamic_only and is_kinematic:
+            continue
+        position, orientation = _world_pose_wxyz(prim, xform_cache)
+        prim_paths.append(prim.GetPath().pathString)
+        positions.append(position)
+        orientations.append(orientation)
+
+    if prim_paths:
+        pos_array = np.stack(positions, axis=0)
+        ori_array = np.stack(orientations, axis=0)
+    else:
+        pos_array = np.zeros((0, 3), dtype=np.float32)
+        ori_array = np.zeros((0, 4), dtype=np.float32)
+
+    logger.info("[SberDemo] Captured initial poses for %d store rigid bodies", len(prim_paths))
+    return StoreRigidBodySnapshot(
+        prim_paths=prim_paths,
+        positions=pos_array,
+        orientations=ori_array,
+    )
+
+
 def rebind_store_rigid_bodies(
     stage: Usd.Stage,
     env_prim_paths: list[str],
@@ -131,25 +250,15 @@ def rebind_store_rigid_bodies(
 
     rebound_dynamic = 0
     rebound_kinematic = 0
-    for env_path in env_prim_paths:
-        store_root = stage.GetPrimAtPath(f"{env_path}/{store_root_name}")
-        if not store_root.IsValid():
-            logger.warning("[SberDemo] Store root missing under %s", env_path)
+    for prim, is_kinematic in iter_store_rigid_bodies(stage, env_prim_paths, store_root_name):
+        if is_kinematic and not include_kinematic:
             continue
-        for prim in Usd.PrimRange(store_root):
-            if not prim.HasAPI(UsdPhysics.RigidBodyAPI):
-                continue
-            rb = UsdPhysics.RigidBodyAPI(prim)
-            if not rb.GetRigidBodyEnabledAttr().Get():
-                continue
-            is_kinematic = rb.GetKinematicEnabledAttr().Get()
-            if is_kinematic and not include_kinematic:
-                continue
-            rb.GetSimulationOwnerRel().SetTargets([lab_scene_prim.GetPath()])
-            if is_kinematic:
-                rebound_kinematic += 1
-            else:
-                rebound_dynamic += 1
+        rb = UsdPhysics.RigidBodyAPI(prim)
+        rb.GetSimulationOwnerRel().SetTargets([lab_scene_prim.GetPath()])
+        if is_kinematic:
+            rebound_kinematic += 1
+        else:
+            rebound_dynamic += 1
     return rebound_dynamic, rebound_kinematic
 
 
@@ -272,3 +381,11 @@ class SberDemoInteractiveScene(InteractiveScene):
     def __init__(self, cfg: SberDemoSceneCfg):
         super().__init__(cfg)
         fix_store_room_material_bindings(self)
+        self._store_rigid_snapshot = capture_store_rigid_body_snapshot(self, dynamic_only=True)
+
+    def reset_store_rigid_bodies(self, sim: SimulationContext) -> int:
+        """Restore dynamic store products to their initial USD poses."""
+        count = self._store_rigid_snapshot.restore(sim)
+        if count > 0:
+            logger.info("[SberDemo] Reset %d store rigid bodies to initial poses", count)
+        return count

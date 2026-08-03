@@ -1,6 +1,7 @@
 import builtins
 import logging
 import warnings
+from collections.abc import Sequence
 
 import torch
 
@@ -34,6 +35,12 @@ class SberDemoManagerBasedRLEnv(ManagerBasedRLEnv):
         if not self._store_physics_fixed:
             self._ensure_store_physics_fixed()
         return super().reset(*args, **kwargs)
+
+    def _reset_idx(self, env_ids: Sequence[int]):
+        """Reset envs and restore dynamic store product poses from the USD snapshot."""
+        super()._reset_idx(env_ids)
+        if hasattr(self.scene, "reset_store_rigid_bodies"):
+            self.scene.reset_store_rigid_bodies(self.sim)
 
     def __init__(self, cfg: ManagerBasedRLEnvCfg, render_mode: str | None = None, **kwargs):
         self.common_step_counter = 0
