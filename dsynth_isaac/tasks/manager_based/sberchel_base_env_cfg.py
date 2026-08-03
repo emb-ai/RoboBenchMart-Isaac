@@ -275,7 +275,7 @@ class SberchelOpenKinematicsDemoEnvCfg(ManagerBasedRLEnvCfg):
             prim_path="{ENV_REGEX_NS}/Robot",
         )
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
-        self.scene.robot.init_state.pos = (4.5, 5, SBERCHEL_STAND_HEIGHT)
+        self.scene.robot.init_state.pos = (5.5, 5, SBERCHEL_STAND_HEIGHT)
         # Pin pelvis_link (articulation root) in world space.
         # if self.scene.robot.spawn.articulation_props is not None:
         #     self.scene.robot.spawn.articulation_props = (

@@ -77,7 +77,7 @@ class SberchelXRDemoEnvCfg(ManagerBasedRLEnvCfg):
     terminations: TerminationsCfg = TerminationsCfg()
 
     xr: XrCfg = XrCfg(
-        anchor_pos=(4.5, 5.0, 0.0),
+        anchor_pos=(5.5, 5.0, 0.0),
         anchor_rot=(0.0, 0.0, 1.0, 0.0),
     )
 
@@ -94,7 +94,7 @@ class SberchelXRDemoEnvCfg(ManagerBasedRLEnvCfg):
             prim_path="{ENV_REGEX_NS}/Robot",
         )
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
-        self.scene.robot.init_state.pos = (4.5, 5, SBERCHEL_STAND_HEIGHT)
+        self.scene.robot.init_state.pos = (5.5, 5, SBERCHEL_STAND_HEIGHT)
 
         self.sim.dt = 1.0 / 150.0
         self.decimation = 1

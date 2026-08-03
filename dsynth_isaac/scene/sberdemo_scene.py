@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 # Keep SubUSDs/ next to store.usd (relative refs in the USD).
 _STORE_PKG = Path(__file__).resolve().parents[2] / "small_store_aij"
-STORE_USD = (_STORE_PKG / "store.usd").resolve()
+_STORE_PKG_VER2 = Path(__file__).resolve().parents[2] / "small_store_aij_ver2"
+STORE_USD = (_STORE_PKG_VER2 / "store.usd").resolve()
 
 # Exported store layout (see small_store_aij/store.usd).
 STORE_DSYNTH_SUBPATH = "/World/envs/env_0/dsynth_scene"

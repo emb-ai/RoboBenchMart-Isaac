@@ -20,6 +20,7 @@ import math
 import os
 import sys
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Literal
 
 from isaaclab.app import AppLauncher
@@ -104,6 +105,43 @@ parser.add_argument(
     help="Yaw target: bearing while far then headset yaw (default), bearing only, or headset only.",
 )
 parser.add_argument(
+    "--follow_head_yaw_offset_deg",
+    type=float,
+    default=0.0,
+    help="Extra heading offset applied to headset view yaw (deg). Tune if still misaligned.",
+)
+parser.add_argument(
+    "--teleop_while_pursuing",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help="Allow XR hand teleop before robot matches headset XY+yaw (default: freeze until arrived).",
+)
+parser.add_argument(
+    "--arrive_xy_tol",
+    type=float,
+    default=0.20,
+    help="Enter arrived (enable XR teleop) when XY distance to headset is at or below this (m).",
+)
+parser.add_argument(
+    "--arrive_xy_leave",
+    type=float,
+    default=0.45,
+    help="Leave arrived when XY distance exceeds this (m). Must be >= --arrive_xy_tol.",
+)
+parser.add_argument(
+    "--arrive_yaw_tol",
+    type=float,
+    default=0.25,
+    help="Enter arrived when |headset yaw - robot yaw| is at or below this (rad).",
+)
+parser.add_argument(
+    "--arrive_yaw_leave",
+    type=float,
+    default=0.50,
+    help="Leave arrived when |headset yaw - robot yaw| exceeds this (rad). "
+    "Must be >= --arrive_yaw_tol.",
+)
+parser.add_argument(
     "--print_every_n",
     type=int,
     default=30,
@@ -133,6 +171,7 @@ app_launcher = AppLauncher(app_launcher_args)
 simulation_app = app_launcher.app
 
 import gymnasium as gym
+import isaaclab.utils.math as math_utils
 import numpy as np
 import torch
 
@@ -151,6 +190,9 @@ from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
     policy_leg_targets,
 )
+from dsynth_isaac.tasks.manager_based.sberchel_upperbody_xr_env_cfg import (
+    SBERCHEL_HAND_JOINT_NAMES,
+)
 from green_challenge.policy.network import Network
 
 logger = logging.getLogger(__name__)
@@ -158,8 +200,22 @@ logger = logging.getLogger(__name__)
 _LEFT_HAND_BASE = "left_hand_base_link"
 _RIGHT_HAND_BASE = "right_hand_base_link"
 
+# Isaac robot body forward is +X (Z-up). OpenXR HMD view direction is local -Z.
+_ROBOT_FORWARD_LOCAL = (1.0, 0.0, 0.0)
+_OPENXR_VIEW_FORWARD_LOCAL = (0.0, 0.0, -1.0)
+
 YawMode = Literal["bearing", "headset"]
 YawTargetMode = Literal["bearing_then_headset", "bearing", "headset"]
+UpperBodyMode = Literal["teleop", "frozen", "idle"]
+
+
+@dataclass
+class _FrozenUpperSnapshot:
+    """Pelvis-relative wrists and finger joints captured when pursuit begins."""
+
+    left_wrist_in_pelvis: np.ndarray
+    right_wrist_in_pelvis: np.ndarray
+    fingers: np.ndarray
 
 
 def _body_pose_7d(robot, body_name: str) -> list[float]:
@@ -187,21 +243,194 @@ def _sync_retargeter_idle_from_robot(teleop_interface, robot) -> None:
     )
 
 
-def _yaw_from_quat_wxyz(quat) -> float:
-    """Yaw (rad) from a wxyz quaternion (scalar or length-4 tensor/array)."""
+def _build_idle_upper_from_robot(robot, device: str) -> torch.Tensor:
+    """26D upper body: left/right hand_base world poses + neutral fingers."""
+    return torch.tensor(
+        [
+            *_body_pose_7d(robot, _LEFT_HAND_BASE),
+            *_body_pose_7d(robot, _RIGHT_HAND_BASE),
+            *([0.0] * 12),
+        ],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def _pelvis_pose_world(robot) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pelvis (root) pose in world frame as (t, q) with batch dim N=1."""
+    return robot.data.root_pos_w[0:1, :3], robot.data.root_quat_w[0:1, :]
+
+
+def _pose7_to_tensors(pose7) -> tuple[torch.Tensor, torch.Tensor]:
+    t = torch.tensor(pose7[:3], dtype=torch.float32).unsqueeze(0)
+    q = torch.tensor(pose7[3:7], dtype=torch.float32).unsqueeze(0)
+    return t, q
+
+
+def _tensors_to_pose7(pos: torch.Tensor, quat: torch.Tensor) -> np.ndarray:
+    return np.concatenate(
+        [pos[0].detach().cpu().numpy(), quat[0].detach().cpu().numpy()],
+        dtype=np.float32,
+    )
+
+
+def _world_to_pelvis(
+    pelvis_t: torch.Tensor,
+    pelvis_q: torch.Tensor,
+    world_t: torch.Tensor,
+    world_q: torch.Tensor,
+) -> np.ndarray:
+    local_t, local_q = math_utils.subtract_frame_transforms(
+        pelvis_t, pelvis_q, world_t, world_q
+    )
+    return _tensors_to_pose7(local_t, local_q)
+
+
+def _pelvis_to_world(
+    pelvis_t: torch.Tensor,
+    pelvis_q: torch.Tensor,
+    local_t: torch.Tensor,
+    local_q: torch.Tensor,
+) -> np.ndarray:
+    world_t, world_q = math_utils.combine_frame_transforms(
+        pelvis_t, pelvis_q, local_t, local_q
+    )
+    return _tensors_to_pose7(world_t, world_q)
+
+
+def _finger_positions_from_robot(robot) -> np.ndarray:
+    joint_pos = robot.data.joint_pos[0]
+    name_to_id = {name: idx for idx, name in enumerate(robot.joint_names)}
+    return np.array(
+        [
+            float(joint_pos[name_to_id[name]].item()) if name in name_to_id else 0.0
+            for name in SBERCHEL_HAND_JOINT_NAMES
+        ],
+        dtype=np.float32,
+    )
+
+
+def _capture_frozen_upper_from_robot(robot) -> _FrozenUpperSnapshot:
+    """Snapshot wrists in pelvis frame and finger joint positions from the robot."""
+    pelvis_t, pelvis_q = _pelvis_pose_world(robot)
+    left_t, left_q = _pose7_to_tensors(_body_pose_7d(robot, _LEFT_HAND_BASE))
+    right_t, right_q = _pose7_to_tensors(_body_pose_7d(robot, _RIGHT_HAND_BASE))
+    return _FrozenUpperSnapshot(
+        left_wrist_in_pelvis=_world_to_pelvis(pelvis_t, pelvis_q, left_t, left_q),
+        right_wrist_in_pelvis=_world_to_pelvis(pelvis_t, pelvis_q, right_t, right_q),
+        fingers=_finger_positions_from_robot(robot),
+    )
+
+
+def _capture_frozen_upper_from_teleop(
+    robot, teleop_upper: torch.Tensor
+) -> _FrozenUpperSnapshot:
+    """Snapshot pelvis-relative wrists and finger targets from the last teleop command."""
+    upper = teleop_upper.detach().cpu().numpy().reshape(-1)
+    left_pose7 = upper[0:7]
+    right_pose7 = upper[7:14]
+    fingers = np.asarray(upper[14:26], dtype=np.float32)
+    pelvis_t, pelvis_q = _pelvis_pose_world(robot)
+    left_t, left_q = _pose7_to_tensors(left_pose7)
+    right_t, right_q = _pose7_to_tensors(right_pose7)
+    return _FrozenUpperSnapshot(
+        left_wrist_in_pelvis=_world_to_pelvis(pelvis_t, pelvis_q, left_t, left_q),
+        right_wrist_in_pelvis=_world_to_pelvis(pelvis_t, pelvis_q, right_t, right_q),
+        fingers=fingers,
+    )
+
+
+def _capture_frozen_upper(
+    robot, teleop_upper: torch.Tensor | None = None
+) -> _FrozenUpperSnapshot:
+    """Prefer last teleop command (grasp intent); fall back to measured robot state."""
+    if teleop_upper is not None:
+        return _capture_frozen_upper_from_teleop(robot, teleop_upper)
+    return _capture_frozen_upper_from_robot(robot)
+
+
+def _build_upper_from_frozen_snapshot(
+    robot, snapshot: _FrozenUpperSnapshot, device: str
+) -> torch.Tensor:
+    """Replay pelvis-relative wrists at the current pelvis pose + saved fingers."""
+    pelvis_t, pelvis_q = _pelvis_pose_world(robot)
+    left_t, left_q = _pose7_to_tensors(snapshot.left_wrist_in_pelvis)
+    right_t, right_q = _pose7_to_tensors(snapshot.right_wrist_in_pelvis)
+    left_world = _pelvis_to_world(pelvis_t, pelvis_q, left_t, left_q)
+    right_world = _pelvis_to_world(pelvis_t, pelvis_q, right_t, right_q)
+    return torch.tensor(
+        [*left_world, *right_world, *snapshot.fingers.tolist()],
+        dtype=torch.float32,
+        device=device,
+    )
+
+
+def _update_loco_arrived(
+    dist_xy: float,
+    yaw_err: float,
+    loco_arrived: bool,
+    *,
+    dist_arrive: float,
+    dist_leave: float,
+    yaw_arrive: float,
+    yaw_leave: float,
+) -> bool:
+    """Hysteresis: arrived when XY and yaw match headset; leave when either drifts."""
+    abs_yaw = abs(yaw_err)
+    if not loco_arrived:
+        return dist_xy <= dist_arrive and abs_yaw <= yaw_arrive
+    if dist_xy >= dist_leave or abs_yaw > yaw_leave:
+        return False
+    return True
+
+
+def _quat_rotate_vec_wxyz(
+    quat, vec: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    """Rotate a vector by a wxyz quaternion."""
     if hasattr(quat, "detach"):
         q = quat.detach().cpu().tolist()
     else:
         q = list(quat)
     w, x, y, z = (float(v) for v in q)
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    return math.atan2(siny_cosp, cosy_cosp)
+    vx, vy, vz = vec
+    qxv_x = y * vz - z * vy
+    qxv_y = z * vx - x * vz
+    qxv_z = x * vy - y * vx
+    qxqv_x = y * qxv_z - z * qxv_y
+    qxqv_y = z * qxv_x - x * qxv_z
+    qxqv_z = x * qxv_y - y * qxv_x
+    return (
+        vx + 2.0 * (w * qxv_x + qxqv_x),
+        vy + 2.0 * (w * qxv_y + qxqv_y),
+        vz + 2.0 * (w * qxv_z + qxqv_z),
+    )
+
+
+def _heading_from_quat_wxyz(
+    quat,
+    forward_local: tuple[float, float, float] = _ROBOT_FORWARD_LOCAL,
+) -> float:
+    """World XY heading from quaternion by projecting a body/view forward axis."""
+    fx, fy, _fz = _quat_rotate_vec_wxyz(quat, forward_local)
+    return math.atan2(fy, fx)
+
+
+def _yaw_from_quat_wxyz(quat) -> float:
+    """Robot root yaw (rad): heading of body +X in world XY."""
+    return _heading_from_quat_wxyz(quat, _ROBOT_FORWARD_LOCAL)
 
 
 def _wrap_angle(angle: float) -> float:
     """Wrap angle to [-pi, pi]."""
     return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def _head_yaw_from_pose(head_pose_7d: np.ndarray, *, offset_rad: float = 0.0) -> float:
+    """Headset view heading (rad): OpenXR look direction (-Z) projected to world XY."""
+    return _wrap_angle(
+        _heading_from_quat_wxyz(head_pose_7d[3:7], _OPENXR_VIEW_FORWARD_LOCAL) + offset_rad
+    )
 
 
 def _clip(value: float, limit: float) -> float:
@@ -278,6 +507,7 @@ def _headset_follow_command(
     max_ang: float,
     pos_deadzone: float,
     yaw_deadzone: float,
+    head_yaw_offset_rad: float,
 ) -> tuple[float, float, float, float, float, float, float, float, float, YawMode, float, bool, bool]:
     """Body-frame (vx, vy, wz) driving the base toward the headset world XY.
 
@@ -290,7 +520,7 @@ def _headset_follow_command(
     """
     target_x = float(head_pose_7d[0])
     target_y = float(head_pose_7d[1])
-    head_yaw = _yaw_from_quat_wxyz(head_pose_7d[3:7])
+    head_yaw = _head_yaw_from_pose(head_pose_7d, offset_rad=head_yaw_offset_rad)
 
     cur_x, cur_y = robot.data.root_pos_w[0, :2].detach().cpu().tolist()
     cur_yaw = _yaw_from_quat_wxyz(robot.data.root_quat_w[0])
@@ -365,6 +595,8 @@ def _print_debug_block(
     target_yaw: float | None = None,
     yaw_mode: YawMode | None = None,
     yaw_active: bool | None = None,
+    upper_body_mode: UpperBodyMode | None = None,
+    loco_arrived: bool | None = None,
 ) -> None:
     lines = [
         f"[head_follow] step={step} active={active}",
@@ -372,7 +604,7 @@ def _print_debug_block(
     ]
     if head_pose is not None:
         if head_yaw is None:
-            head_yaw = _yaw_from_quat_wxyz(head_pose[3:7])
+            head_yaw = _head_yaw_from_pose(head_pose)
         lines.append(
             f"  headset pos=({float(head_pose[0]):.3f}, {float(head_pose[1]):.3f}, "
             f"{float(head_pose[2]):.3f}) yaw={head_yaw:.3f}"
@@ -384,9 +616,12 @@ def _print_debug_block(
     target_yaw_str = f"{target_yaw:.3f}" if target_yaw is not None else "n/a"
     yaw_mode_str = yaw_mode if yaw_mode is not None else "n/a"
     yaw_gate_str = str(yaw_active) if yaw_active is not None else "n/a"
+    upper_body_str = upper_body_mode if upper_body_mode is not None else "n/a"
+    loco_str = str(loco_arrived) if loco_arrived is not None else "n/a"
     lines.extend([
         f"  yaw     mode={yaw_mode_str} target={target_yaw_str} bearing={bearing_str} "
         f"head={head_yaw_str} yaw_active={yaw_gate_str}",
+        f"  upper   body={upper_body_str} loco_arrived={loco_str}",
         f"  error   dxy=({err_x:.3f}, {err_y:.3f}) dist={dist_xy:.3f} dyaw={err_yaw:.3f}",
         f"  cmd     vx={vx:.3f} vy={vy:.3f} wz={wz:.3f}",
     ])
@@ -425,6 +660,10 @@ def main() -> None:
     first_active_logged = False
     yaw_mode: YawMode = "bearing"
     bearing_yaw_active = False
+    loco_arrived = False
+    prev_loco_arrived = False
+    frozen_snapshot: _FrozenUpperSnapshot | None = None
+    last_teleop_upper: torch.Tensor | None = None
 
     def reset_env() -> None:
         nonlocal should_reset
@@ -433,18 +672,28 @@ def main() -> None:
 
     def start_teleoperation() -> None:
         nonlocal teleoperation_active, first_active_logged, yaw_mode, bearing_yaw_active
+        nonlocal loco_arrived, prev_loco_arrived, frozen_snapshot, last_teleop_upper
         teleoperation_active = True
         first_active_logged = False
         yaw_mode = "bearing"
         bearing_yaw_active = False
+        loco_arrived = False
+        prev_loco_arrived = False
+        frozen_snapshot = None
+        last_teleop_upper = None
         _sync_retargeter_idle_from_robot(teleop_interface, robot)
         print("Teleoperation activated (upper body + head-follow locomotion)")
 
     def stop_teleoperation() -> None:
         nonlocal teleoperation_active, yaw_mode, bearing_yaw_active
+        nonlocal loco_arrived, prev_loco_arrived, frozen_snapshot, last_teleop_upper
         teleoperation_active = False
         yaw_mode = "bearing"
         bearing_yaw_active = False
+        loco_arrived = False
+        prev_loco_arrived = False
+        frozen_snapshot = None
+        last_teleop_upper = None
         print("Teleoperation deactivated")
 
     teleoperation_callbacks: dict[str, Callable[[], None]] = {
@@ -466,18 +715,15 @@ def main() -> None:
     teleop_interface._required_features.add(RetargeterBase.Requirement.HEAD_TRACKING)
     teleop_interface.reset()
     _sync_retargeter_idle_from_robot(teleop_interface, robot)
-    idle_upper = torch.tensor(
-        [
-            *_body_pose_7d(robot, _LEFT_HAND_BASE),
-            *_body_pose_7d(robot, _RIGHT_HAND_BASE),
-            *([0.0] * 12),
-        ],
-        dtype=torch.float32,
-        device=env.device,
-    )
+    idle_upper = _build_idle_upper_from_robot(robot, env.device)
 
     print(f"Using teleop device: {teleop_interface}")
-    print("Legs: locomotion policy follows headset XY/yaw after START. Upper body: XR teleop.")
+    print(
+        "Legs: locomotion policy follows headset after START. "
+        "Upper body: XR teleop when robot matches headset XY+yaw; "
+        "arms/fingers frozen body-relative while pursuing."
+    )
+    head_yaw_offset_rad = math.radians(args_cli.follow_head_yaw_offset_deg)
     if args_cli.xr:
         print("Press START in XR to begin teleoperation and head-follow. Press R to reset.")
 
@@ -494,6 +740,8 @@ def main() -> None:
                 target_yaw: float | None = None
                 yaw_mode_dbg: YawMode | None = None
                 yaw_active: bool | None = None
+                upper_body_mode: UpperBodyMode | None = None
+                loco_arrived_dbg: bool | None = None
 
                 if teleoperation_active:
                     raw = teleop_interface._get_raw_data()
@@ -527,17 +775,53 @@ def main() -> None:
                             max_ang=args_cli.follow_max_ang,
                             pos_deadzone=args_cli.follow_pos_deadzone,
                             yaw_deadzone=args_cli.follow_yaw_deadzone,
+                            head_yaw_offset_rad=head_yaw_offset_rad,
                         )
                         yaw_mode_dbg = yaw_mode
-                    upper_body = torch.cat(
-                        [r.retarget(raw) for r in teleop_interface._retargeters],
-                        dim=-1,
-                    )
+                        alignment_yaw_err = _wrap_angle(head_yaw - robot_yaw)
+                        new_loco_arrived = _update_loco_arrived(
+                            dist_xy,
+                            alignment_yaw_err,
+                            loco_arrived,
+                            dist_arrive=args_cli.arrive_xy_tol,
+                            dist_leave=args_cli.arrive_xy_leave,
+                            yaw_arrive=args_cli.arrive_yaw_tol,
+                            yaw_leave=args_cli.arrive_yaw_leave,
+                        )
+                        if prev_loco_arrived and not new_loco_arrived:
+                            frozen_snapshot = _capture_frozen_upper(robot, last_teleop_upper)
+                        elif not prev_loco_arrived and new_loco_arrived:
+                            _sync_retargeter_idle_from_robot(teleop_interface, robot)
+                            frozen_snapshot = None
+                        loco_arrived = new_loco_arrived
+                        prev_loco_arrived = loco_arrived
+                        loco_arrived_dbg = loco_arrived
+
+                    use_teleop = args_cli.teleop_while_pursuing or loco_arrived
+                    if use_teleop:
+                        upper_body = torch.cat(
+                            [r.retarget(raw) for r in teleop_interface._retargeters],
+                            dim=-1,
+                        )
+                        last_teleop_upper = (
+                            upper_body.squeeze(0).clone()
+                            if upper_body.ndim > 1
+                            else upper_body.clone()
+                        )
+                        upper_body_mode = "teleop"
+                    else:
+                        if frozen_snapshot is None:
+                            frozen_snapshot = _capture_frozen_upper(robot, last_teleop_upper)
+                        upper_body = _build_upper_from_frozen_snapshot(
+                            robot, frozen_snapshot, env.device
+                        )
+                        upper_body_mode = "frozen"
                     if upper_body.ndim == 1:
                         upper_body = upper_body.unsqueeze(0)
                     upper_body = upper_body.to(env.device).repeat(env.num_envs, 1)
                 else:
                     upper_body = idle_upper.unsqueeze(0).repeat(env.num_envs, 1)
+                    upper_body_mode = "idle"
 
                 legs = policy_leg_targets(net, vx, vy, wz)
                 legs_tensor = torch.as_tensor(legs, dtype=torch.float32, device=env.device)
@@ -571,6 +855,8 @@ def main() -> None:
                         target_yaw=target_yaw,
                         yaw_mode=yaw_mode_dbg,
                         yaw_active=yaw_active,
+                        upper_body_mode=upper_body_mode,
+                        loco_arrived=loco_arrived_dbg,
                     )
 
                 if should_reset:
@@ -580,16 +866,12 @@ def main() -> None:
                     teleop_interface.reset()
                     yaw_mode = "bearing"
                     bearing_yaw_active = False
+                    loco_arrived = False
+                    prev_loco_arrived = False
+                    frozen_snapshot = None
+                    last_teleop_upper = None
                     _sync_retargeter_idle_from_robot(teleop_interface, robot)
-                    idle_upper = torch.tensor(
-                        [
-                            *_body_pose_7d(robot, _LEFT_HAND_BASE),
-                            *_body_pose_7d(robot, _RIGHT_HAND_BASE),
-                            *([0.0] * 12),
-                        ],
-                        dtype=torch.float32,
-                        device=env.device,
-                    )
+                    idle_upper = _build_idle_upper_from_robot(robot, env.device)
                     should_reset = False
                     first_active_logged = False
                     print("Environment reset complete")
