@@ -1,5 +1,6 @@
 """Free-floating open-kinematics Sberchel: zest legs + XR Pink IK upper body."""
 
+import torch
 import isaaclab.envs.mdp as mdp
 from isaaclab.devices.openxr import XrCfg
 from isaaclab.utils import configclass
@@ -82,6 +83,38 @@ class SberchelXRDemoEnvCfg(ManagerBasedRLEnvCfg):
     )
 
     NUM_OPENXR_HAND_JOINTS = 26
+
+    # Upper-body Pink idle only (26D). Replay pads legs from the robot after reset.
+    idle_action = torch.tensor(
+        [
+            5.40,
+            5.95,
+            1.15,
+            0.707,
+            0.0,
+            0.0,
+            0.707,
+            5.80,
+            5.95,
+            1.15,
+            0.707,
+            0.0,
+            0.0,
+            0.707,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ]
+    )
 
     commands = None
     rewards = None
