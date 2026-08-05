@@ -6,9 +6,10 @@ from isaaclab.devices.openxr import XrCfg
 from isaaclab.utils import configclass
 from isaaclab.envs import ManagerBasedRLEnvCfg
 
-from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_XR_LOCOMOTION_ROBOT
+from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_XR_LOCOMOTION_NECK_ROBOT
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
+    NECK_JOINT_NAMES,
     POLICY_LEG_JOINT_NAMES,
     SberchelEventCfg,
     SberchelObservationsCfg,
@@ -24,11 +25,17 @@ from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import TerminationsCfg
 
 @configclass
 class SberchelXRActionsCfg:
-    """Action layout: ``[legs(12), upper_body_ik(26)]`` (legs first)."""
+    """Action layout: ``[legs(12), neck(2), upper_body_ik(26)]`` (legs first)."""
 
     legs_joint_pos = mdp.JointPositionActionCfg(
         asset_name="robot",
         joint_names=POLICY_LEG_JOINT_NAMES,
+        scale=1.0,
+        preserve_order=True,
+    )
+    neck_joint_pos = mdp.JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=NECK_JOINT_NAMES,
         scale=1.0,
         preserve_order=True,
     )
@@ -56,7 +63,7 @@ class SberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        self.scene.robot = SBERCHEL_XR_LOCOMOTION_ROBOT.replace(
+        self.scene.robot = SBERCHEL_XR_LOCOMOTION_NECK_ROBOT.replace(
             prim_path="{ENV_REGEX_NS}/Robot",
         )
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
@@ -84,7 +91,7 @@ class SberchelXRDemoEnvCfg(ManagerBasedRLEnvCfg):
 
     NUM_OPENXR_HAND_JOINTS = 26
 
-    # Upper-body Pink idle only (26D). Replay pads legs from the robot after reset.
+    # Upper-body Pink idle only (26D). Replay pads legs/neck from the robot after reset.
     idle_action = torch.tensor(
         [
             5.40,
@@ -123,7 +130,7 @@ class SberchelXRDemoEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        self.scene.robot = SBERCHEL_XR_LOCOMOTION_ROBOT.replace(
+        self.scene.robot = SBERCHEL_XR_LOCOMOTION_NECK_ROBOT.replace(
             prim_path="{ENV_REGEX_NS}/Robot",
         )
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]

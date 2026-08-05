@@ -3,7 +3,7 @@
 Upper-body teleop is XR hand tracking; legs use the zest locomotion policy
 driven by keyboard velocity commands (like ``demo_sberchel_kb.py``). Press **C**
 to toggle locomotion (WASD + frozen upper body) vs static teleop (station-keep
-at the latch pose + live XR hands).
+at the latch pose + live XR hands + headset neck look).
 
 Episodes export on RESET/R. Press **X** to discard the current episode and reset
 without writing to HDF5.
@@ -144,6 +144,7 @@ simulation_app = app_launcher.app
 import gymnasium as gym
 import torch
 
+from isaaclab.devices.device_base import DeviceBase
 from isaaclab.devices.openxr import remove_camera_configs
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import DatasetExportMode
@@ -160,6 +161,8 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
     build_upper_from_frozen_snapshot,
     capture_frozen_upper,
     create_sberchel_xr_teleop_interface,
+    headset_to_neck_targets,
+    pack_sberchel_xr_action,
     robot_root_state,
     station_keep_command,
     sync_retargeter_idle_from_robot,
@@ -167,6 +170,9 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
 from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
+    NECK_ACTION_DIM,
+    NECK_PITCH_LIMIT,
+    NECK_YAW_LIMIT,
     policy_leg_targets,
 )
 from green_challenge.policy.network import Network
@@ -180,6 +186,7 @@ _HELP = """
   W forward    S backward    A turn left    D turn right
   Q strafe L   E strafe R    (release = stop legs in loco mode)
   C  toggle locomotion (WASD + frozen upper) / static teleop
+     (static: XR hands + headset drives neck yaw/pitch)
   R  save episode + reset
   X  discard episode + reset (no HDF5 write)
   XR START / STOP  begin or pause recording
@@ -362,10 +369,10 @@ def main() -> None:
     net.reset()
     apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
     robot = env.scene["robot"]
-    upper_body_dim = env.action_manager.total_action_dim - LEGS_ACTION_DIM
+    upper_body_dim = env.action_manager.total_action_dim - LEGS_ACTION_DIM - NECK_ACTION_DIM
     print(
         f">>> action dim = {env.action_manager.total_action_dim} "
-        f"(legs {LEGS_ACTION_DIM} + upper_body {upper_body_dim})",
+        f"(legs {LEGS_ACTION_DIM} + neck {NECK_ACTION_DIM} + upper_body {upper_body_dim})",
         flush=True,
     )
 
@@ -379,6 +386,7 @@ def main() -> None:
     hold_xy_yaw: tuple[float, float, float] | None = None
     frozen_snapshot: FrozenUpperSnapshot | None = None
     last_teleop_upper: torch.Tensor | None = None
+    last_neck_targets: tuple[float, float] = (0.0, 0.0)
 
     def reset_env() -> None:
         nonlocal should_reset
@@ -391,7 +399,7 @@ def main() -> None:
         print("Discard reset requested — episode will NOT be saved; environment reset on next step")
 
     def toggle_loco_mode() -> None:
-        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot
+        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
         if not teleoperation_active:
             return
         if loco_mode == "locomotion":
@@ -399,20 +407,23 @@ def main() -> None:
             hold_xy_yaw = capture_hold_pose_from_robot(robot)
             sync_retargeter_idle_from_robot(teleop_interface, robot)
             frozen_snapshot = None
+            last_neck_targets = (0.0, 0.0)
             print(
                 f"Mode: STATIC teleop (station-keep at "
-                f"xy=({hold_xy_yaw[0]:.3f}, {hold_xy_yaw[1]:.3f}) yaw={hold_xy_yaw[2]:.3f})",
+                f"xy=({hold_xy_yaw[0]:.3f}, {hold_xy_yaw[1]:.3f}) yaw={hold_xy_yaw[2]:.3f}; "
+                f"headset drives neck)",
                 flush=True,
             )
         else:
             loco_mode = "locomotion"
             frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
             hold_xy_yaw = None
+            last_neck_targets = (0.0, 0.0)
             print("Mode: LOCOMOTION (WASD + frozen upper body)", flush=True)
 
     def start_recording_instance() -> None:
         nonlocal running_recording_instance, teleoperation_active, first_active_logged
-        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_teleop_upper
+        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_teleop_upper, last_neck_targets
         running_recording_instance = True
         teleoperation_active = True
         first_active_logged = False
@@ -420,18 +431,20 @@ def main() -> None:
         hold_xy_yaw = None
         frozen_snapshot = None
         last_teleop_upper = None
+        last_neck_targets = (0.0, 0.0)
         sync_retargeter_idle_from_robot(teleop_interface, robot)
         print("Recording started (WASD locomotion + XR upper body; press C for static teleop)")
 
     def stop_recording_instance() -> None:
         nonlocal running_recording_instance, teleoperation_active
-        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_teleop_upper
+        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_teleop_upper, last_neck_targets
         running_recording_instance = False
         teleoperation_active = False
         loco_mode = "locomotion"
         hold_xy_yaw = None
         frozen_snapshot = None
         last_teleop_upper = None
+        last_neck_targets = (0.0, 0.0)
         print("Recording paused")
 
     teleoperation_callbacks: dict[str, Callable[[], None]] = {
@@ -441,9 +454,9 @@ def main() -> None:
         "RESET": reset_env,
     }
 
-    # Head tracking not required for keyboard locomotion.
+    # Head tracking required for static-mode neck look.
     teleop_interface = create_sberchel_xr_teleop_interface(
-        env_cfg, args_cli.teleop_device, teleoperation_callbacks, require_head_tracking=False
+        env_cfg, args_cli.teleop_device, teleoperation_callbacks, require_head_tracking=True
     )
     teleop_interface.reset()
     sync_retargeter_idle_from_robot(teleop_interface, robot)
@@ -476,6 +489,7 @@ def main() -> None:
                     robot_pos, robot_yaw = robot_root_state(robot)
                     vx = vy = wz = 0.0
                     upper_body_mode: UpperBodyMode | None = None
+                    neck_yaw_cmd, neck_pitch_cmd = 0.0, 0.0
 
                     if teleoperation_active:
                         raw = teleop_interface._get_raw_data()
@@ -488,6 +502,7 @@ def main() -> None:
                                 robot, frozen_snapshot, env.device
                             )
                             upper_body_mode = "frozen"
+                            last_neck_targets = (0.0, 0.0)
                         else:
                             if hold_xy_yaw is None:
                                 hold_xy_yaw = capture_hold_pose_from_robot(robot)
@@ -511,6 +526,17 @@ def main() -> None:
                                 else upper_body.clone()
                             )
                             upper_body_mode = "teleop"
+                            head_pose = raw.get(DeviceBase.TrackingTarget.HEAD)
+                            if head_pose is not None:
+                                last_neck_targets = headset_to_neck_targets(
+                                    head_pose,
+                                    robot_yaw,
+                                    yaw_limit=NECK_YAW_LIMIT,
+                                    pitch_limit=NECK_PITCH_LIMIT,
+                                )
+                            # Missing HEAD: hold last neck targets from static mode.
+
+                        neck_yaw_cmd, neck_pitch_cmd = last_neck_targets
 
                         if upper_body.ndim == 1:
                             upper_body = upper_body.unsqueeze(0)
@@ -518,11 +544,18 @@ def main() -> None:
                     else:
                         upper_body = idle_upper.unsqueeze(0).repeat(env.num_envs, 1)
                         upper_body_mode = "idle"
+                        last_neck_targets = (0.0, 0.0)
+                        neck_yaw_cmd, neck_pitch_cmd = last_neck_targets
 
                     legs = policy_leg_targets(net, vx, vy, wz)
                     legs_tensor = torch.as_tensor(legs, dtype=torch.float32, device=env.device)
                     legs_tensor = legs_tensor.unsqueeze(0).repeat(env.num_envs, 1)
-                    actions = torch.cat([legs_tensor, upper_body], dim=-1)
+                    neck_tensor = torch.tensor(
+                        [[neck_yaw_cmd, neck_pitch_cmd]],
+                        dtype=torch.float32,
+                        device=env.device,
+                    ).repeat(env.num_envs, 1)
+                    actions = pack_sberchel_xr_action(legs_tensor, upper_body, neck_tensor)
                     stash_locomotion_command(env, vx, vy, wz)
                     env.step(actions)
 
@@ -542,7 +575,8 @@ def main() -> None:
                         print(
                             f"[step {step_count}] mode={loco_mode} upper={upper_body_mode} "
                             f"pos=({robot_pos[0]:.2f},{robot_pos[1]:.2f}) yaw={robot_yaw:.2f} "
-                            f"cmd=({vx:.2f},{vy:.2f},{wz:.2f}){hold_dbg}",
+                            f"cmd=({vx:.2f},{vy:.2f},{wz:.2f}) "
+                            f"neck=({neck_yaw_cmd:.2f},{neck_pitch_cmd:.2f}){hold_dbg}",
                             flush=True,
                         )
                 else:
@@ -557,6 +591,7 @@ def main() -> None:
                         env.recorder_manager.cfg.export_in_record_pre_reset = True
                     hold_xy_yaw = None
                     loco_mode = "locomotion"
+                    last_neck_targets = (0.0, 0.0)
                     (
                         frozen_snapshot,
                         last_teleop_upper,

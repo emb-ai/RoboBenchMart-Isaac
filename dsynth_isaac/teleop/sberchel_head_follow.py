@@ -20,6 +20,7 @@ OPENXR_VIEW_FORWARD_LOCAL = (0.0, 0.0, -1.0)
 
 YawMode = Literal["bearing", "headset"]
 YawTargetMode = Literal["bearing_then_headset", "bearing", "headset"]
+PursuitMode = Literal["long", "short"]
 UpperBodyMode = Literal["teleop", "frozen", "idle"]
 
 
@@ -46,6 +47,9 @@ class HeadFollowParams:
     follow_yaw_off_gate: float = 0.25
     follow_yaw_target: YawTargetMode = "bearing_then_headset"
     follow_head_yaw_offset_deg: float = 0.0
+    follow_short_on_gate: float = 0.55
+    follow_short_off_gate: float = 0.65
+    follow_short_max_lin: float = 0.35
     teleop_while_pursuing: bool = False
     arrive_xy_tol: float = 0.20
     arrive_xy_leave: float = 0.45
@@ -70,6 +74,9 @@ class HeadFollowParams:
             follow_yaw_off_gate=args.follow_yaw_off_gate,
             follow_yaw_target=args.follow_yaw_target,
             follow_head_yaw_offset_deg=args.follow_head_yaw_offset_deg,
+            follow_short_on_gate=args.follow_short_on_gate,
+            follow_short_off_gate=args.follow_short_off_gate,
+            follow_short_max_lin=args.follow_short_max_lin,
             teleop_while_pursuing=args.teleop_while_pursuing,
             arrive_xy_tol=args.arrive_xy_tol,
             arrive_xy_leave=args.arrive_xy_leave,
@@ -142,6 +149,25 @@ def add_head_follow_cli_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=0.0,
         help="Extra heading offset applied to headset view yaw (deg). Tune if still misaligned.",
+    )
+    parser.add_argument(
+        "--follow_short_on_gate",
+        type=float,
+        default=0.55,
+        help="Switch to short pursuit (vx/vy only, no yaw) when XY distance is at or below this (m).",
+    )
+    parser.add_argument(
+        "--follow_short_off_gate",
+        type=float,
+        default=0.65,
+        help="Switch back to long pursuit when XY distance exceeds this (m). "
+        "Must be >= --follow_short_on_gate.",
+    )
+    parser.add_argument(
+        "--follow_short_max_lin",
+        type=float,
+        default=0.35,
+        help="Max linear speed during short pursuit (m/s) for small forward/back/side steps.",
     )
     parser.add_argument(
         "--teleop_while_pursuing",
@@ -425,8 +451,104 @@ def head_yaw_from_pose(head_pose_7d: np.ndarray, *, offset_rad: float = 0.0) -> 
     )
 
 
+def head_pitch_from_pose(head_pose_7d: np.ndarray) -> float:
+    """Headset view pitch (rad): elevation of OpenXR look direction in world (Z-up).
+
+    Positive pitch looks up. Uses the same view-forward axis as ``head_yaw_from_pose``.
+    """
+    fx, fy, fz = quat_rotate_vec_wxyz(head_pose_7d[3:7], OPENXR_VIEW_FORWARD_LOCAL)
+    return math.atan2(fz, math.hypot(fx, fy))
+
+
+def headset_to_neck_targets(
+    head_pose_7d: np.ndarray,
+    robot_yaw: float,
+    *,
+    yaw_offset_rad: float = 0.0,
+    yaw_limit: float = 0.785,
+    pitch_limit: float = 0.524,
+) -> tuple[float, float]:
+    """Map headset look to neck joint targets relative to robot root yaw.
+
+    Returns ``(neck_yaw, neck_pitch)`` clipped to hybrid MJCF joint ranges.
+    Neck pitch joint sign is opposite headset elevation (look up -> negative pitch).
+    """
+    head_yaw = head_yaw_from_pose(head_pose_7d, offset_rad=yaw_offset_rad)
+    neck_yaw = clip(wrap_angle(head_yaw - robot_yaw), yaw_limit)
+    neck_pitch = clip(-head_pitch_from_pose(head_pose_7d), pitch_limit)
+    return neck_yaw, neck_pitch
+
+
+def pack_sberchel_xr_action(
+    legs: torch.Tensor,
+    upper: torch.Tensor,
+    neck: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Concatenate ``[legs(12), neck(2), upper(26)]`` for Sberchel XR action layout.
+
+    If ``neck`` is None, inserts zeros matching ``legs`` batch/device/dtype.
+    """
+    if legs.ndim == 1:
+        legs = legs.unsqueeze(0)
+    if upper.ndim == 1:
+        upper = upper.unsqueeze(0)
+    if neck is None:
+        neck = torch.zeros(legs.shape[0], 2, device=legs.device, dtype=legs.dtype)
+    elif neck.ndim == 1:
+        neck = neck.unsqueeze(0)
+    return torch.cat([legs, neck, upper], dim=-1)
+
+
 def clip(value: float, limit: float) -> float:
     return max(-limit, min(limit, value))
+
+
+def capture_hold_pose_from_headset(
+    head_pose_7d: np.ndarray, *, offset_rad: float = 0.0
+) -> tuple[float, float, float]:
+    """Latch headset world XY and view yaw for arrived-state station-keeping."""
+    return (
+        float(head_pose_7d[0]),
+        float(head_pose_7d[1]),
+        head_yaw_from_pose(head_pose_7d, offset_rad=offset_rad),
+    )
+
+
+def station_keep_command(
+    robot,
+    hold_xy_yaw: tuple[float, float, float],
+    *,
+    lin_gain: float,
+    ang_gain: float,
+    max_lin: float,
+    max_ang: float,
+    pos_deadzone: float,
+    yaw_deadzone: float,
+) -> tuple[float, float, float]:
+    """Body-frame (vx, vy, wz) driving the base back to a fixed world XY+yaw hold pose."""
+    hold_x, hold_y, hold_yaw = hold_xy_yaw
+    cur_x, cur_y = robot.data.root_pos_w[0, :2].detach().cpu().tolist()
+    cur_yaw = yaw_from_quat_wxyz(robot.data.root_quat_w[0])
+
+    err_x = hold_x - cur_x
+    err_y = hold_y - cur_y
+    err_yaw = wrap_angle(hold_yaw - cur_yaw)
+
+    c = math.cos(cur_yaw)
+    s = math.sin(cur_yaw)
+    err_bx = c * err_x + s * err_y
+    err_by = -s * err_x + c * err_y
+
+    dist = math.hypot(err_bx, err_by)
+    if dist < pos_deadzone:
+        vx = 0.0
+        vy = 0.0
+    else:
+        vx = clip(lin_gain * err_bx, max_lin)
+        vy = clip(lin_gain * err_by, max_lin)
+
+    wz = 0.0 if abs(err_yaw) < yaw_deadzone else clip(ang_gain * err_yaw, max_ang)
+    return vx, vy, wz
 
 
 def robot_root_state(robot) -> tuple[tuple[float, float, float], float]:
@@ -434,6 +556,21 @@ def robot_root_state(robot) -> tuple[tuple[float, float, float], float]:
     pos = robot.data.root_pos_w[0, :3].detach().cpu().tolist()
     yaw = yaw_from_quat_wxyz(robot.data.root_quat_w[0])
     return (float(pos[0]), float(pos[1]), float(pos[2])), yaw
+
+
+def update_pursuit_mode(
+    dist_xy: float,
+    pursuit_mode: PursuitMode,
+    *,
+    short_on_gate: float,
+    short_off_gate: float,
+) -> PursuitMode:
+    """Hysteresis: short pursuit while close; long pursuit while far."""
+    if dist_xy <= short_on_gate:
+        return "short"
+    if dist_xy >= short_off_gate:
+        return "long"
+    return pursuit_mode
 
 
 def update_yaw_mode(
@@ -488,11 +625,15 @@ def headset_follow_command(
     robot,
     head_pose_7d: np.ndarray,
     *,
+    pursuit_mode: PursuitMode,
     yaw_mode: YawMode,
     bearing_yaw_active: bool,
     yaw_target_mode: YawTargetMode,
     yaw_on_gate: float,
     yaw_off_gate: float,
+    short_on_gate: float,
+    short_off_gate: float,
+    short_max_lin: float,
     lin_gain: float,
     ang_gain: float,
     max_lin: float,
@@ -500,7 +641,22 @@ def headset_follow_command(
     pos_deadzone: float,
     yaw_deadzone: float,
     head_yaw_offset_rad: float,
-) -> tuple[float, float, float, float, float, float, float, float, float, YawMode, float, bool, bool]:
+) -> tuple[
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    float,
+    YawMode,
+    float,
+    bool,
+    bool,
+    PursuitMode,
+]:
     """Body-frame (vx, vy, wz) driving the base toward the headset world XY."""
     target_x = float(head_pose_7d[0])
     target_y = float(head_pose_7d[1])
@@ -518,31 +674,43 @@ def headset_follow_command(
     err_by = -s * err_x + c * err_y
 
     dist_xy = math.hypot(err_bx, err_by)
+    pursuit_mode = update_pursuit_mode(
+        dist_xy,
+        pursuit_mode,
+        short_on_gate=short_on_gate,
+        short_off_gate=short_off_gate,
+    )
 
+    lin_cap = short_max_lin if pursuit_mode == "short" else max_lin
     if dist_xy < pos_deadzone:
         vx = 0.0
         vy = 0.0
     else:
-        vx = clip(lin_gain * err_bx, max_lin)
-        vy = clip(lin_gain * err_by, max_lin)
+        vx = clip(lin_gain * err_bx, lin_cap)
+        vy = clip(lin_gain * err_by, lin_cap)
 
     bearing_yaw = math.atan2(err_y, err_x)
-    yaw_mode, bearing_yaw_active, target_yaw, yaw_active = resolve_yaw_target(
-        yaw_target_mode,
-        dist_xy,
-        yaw_mode,
-        bearing_yaw_active,
-        bearing_yaw,
-        head_yaw,
-        yaw_on_gate=yaw_on_gate,
-        yaw_off_gate=yaw_off_gate,
-    )
-    if not yaw_active:
-        err_yaw = 0.0
+    if pursuit_mode == "short":
+        err_yaw = wrap_angle(head_yaw - cur_yaw)
         wz = 0.0
+        yaw_active = False
     else:
-        err_yaw = wrap_angle(target_yaw - cur_yaw)
-        wz = 0.0 if abs(err_yaw) < yaw_deadzone else clip(ang_gain * err_yaw, max_ang)
+        yaw_mode, bearing_yaw_active, target_yaw, yaw_active = resolve_yaw_target(
+            yaw_target_mode,
+            dist_xy,
+            yaw_mode,
+            bearing_yaw_active,
+            bearing_yaw,
+            head_yaw,
+            yaw_on_gate=yaw_on_gate,
+            yaw_off_gate=yaw_off_gate,
+        )
+        if not yaw_active:
+            err_yaw = 0.0
+            wz = 0.0
+        else:
+            err_yaw = wrap_angle(target_yaw - cur_yaw)
+            wz = 0.0 if abs(err_yaw) < yaw_deadzone else clip(ang_gain * err_yaw, max_ang)
     return (
         vx,
         vy,
@@ -554,9 +722,10 @@ def headset_follow_command(
         head_yaw,
         bearing_yaw,
         yaw_mode,
-        target_yaw,
+        target_yaw if pursuit_mode != "short" else head_yaw,
         yaw_active,
         bearing_yaw_active,
+        pursuit_mode,
     )
 
 
@@ -581,6 +750,7 @@ def print_debug_block(
     yaw_active: bool | None = None,
     upper_body_mode: UpperBodyMode | None = None,
     loco_arrived: bool | None = None,
+    pursuit_mode: PursuitMode | None = None,
 ) -> None:
     lines = [
         f"[head_follow] step={step} active={active}",
@@ -602,10 +772,11 @@ def print_debug_block(
     yaw_gate_str = str(yaw_active) if yaw_active is not None else "n/a"
     upper_body_str = upper_body_mode if upper_body_mode is not None else "n/a"
     loco_str = str(loco_arrived) if loco_arrived is not None else "n/a"
+    pursuit_str = pursuit_mode if pursuit_mode is not None else "n/a"
     lines.extend([
         f"  yaw     mode={yaw_mode_str} target={target_yaw_str} bearing={bearing_str} "
         f"head={head_yaw_str} yaw_active={yaw_gate_str}",
-        f"  upper   body={upper_body_str} loco_arrived={loco_str}",
+        f"  loco    pursuit={pursuit_str} upper_body={upper_body_str} loco_arrived={loco_str}",
         f"  error   dxy=({err_x:.3f}, {err_y:.3f}) dist={dist_xy:.3f} dyaw={err_yaw:.3f}",
         f"  cmd     vx={vx:.3f} vy={vy:.3f} wz={wz:.3f}",
     ])

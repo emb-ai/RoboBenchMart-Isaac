@@ -7,6 +7,8 @@ with spawn pointed at the hybrid open MJCF (serial upper body + policy-native
 crank leg joints). ``SBERCHEL_UPPERBODY_XR_ROBOT`` adds fixed pelvis +
 ImplicitActuator PD for upper-body XR teleop. ``SBERCHEL_XR_LOCOMOTION_ROBOT``
 is free-floating open kinematics with policy leg actuators and XR arm PD.
+``SBERCHEL_XR_LOCOMOTION_NECK_ROBOT`` adds a separate ImplicitActuator neck
+group for headset look control.
 """
 
 import os
@@ -88,6 +90,8 @@ _XR_ARM_STIFFNESS = 3000.0
 _XR_ARM_DAMPING = 100.0
 _XR_FINGER_STIFFNESS = 400.0
 _XR_FINGER_DAMPING = 40.0
+_XR_NECK_STIFFNESS = 200.0
+_XR_NECK_DAMPING = 20.0
 _XR_LOCK_STIFFNESS = 10000.0
 _XR_LOCK_DAMPING = 1000.0
 
@@ -211,42 +215,21 @@ _LOCOMOTION_GAIN_SKIP = (
 )
 
 
-def _locomotion_gain_dict(mapping: dict | None) -> dict | None:
-    """Keep leg/torso/neck gain keys only (for split ``locomotion`` actuators)."""
+def _locomotion_gain_dict(mapping: dict | None, *, include_neck: bool = True) -> dict | None:
+    """Keep leg/torso(/neck) gain keys only (for split ``locomotion`` actuators)."""
     if mapping is None:
         return None
+    skip = _LOCOMOTION_GAIN_SKIP if include_neck else _LOCOMOTION_GAIN_SKIP + ("neck",)
     return {
         key: value
         for key, value in mapping.items()
-        if not any(skip in key for skip in _LOCOMOTION_GAIN_SKIP)
+        if not any(s in key for s in skip)
     }
 
 
-def _open_locomotion_actuators():
-    """Frictional leg/torso actuators + ImplicitActuator arms for XR teleop."""
-    from dataclasses import fields
-
-    motors = _hybrid_motors_actuators()["motors"]
-    leg_torso_expr = [
-        ".*_hip_pitch_joint",
-        ".*_hip_roll_joint",
-        ".*_hip_yaw_joint",
-        ".*_knee_crank_joint",
-        ".*_ankle_u_crank_joint",
-        ".*_ankle_b_crank_joint",
-        "torso_yaw_joint",
-        "neck_yaw_joint",
-        "neck_pitch_joint",
-    ]
-    locomotion_overrides: dict = {"joint_names_expr": leg_torso_expr}
-    for field in fields(motors):
-        if field.name in ("class_type", "joint_names_expr"):
-            continue
-        value = getattr(motors, field.name)
-        if isinstance(value, dict):
-            locomotion_overrides[field.name] = _locomotion_gain_dict(value)
-    locomotion = motors.replace(**locomotion_overrides)
-    xr_upper = ImplicitActuatorCfg(
+def _xr_upper_actuator() -> ImplicitActuatorCfg:
+    """ImplicitActuator PD for XR arm/finger teleop."""
+    return ImplicitActuatorCfg(
         joint_names_expr=[
             ".*_shoulder_pitch_joint",
             ".*_shoulder_roll_joint",
@@ -295,7 +278,51 @@ def _open_locomotion_actuators():
             ".*_pinky_proximal_joint": 8.5,
         },
     )
-    return {"locomotion": locomotion, "xr_upper": xr_upper}
+
+
+def _open_locomotion_actuators(*, neck_on_locomotion: bool = True):
+    """Frictional leg/torso actuators + ImplicitActuator arms for XR teleop.
+
+    When ``neck_on_locomotion`` is False, neck joints are omitted from the
+    frictional group so a separate ImplicitActuator can drive them.
+    """
+    from dataclasses import fields
+
+    motors = _hybrid_motors_actuators()["motors"]
+    leg_torso_expr = [
+        ".*_hip_pitch_joint",
+        ".*_hip_roll_joint",
+        ".*_hip_yaw_joint",
+        ".*_knee_crank_joint",
+        ".*_ankle_u_crank_joint",
+        ".*_ankle_b_crank_joint",
+        "torso_yaw_joint",
+    ]
+    if neck_on_locomotion:
+        leg_torso_expr.extend(["neck_yaw_joint", "neck_pitch_joint"])
+    locomotion_overrides: dict = {"joint_names_expr": leg_torso_expr}
+    for field in fields(motors):
+        if field.name in ("class_type", "joint_names_expr"):
+            continue
+        value = getattr(motors, field.name)
+        if isinstance(value, dict):
+            locomotion_overrides[field.name] = _locomotion_gain_dict(
+                value, include_neck=neck_on_locomotion
+            )
+    locomotion = motors.replace(**locomotion_overrides)
+    return {"locomotion": locomotion, "xr_upper": _xr_upper_actuator()}
+
+
+def _open_locomotion_actuators_with_neck_pd():
+    """Legs/torso frictional + neck ImplicitActuator PD + XR arm PD."""
+    actuators = _open_locomotion_actuators(neck_on_locomotion=False)
+    actuators["neck"] = ImplicitActuatorCfg(
+        joint_names_expr=["neck_yaw_joint", "neck_pitch_joint"],
+        stiffness={"neck_.*": _XR_NECK_STIFFNESS},
+        damping={"neck_.*": _XR_NECK_DAMPING},
+        effort_limit={"neck_.*": 36.0},
+    )
+    return actuators
 
 
 _xr_locomotion_joint_pos = dict(_upperbody_joint_pos)
@@ -313,16 +340,33 @@ SBERCHEL_XR_LOCOMOTION_ROBOT = ArticulationCfg(
     soft_joint_pos_limit_factor=SBERCHEL_CONFIG_OPEN_KINEMATICS.soft_joint_pos_limit_factor,
 )
 
+# Free-floating XR loco robot with neck on ImplicitActuator for headset look control.
+SBERCHEL_XR_LOCOMOTION_NECK_ROBOT = ArticulationCfg(
+    spawn=SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn,
+    init_state=ArticulationCfg.InitialStateCfg(
+        pos=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.pos,
+        rot=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.rot,
+        joint_pos=_xr_locomotion_joint_pos,
+        joint_vel=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.joint_vel,
+    ),
+    actuators=_open_locomotion_actuators_with_neck_pd(),
+    soft_joint_pos_limit_factor=SBERCHEL_CONFIG_OPEN_KINEMATICS.soft_joint_pos_limit_factor,
+)
+
 
 def apply_sberchel_xr_teleop_pd_gains(robot) -> None:
-    """Raise arm/finger PD on the ``xr_upper`` actuator group for Pink IK tracking."""
-    if "xr_upper" not in robot.actuators:
-        return
-    actuator = robot.actuators["xr_upper"]
-    for local_idx, j_name in enumerate(actuator.joint_names):
-        if "shoulder" in j_name or "elbow" in j_name or "wrist" in j_name:
-            actuator.stiffness[:, local_idx] = _XR_ARM_STIFFNESS
-            actuator.damping[:, local_idx] = _XR_ARM_DAMPING
-        elif "proximal" in j_name:
-            actuator.stiffness[:, local_idx] = _XR_FINGER_STIFFNESS
-            actuator.damping[:, local_idx] = _XR_FINGER_DAMPING
+    """Raise arm/finger PD on ``xr_upper`` and neck PD when present."""
+    if "xr_upper" in robot.actuators:
+        actuator = robot.actuators["xr_upper"]
+        for local_idx, j_name in enumerate(actuator.joint_names):
+            if "shoulder" in j_name or "elbow" in j_name or "wrist" in j_name:
+                actuator.stiffness[:, local_idx] = _XR_ARM_STIFFNESS
+                actuator.damping[:, local_idx] = _XR_ARM_DAMPING
+            elif "proximal" in j_name:
+                actuator.stiffness[:, local_idx] = _XR_FINGER_STIFFNESS
+                actuator.damping[:, local_idx] = _XR_FINGER_DAMPING
+    if "neck" in robot.actuators:
+        neck = robot.actuators["neck"]
+        for local_idx, _j_name in enumerate(neck.joint_names):
+            neck.stiffness[:, local_idx] = _XR_NECK_STIFFNESS
+            neck.damping[:, local_idx] = _XR_NECK_DAMPING

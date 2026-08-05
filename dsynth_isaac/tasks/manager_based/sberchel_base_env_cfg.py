@@ -220,6 +220,15 @@ class SberchelOpenKinematicsActionsCfg:
 
 LEGS_ACTION_DIM = len(POLICY_LEG_JOINT_NAMES)
 
+# Neck joints for XR headset look (hybrid MJCF ranges: yaw ±0.785, pitch ±0.524).
+NECK_JOINT_NAMES = [
+    "neck_yaw_joint",
+    "neck_pitch_joint",
+]
+NECK_ACTION_DIM = len(NECK_JOINT_NAMES)
+NECK_YAW_LIMIT = 0.785
+NECK_PITCH_LIMIT = 0.524
+
 
 def policy_leg_targets(net, vx: float, vy: float, wz: float) -> list[float]:
     """Run zest policy; return 12 leg joint targets in ``POLICY_LEG_JOINT_NAMES`` order."""
