@@ -21,6 +21,7 @@ from isaaclab.envs import ManagerBasedRLEnvCfg
 
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg, DsEventCfg
 from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_CONFIG, SBERCHEL_CONFIG_OPEN_KINEMATICS
+from dsynth_isaac.robots.sberchel_camera_cfg import make_sberchel_left_head_camera_cfg
 import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events
 from dsynth_isaac.scene.sberdemo_scene import SberDemoSceneCfg
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import TerminationsCfg
@@ -152,7 +153,16 @@ class SberchelObservationsCfg:
             self.enable_corruption = False
             self.concatenate_terms = False
 
+    @configclass
+    class RGBCameraPolicyCfg(ObsGroup):
+        """Observations for policy group with RGB images."""
+
+        def __post_init__(self):
+            self.enable_corruption = False
+            self.concatenate_terms = False
+
     policy: PolicyCfg = PolicyCfg()
+    rgb_camera: RGBCameraPolicyCfg = RGBCameraPolicyCfg()
 
 
 @configclass
@@ -285,6 +295,12 @@ class SberchelOpenKinematicsDemoEnvCfg(ManagerBasedRLEnvCfg):
         )
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
         self.scene.robot.init_state.pos = (5.5, 5, SBERCHEL_STAND_HEIGHT)
+        self.scene.left_head_camera = make_sberchel_left_head_camera_cfg()
+        # Raw RGB for HDF5 demo video (default ``normalize=True`` mean-centers floats).
+        self.observations.rgb_camera.head_img = ObsTerm(
+            func=mdp.image,
+            params={"sensor_cfg": SceneEntityCfg("left_head_camera"), "normalize": False},
+        )
         # Pin pelvis_link (articulation root) in world space.
         # if self.scene.robot.spawn.articulation_props is not None:
         #     self.scene.robot.spawn.articulation_props = (

@@ -147,8 +147,10 @@ _HELP = """
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.seed = args_cli.seed
-    env_cfg.scene.scene_config_dir_path = args_cli.config_dir_path
-    env_cfg.target_item_name_regex = ".*Nestle Honey.*"
+    # env_cfg.scene.scene_config_dir_path = args_cli.config_dir_path
+    # env_cfg.target_item_name_regex = ".*Nestle Honey.*"
+    env_cfg.viewer.eye = (4, 1.0, 2.5)
+    env_cfg.viewer.lookat = (9.5, 6.0, 0.0)
 
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
     env.reset(seed=args_cli.seed)

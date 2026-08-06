@@ -80,7 +80,7 @@ import gymnasium as gym
 import torch
 
 from isaaclab.devices.device_base import DeviceBase
-from isaaclab.devices.openxr import remove_camera_configs
+from dsynth_isaac.robots.sberchel_camera_cfg import strip_camera_configs
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab_tasks.utils import parse_env_cfg
 
@@ -91,14 +91,17 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
     FrozenUpperSnapshot,
     HeadFollowParams,
     UpperBodyMode,
+    PursuitMode,
     YawMode,
     build_idle_upper_from_robot,
     build_upper_from_frozen_snapshot,
     capture_frozen_upper,
+    capture_hold_pose_from_headset,
     create_sberchel_xr_teleop_interface,
     headset_follow_command,
     print_debug_block,
     robot_root_state,
+    station_keep_command,
     sync_retargeter_idle_from_robot,
     update_loco_arrived,
     wrap_angle,
@@ -123,7 +126,7 @@ def main() -> None:
     env_cfg.terminations.time_out = None
 
     if args_cli.xr:
-        env_cfg = remove_camera_configs(env_cfg)
+        env_cfg = strip_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
 
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
@@ -146,8 +149,10 @@ def main() -> None:
     first_active_logged = False
     yaw_mode: YawMode = "bearing"
     bearing_yaw_active = False
+    pursuit_mode: PursuitMode = "long"
     loco_arrived = False
     prev_loco_arrived = False
+    hold_xy_yaw: tuple[float, float, float] | None = None
     frozen_snapshot: FrozenUpperSnapshot | None = None
     last_teleop_upper: torch.Tensor | None = None
 
@@ -157,27 +162,31 @@ def main() -> None:
         print("Reset triggered - environment will reset on next step")
 
     def start_teleoperation() -> None:
-        nonlocal teleoperation_active, first_active_logged, yaw_mode, bearing_yaw_active
-        nonlocal loco_arrived, prev_loco_arrived, frozen_snapshot, last_teleop_upper
+        nonlocal teleoperation_active, first_active_logged, yaw_mode, bearing_yaw_active, pursuit_mode
+        nonlocal loco_arrived, prev_loco_arrived, hold_xy_yaw, frozen_snapshot, last_teleop_upper
         teleoperation_active = True
         first_active_logged = False
         yaw_mode = "bearing"
         bearing_yaw_active = False
+        pursuit_mode = "long"
         loco_arrived = False
         prev_loco_arrived = False
+        hold_xy_yaw = None
         frozen_snapshot = None
         last_teleop_upper = None
         sync_retargeter_idle_from_robot(teleop_interface, robot)
         print("Teleoperation activated (upper body + head-follow locomotion)")
 
     def stop_teleoperation() -> None:
-        nonlocal teleoperation_active, yaw_mode, bearing_yaw_active
-        nonlocal loco_arrived, prev_loco_arrived, frozen_snapshot, last_teleop_upper
+        nonlocal teleoperation_active, yaw_mode, bearing_yaw_active, pursuit_mode
+        nonlocal loco_arrived, prev_loco_arrived, hold_xy_yaw, frozen_snapshot, last_teleop_upper
         teleoperation_active = False
         yaw_mode = "bearing"
         bearing_yaw_active = False
+        pursuit_mode = "long"
         loco_arrived = False
         prev_loco_arrived = False
+        hold_xy_yaw = None
         frozen_snapshot = None
         last_teleop_upper = None
         print("Teleoperation deactivated")
@@ -220,6 +229,7 @@ def main() -> None:
                 yaw_active: bool | None = None
                 upper_body_mode: UpperBodyMode | None = None
                 loco_arrived_dbg: bool | None = None
+                pursuit_mode_dbg: PursuitMode | None = None
 
                 if teleoperation_active:
                     raw = teleop_interface._get_raw_data()
@@ -239,14 +249,19 @@ def main() -> None:
                             target_yaw,
                             yaw_active,
                             bearing_yaw_active,
+                            pursuit_mode,
                         ) = headset_follow_command(
                             robot,
                             head_pose,
+                            pursuit_mode=pursuit_mode,
                             yaw_mode=yaw_mode,
                             bearing_yaw_active=bearing_yaw_active,
                             yaw_target_mode=head_follow.follow_yaw_target,
                             yaw_on_gate=head_follow.follow_yaw_on_gate,
                             yaw_off_gate=head_follow.follow_yaw_off_gate,
+                            short_on_gate=head_follow.follow_short_on_gate,
+                            short_off_gate=head_follow.follow_short_off_gate,
+                            short_max_lin=head_follow.follow_short_max_lin,
                             lin_gain=head_follow.follow_lin_gain,
                             ang_gain=head_follow.follow_ang_gain,
                             max_lin=head_follow.follow_max_lin,
@@ -256,6 +271,7 @@ def main() -> None:
                             head_yaw_offset_rad=head_follow.head_yaw_offset_rad,
                         )
                         yaw_mode_dbg = yaw_mode
+                        pursuit_mode_dbg = pursuit_mode
                         alignment_yaw_err = wrap_angle(head_yaw - robot_yaw)
                         new_loco_arrived = update_loco_arrived(
                             dist_xy,
@@ -269,11 +285,27 @@ def main() -> None:
                         if prev_loco_arrived and not new_loco_arrived:
                             frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
                         elif not prev_loco_arrived and new_loco_arrived:
+                            hold_xy_yaw = capture_hold_pose_from_headset(
+                                head_pose,
+                                offset_rad=head_follow.head_yaw_offset_rad,
+                            )
                             sync_retargeter_idle_from_robot(teleop_interface, robot)
                             frozen_snapshot = None
                         loco_arrived = new_loco_arrived
                         prev_loco_arrived = loco_arrived
                         loco_arrived_dbg = loco_arrived
+
+                        if loco_arrived and hold_xy_yaw is not None:
+                            vx, vy, wz = station_keep_command(
+                                robot,
+                                hold_xy_yaw,
+                                lin_gain=head_follow.follow_lin_gain,
+                                ang_gain=head_follow.follow_ang_gain,
+                                max_lin=head_follow.follow_max_lin,
+                                max_ang=head_follow.follow_max_ang,
+                                pos_deadzone=0.0,
+                                yaw_deadzone=0.0,
+                            )
 
                     use_teleop = head_follow.teleop_while_pursuing or loco_arrived
                     if use_teleop:
@@ -335,6 +367,7 @@ def main() -> None:
                         yaw_active=yaw_active,
                         upper_body_mode=upper_body_mode,
                         loco_arrived=loco_arrived_dbg,
+                        pursuit_mode=pursuit_mode_dbg,
                     )
 
                 if should_reset:
@@ -344,8 +377,10 @@ def main() -> None:
                     teleop_interface.reset()
                     yaw_mode = "bearing"
                     bearing_yaw_active = False
+                    pursuit_mode = "long"
                     loco_arrived = False
                     prev_loco_arrived = False
+                    hold_xy_yaw = None
                     frozen_snapshot = None
                     last_teleop_upper = None
                     sync_retargeter_idle_from_robot(teleop_interface, robot)

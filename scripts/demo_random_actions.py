@@ -53,6 +53,7 @@ import gymnasium as gym
 
 from isaaclab.envs import ManagerBasedEnv
 from isaaclab_tasks.utils import parse_env_cfg
+import isaaclab.sim as sim_utils
 
 import sys
 sys.path.append('.')
@@ -63,14 +64,14 @@ from isaaclab_tasks.manager_based.manipulation.stack.config.franka.stack_ik_rel_
 def main():
     env_cfg = parse_env_cfg(args_cli.task, device=args_cli.device, num_envs=args_cli.num_envs)
     env_cfg.seed=args_cli.seed
-    env_cfg.scene.scene_config_dir_path = args_cli.config_dir_path
+    # env_cfg.scene.scene_config_dir_path = args_cli.config_dir_path
 
     if args_cli.video:
         env_cfg.viewer.origin_type = 'asset_root'
         env_cfg.viewer.asset_name = 'robot'
         env_cfg.viewer.eye = (1.0, 1.0, 2.0)
         env_cfg.viewer.lookat = (0.4, 0.0, 1.6)
-    env_cfg.target_item_name_regex = ".*Nestle Honey.*"
+    # env_cfg.target_item_name_regex = ".*Nestle Honey.*"
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array")
     
     if args_cli.video:

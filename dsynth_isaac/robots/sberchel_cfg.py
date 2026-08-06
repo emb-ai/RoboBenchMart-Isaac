@@ -354,6 +354,18 @@ SBERCHEL_XR_LOCOMOTION_NECK_ROBOT = ArticulationCfg(
 )
 
 
+# Soft upper-body PD for locomotion (near zest policy cfg). Stiff XR teleop gains
+# (~3000) on frozen arms fight balance and make WASD walking shuffle / stall.
+_LOCO_SHOULDER_STIFFNESS = 30.0
+_LOCO_SHOULDER_DAMPING = 1.5
+_LOCO_ELBOW_STIFFNESS = 20.0
+_LOCO_ELBOW_DAMPING = 1.0
+_LOCO_WRIST_STIFFNESS = 40.0
+_LOCO_WRIST_DAMPING = 1.0
+_LOCO_FINGER_STIFFNESS = 10.0
+_LOCO_FINGER_DAMPING = 1.0
+
+
 def apply_sberchel_xr_teleop_pd_gains(robot) -> None:
     """Raise arm/finger PD on ``xr_upper`` and neck PD when present."""
     if "xr_upper" in robot.actuators:
@@ -370,3 +382,28 @@ def apply_sberchel_xr_teleop_pd_gains(robot) -> None:
         for local_idx, _j_name in enumerate(neck.joint_names):
             neck.stiffness[:, local_idx] = _XR_NECK_STIFFNESS
             neck.damping[:, local_idx] = _XR_NECK_DAMPING
+
+
+def apply_sberchel_loco_upper_pd_gains(robot) -> None:
+    """Policy-scale ``xr_upper`` PD so frozen arms do not fight locomotion.
+
+    Call while WASD / head-follow walking; switch back to
+    ``apply_sberchel_xr_teleop_pd_gains`` for static hand teleop.
+    Neck PD (headset look) is left unchanged.
+    """
+    if "xr_upper" not in robot.actuators:
+        return
+    actuator = robot.actuators["xr_upper"]
+    for local_idx, j_name in enumerate(actuator.joint_names):
+        if "shoulder" in j_name:
+            actuator.stiffness[:, local_idx] = _LOCO_SHOULDER_STIFFNESS
+            actuator.damping[:, local_idx] = _LOCO_SHOULDER_DAMPING
+        elif "elbow" in j_name:
+            actuator.stiffness[:, local_idx] = _LOCO_ELBOW_STIFFNESS
+            actuator.damping[:, local_idx] = _LOCO_ELBOW_DAMPING
+        elif "wrist" in j_name:
+            actuator.stiffness[:, local_idx] = _LOCO_WRIST_STIFFNESS
+            actuator.damping[:, local_idx] = _LOCO_WRIST_DAMPING
+        elif "proximal" in j_name:
+            actuator.stiffness[:, local_idx] = _LOCO_FINGER_STIFFNESS
+            actuator.damping[:, local_idx] = _LOCO_FINGER_DAMPING

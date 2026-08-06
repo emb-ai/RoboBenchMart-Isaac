@@ -2,18 +2,27 @@
 
 Upper-body teleop is XR hand tracking; legs use the zest locomotion policy
 driven by keyboard velocity commands (like ``demo_sberchel_kb.py``). Press **C**
-to toggle locomotion (WASD + frozen upper body) vs static teleop (station-keep
+to toggle locomotion (WASD + soft frozen upper body) vs static teleop (station-keep
 at the latch pose + live XR hands + headset neck look).
+
+OpenXR often steals window focus (carb WASD drops). This script polls X11 keymap
+globally so hold-to-move works while the headset is focused. During locomotion,
+arm PD is lowered to policy-scale gains — stiff XR teleop PD (~3000) on frozen
+arms fights balance and makes walking shuffle or stall.
 
 Episodes export on RESET/R. Press **X** to discard the current episode and reset
 without writing to HDF5.
+
+With ``--video``, also records the viewport (``rgb_array``) via Gymnasium
+``RecordVideo``; each RESET/R saves an MP4 (discard/X skips the video write).
 
 Usage:
     python scripts/sberchel_kb_record_demos.py \\
         --task Isaac-Demo-Sberchel-XR-v0 \\
         --teleop_device handtracking \\
         --enable_pinocchio \\
-        --dataset_file ./datasets/sberchel_kb_demos.hdf5
+        --dataset_file ./datasets/sberchel_kb_demos.hdf5 \\
+        --video
 """
 
 from __future__ import annotations
@@ -24,6 +33,7 @@ import os
 import sys
 import time
 from collections.abc import Callable
+from pathlib import Path
 from typing import Literal
 
 from isaaclab.app import AppLauncher
@@ -118,6 +128,34 @@ parser.add_argument(
     default=30,
     help="Print debug line every N steps (0 to disable periodic prints).",
 )
+parser.add_argument(
+    "--auto_start",
+    action="store_true",
+    default=False,
+    help="Start recording immediately (skip XR START). Useful to debug WASD locomotion.",
+)
+parser.add_argument(
+    "--loco_render_interval",
+    type=int,
+    default=5,
+    help=(
+        "Physics steps per render while in locomotion mode (1 = every step). "
+        "Higher skips Pink-free frames' XR/GUI presents and raises wall-clock Hz. "
+        "Static teleop always renders every step."
+    ),
+)
+parser.add_argument(
+    "--video",
+    action="store_true",
+    default=False,
+    help="Record viewport MP4s via Gymnasium RecordVideo (saved on RESET/R).",
+)
+parser.add_argument(
+    "--video_dir",
+    type=str,
+    default="",
+    help="Directory for viewport MP4s. Default: <dataset_dir>/videos.",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -137,6 +175,9 @@ if _use_handtracking:
 
 if _use_handtracking:
     app_launcher_args["xr"] = True
+# Viewport rgb_array / RecordVideo needs camera rendering enabled.
+if args_cli.video:
+    app_launcher_args["enable_cameras"] = True
 
 app_launcher = AppLauncher(app_launcher_args)
 simulation_app = app_launcher.app
@@ -145,7 +186,7 @@ import gymnasium as gym
 import torch
 
 from isaaclab.devices.device_base import DeviceBase
-from isaaclab.devices.openxr import remove_camera_configs
+from dsynth_isaac.robots.sberchel_camera_cfg import strip_camera_configs
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import DatasetExportMode
 from isaaclab_tasks.utils import parse_env_cfg
@@ -167,7 +208,10 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
     station_keep_command,
     sync_retargeter_idle_from_robot,
 )
-from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
+from dsynth_isaac.robots.sberchel_cfg import (
+    apply_sberchel_loco_upper_pd_gains,
+    apply_sberchel_xr_teleop_pd_gains,
+)
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
     NECK_ACTION_DIM,
@@ -185,14 +229,62 @@ _HELP = """
 ==================== KB RECORD CONTROLS ====================
   W forward    S backward    A turn left    D turn right
   Q strafe L   E strafe R    (release = stop legs in loco mode)
-  C  toggle locomotion (WASD + frozen upper) / static teleop
-     (static: XR hands + headset drives neck yaw/pitch)
-  R  save episode + reset
-  X  discard episode + reset (no HDF5 write)
-  XR START / STOP  begin or pause recording
-  >>> Click the Isaac Sim window so it captures your keys <<<
+  C  toggle locomotion (WASD + Pink hold-off) / static teleop
+     (static: XR hands + headset neck; Pink IK on, slower)
+  R  save episode + reset (HDF5; viewport MP4 if --video)
+  X  discard episode + reset (no HDF5 / no MP4 write)
+  XR START / STOP  begin or pause recording (or pass --auto_start)
+  Keys: X11 global poll (works while headset has focus) + Isaac window
+  Tip: if loco hz still low, raise --loco_render_interval (e.g. 10)
 ===========================================================
 """
+
+_MOVE_KEYS = ("W", "A", "S", "D", "Q", "E")
+_EDGE_KEYS = ("C", "R", "X")
+
+
+class PinkJointHold:
+    """Bypass Pink IK solves by holding arm/hand joint targets.
+
+    During WASD locomotion the upper body is frozen anyway; re-solving Pink every
+    physics step (~10 Hz wall-clock with XR) is pure overhead. Holding joint-space
+    targets keeps arms still relative to the torso at policy rate.
+    """
+
+    def __init__(self, env) -> None:
+        self._env = env
+        self._term = env.action_manager.get_term("upper_body_ik")
+        self._orig_apply = self._term.apply_actions
+        self._targets: torch.Tensor | None = None
+        self._active = False
+
+    def enable(self, robot) -> None:
+        ids = self._term._controlled_joint_ids
+        self._targets = robot.data.joint_pos[:, ids].detach().clone()
+        if not self._active:
+            self._term.apply_actions = self._apply_hold  # type: ignore[method-assign]
+            self._active = True
+
+    def refresh(self, robot) -> None:
+        """Re-capture hold pose (call after reset / mode entry)."""
+        ids = self._term._controlled_joint_ids
+        self._targets = robot.data.joint_pos[:, ids].detach().clone()
+
+    def disable(self) -> None:
+        if self._active:
+            self._term.apply_actions = self._orig_apply  # type: ignore[method-assign]
+            self._active = False
+
+    def _apply_hold(self) -> None:
+        if self._targets is None:
+            self._orig_apply()
+            return
+        self._term._asset.set_joint_position_target(self._targets, self._term._controlled_joint_ids)
+
+
+def set_render_interval(env, interval: int) -> None:
+    """Set physics-steps-per-render (read every ManagerBasedEnv.step)."""
+    env.cfg.sim.render_interval = max(1, int(interval))
 
 
 class RateLimiter:
@@ -215,8 +307,74 @@ class RateLimiter:
                 self.last_time += self.sleep_duration
 
 
+class _X11KeyPoller:
+    """Poll physical key state via XQueryKeymap (no window-focus requirement)."""
+
+    # X11 keysyms (lowercase letter keys).
+    _KEYSYMS = {
+        "W": 0x0077,
+        "A": 0x0061,
+        "S": 0x0073,
+        "D": 0x0064,
+        "Q": 0x0071,
+        "E": 0x0065,
+        "C": 0x0063,
+        "R": 0x0072,
+        "X": 0x0078,
+    }
+
+    def __init__(self) -> None:
+        import ctypes
+        import ctypes.util
+
+        self._ctypes = ctypes
+        lib_name = ctypes.util.find_library("X11")
+        if not lib_name:
+            raise RuntimeError("libX11 not found")
+        self._x11 = ctypes.cdll.LoadLibrary(lib_name)
+        self._x11.XOpenDisplay.restype = ctypes.c_void_p
+        self._x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        self._x11.XKeysymToKeycode.restype = ctypes.c_uint
+        self._x11.XKeysymToKeycode.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+        self._x11.XQueryKeymap.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+        self._x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+        self._display = self._x11.XOpenDisplay(None)
+        if not self._display:
+            raise RuntimeError("XOpenDisplay failed")
+        self._keycodes = {
+            name: int(self._x11.XKeysymToKeycode(self._display, keysym))
+            for name, keysym in self._KEYSYMS.items()
+        }
+
+    def pressed(self) -> set[str]:
+        ctypes = self._ctypes
+        keymap = (ctypes.c_char * 32)()
+        self._x11.XQueryKeymap(self._display, keymap)
+        down: set[str] = set()
+        for name, keycode in self._keycodes.items():
+            if keycode <= 0:
+                continue
+            byte = keymap[keycode // 8]
+            bit = ord(byte) if isinstance(byte, (bytes, bytearray)) else byte
+            if bit & (1 << (keycode % 8)):
+                down.add(name)
+        return down
+
+    def close(self) -> None:
+        if getattr(self, "_display", None):
+            try:
+                self._x11.XCloseDisplay(self._display)
+            except Exception:
+                pass
+            self._display = None
+
+
 class RecordKeyboard:
-    """WASDQE hold-to-move plus edge-triggered C / R / X via Isaac Sim (carb)."""
+    """WASDQE hold-to-move plus edge-triggered C / R / X.
+
+    Uses X11 keymap polling (global, works under OpenXR focus steal) unioned with
+    Isaac carb press/release events as a fallback.
+    """
 
     def __init__(
         self,
@@ -238,18 +396,28 @@ class RecordKeyboard:
         self._on_toggle_mode = on_toggle_mode
         self._on_save_reset = on_save_reset
         self._on_discard_reset = on_discard_reset
-        self._pressed: set[str] = set()
+        self._carb_pressed: set[str] = set()
+        self._edge_prev: set[str] = set()
         self._ok = False
+        self._x11: _X11KeyPoller | None = None
+        try:
+            self._x11 = _X11KeyPoller()
+            print("[KB] X11 global key poll active (WASD works without Isaac focus)", flush=True)
+        except Exception as exc:
+            print(
+                f"[KB] X11 key poll unavailable ({exc!r}); "
+                f"click the Isaac window so carb keyboard works.",
+                flush=True,
+            )
         try:
             self._appwindow = omni.appwindow.get_default_app_window()
             self._input = carb.input.acquire_input_interface()
             self._keyboard = self._appwindow.get_keyboard()
             self._sub = self._input.subscribe_to_keyboard_events(self._keyboard, self._on_event)
             self._ok = True
-        except Exception as exc:  # headless / no window -> no keyboard
+        except Exception as exc:  # headless / no window -> no carb keyboard
             print(
-                f"[KB] keyboard unavailable ({exc!r}); legs will stand. "
-                f"Run WITHOUT --headless and click the Isaac window.",
+                f"[KB] carb keyboard unavailable ({exc!r}).",
                 flush=True,
             )
 
@@ -266,27 +434,47 @@ class RecordKeyboard:
             name = raw if isinstance(raw, str) else getattr(raw, "name", "")
             name = name.rsplit(".", 1)[-1].upper()
             if et == carb.input.KeyboardEventType.KEY_PRESS:
-                if name not in self._pressed:
-                    if name == "C" and self._on_toggle_mode is not None:
-                        self._on_toggle_mode()
-                    elif name == "R" and self._on_save_reset is not None:
-                        self._on_save_reset()
-                    elif name == "X" and self._on_discard_reset is not None:
-                        self._on_discard_reset()
-                self._pressed.add(name)
+                self._carb_pressed.add(name)
             else:
-                self._pressed.discard(name)
+                self._carb_pressed.discard(name)
         except Exception:
             pass
         return True
 
+    def _pressed_now(self) -> set[str]:
+        pressed = set(self._carb_pressed)
+        if self._x11 is not None:
+            try:
+                pressed |= self._x11.pressed()
+            except Exception:
+                pass
+        return pressed
+
+    def poll(self) -> None:
+        """Process edge-triggered C / R / X; call every loop iteration."""
+        pressed = self._pressed_now()
+        edge_now = pressed & set(_EDGE_KEYS)
+        newly = edge_now - self._edge_prev
+        if "C" in newly and self._on_toggle_mode is not None:
+            self._on_toggle_mode()
+        if "R" in newly and self._on_save_reset is not None:
+            self._on_save_reset()
+        if "X" in newly and self._on_discard_reset is not None:
+            self._on_discard_reset()
+        self._edge_prev = edge_now
+
     def command(self) -> tuple[float, float, float]:
         """Return (lin_vel_x, lin_vel_y, ang_vel_z) from held WASDQE keys."""
-        p = self._pressed
+        p = self._pressed_now()
         vx = (self._speed if "W" in p else 0.0) - (self._speed if "S" in p else 0.0)
         wz = (self._turn if "A" in p else 0.0) - (self._turn if "D" in p else 0.0)
         vy = (self._strafe if "Q" in p else 0.0) - (self._strafe if "E" in p else 0.0)
         return vx, vy, wz
+
+    def pressed_keys(self) -> str:
+        """Compact debug string of currently held move keys."""
+        p = self._pressed_now()
+        return "".join(k for k in _MOVE_KEYS if k in p) or "-"
 
     def close(self) -> None:
         if self._ok:
@@ -294,6 +482,9 @@ class RecordKeyboard:
                 self._input.unsubscribe_to_keyboard_events(self._keyboard, self._sub)
             except Exception:
                 pass
+        if self._x11 is not None:
+            self._x11.close()
+            self._x11 = None
 
 
 def setup_output_directories() -> tuple[str, str]:
@@ -307,8 +498,15 @@ def setup_output_directories() -> tuple[str, str]:
 
 def exported_demo_count(env) -> int:
     """Total episodes written to HDF5."""
-    rm = env.recorder_manager
+    base = env.unwrapped if hasattr(env, "unwrapped") else env
+    rm = base.recorder_manager
     return rm.exported_successful_episode_count + rm.exported_failed_episode_count
+
+
+def discard_viewport_video_frames(env: gym.Env) -> None:
+    """Drop in-progress RecordVideo frames so RESET discard does not write an MP4."""
+    if isinstance(env, gym.wrappers.RecordVideo) and env.recording:
+        env.recorded_frames.clear()
 
 
 def create_environment_config(output_dir: str, output_file_name: str) -> ManagerBasedRLEnvCfg:
@@ -323,7 +521,7 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
 
     if args_cli.xr:
         if not args_cli.enable_cameras:
-            env_cfg = remove_camera_configs(env_cfg)
+            env_cfg = strip_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
 
     env_cfg.recorders = SberchelXRRecorderManagerCfg()
@@ -331,7 +529,8 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
     env_cfg.recorders.dataset_filename = output_file_name
     env_cfg.recorders.dataset_export_mode = DatasetExportMode.EXPORT_ALL
     env_cfg.recorders.export_in_record_pre_reset = True
-    env_cfg.recorders.export_in_close = True
+    # Avoid exporting a stub episode (initial_state only) when closing after RESET.
+    env_cfg.recorders.export_in_close = False
     return env_cfg
 
 
@@ -347,10 +546,14 @@ def reset_teleop_state(
     net,
     robot,
     teleop_interface,
+    loco_mode: LocoMode = "locomotion",
 ) -> tuple[FrozenUpperSnapshot | None, torch.Tensor | None, torch.Tensor]:
     """Reset policy and teleop state after env.reset()."""
     net.reset()
-    apply_sberchel_xr_teleop_pd_gains(robot)
+    if loco_mode == "static":
+        apply_sberchel_xr_teleop_pd_gains(robot)
+    else:
+        apply_sberchel_loco_upper_pd_gains(robot)
     teleop_interface.reset()
     sync_retargeter_idle_from_robot(teleop_interface, robot)
     idle_upper = build_idle_upper_from_robot(robot, env.device)
@@ -360,26 +563,52 @@ def reset_teleop_state(
 def main() -> None:
     output_dir, output_file_name = setup_output_directories()
     env_cfg = create_environment_config(output_dir, output_file_name)
+    env_cfg.viewer.eye = (4, 1.0, 2.5)
+    env_cfg.viewer.lookat = (9.5, 6.0, 0.0)
 
-    env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
-    env.sim.reset()
+    render_mode = "rgb_array" if args_cli.video else None
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode=render_mode)
+    if args_cli.video:
+        video_folder = Path(args_cli.video_dir) if args_cli.video_dir else Path(output_dir) / "videos"
+        video_folder.mkdir(parents=True, exist_ok=True)
+        name_prefix = time.strftime("%Y%m%d_%H%M%S")
+        env = gym.wrappers.RecordVideo(
+            env,
+            video_folder=str(video_folder),
+            episode_trigger=lambda episode_id: True,
+            video_length=0,  # entire episode; MP4 written on reset
+            disable_logger=True,
+            name_prefix=name_prefix,
+        )
+        print(f"Viewport video recording enabled → {video_folder}", flush=True)
+
+    base_env = env.unwrapped
+    base_env.sim.reset()
     env.reset(seed=args_cli.seed)
 
     net = Network(env, type="zest", device="cpu", closed_kinematics=False)
     net.reset()
-    apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
-    robot = env.scene["robot"]
-    upper_body_dim = env.action_manager.total_action_dim - LEGS_ACTION_DIM - NECK_ACTION_DIM
+    # Start in locomotion mode: soft upper PD (stiff XR gains fight WASD walking).
+    apply_sberchel_loco_upper_pd_gains(base_env.scene["robot"])
+    robot = base_env.scene["robot"]
+    pink_hold = PinkJointHold(base_env)
+    pink_hold.enable(robot)
+    set_render_interval(base_env, args_cli.loco_render_interval)
+    upper_body_dim = base_env.action_manager.total_action_dim - LEGS_ACTION_DIM - NECK_ACTION_DIM
     print(
-        f">>> action dim = {env.action_manager.total_action_dim} "
+        f">>> action dim = {base_env.action_manager.total_action_dim} "
         f"(legs {LEGS_ACTION_DIM} + neck {NECK_ACTION_DIM} + upper_body {upper_body_dim})",
+        flush=True,
+    )
+    print(
+        f">>> loco fast-path: Pink IK hold-on + render_interval={args_cli.loco_render_interval}",
         flush=True,
     )
 
     should_reset = False
     should_discard_reset = False
-    teleoperation_active = not args_cli.xr
-    running_recording_instance = not args_cli.xr
+    teleoperation_active = (not args_cli.xr) or args_cli.auto_start
+    running_recording_instance = (not args_cli.xr) or args_cli.auto_start
     step_count = 0
     first_active_logged = False
     loco_mode: LocoMode = "locomotion"
@@ -387,6 +616,31 @@ def main() -> None:
     frozen_snapshot: FrozenUpperSnapshot | None = None
     last_teleop_upper: torch.Tensor | None = None
     last_neck_targets: tuple[float, float] = (0.0, 0.0)
+    last_hz_t = time.time()
+    hz_window_steps = 0
+    effective_hz = 0.0
+
+    def enter_locomotion_mode(*, capture_frozen: bool) -> None:
+        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
+        loco_mode = "locomotion"
+        hold_xy_yaw = None
+        last_neck_targets = (0.0, 0.0)
+        if capture_frozen:
+            frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
+        apply_sberchel_loco_upper_pd_gains(robot)
+        pink_hold.enable(robot)
+        set_render_interval(base_env, args_cli.loco_render_interval)
+
+    def enter_static_mode() -> None:
+        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
+        loco_mode = "static"
+        hold_xy_yaw = capture_hold_pose_from_robot(robot)
+        sync_retargeter_idle_from_robot(teleop_interface, robot)
+        frozen_snapshot = None
+        last_neck_targets = (0.0, 0.0)
+        pink_hold.disable()
+        apply_sberchel_xr_teleop_pd_gains(robot)
+        set_render_interval(base_env, 1)
 
     def reset_env() -> None:
         nonlocal should_reset
@@ -399,52 +653,42 @@ def main() -> None:
         print("Discard reset requested — episode will NOT be saved; environment reset on next step")
 
     def toggle_loco_mode() -> None:
-        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
         if not teleoperation_active:
             return
         if loco_mode == "locomotion":
-            loco_mode = "static"
-            hold_xy_yaw = capture_hold_pose_from_robot(robot)
-            sync_retargeter_idle_from_robot(teleop_interface, robot)
-            frozen_snapshot = None
-            last_neck_targets = (0.0, 0.0)
+            enter_static_mode()
             print(
                 f"Mode: STATIC teleop (station-keep at "
                 f"xy=({hold_xy_yaw[0]:.3f}, {hold_xy_yaw[1]:.3f}) yaw={hold_xy_yaw[2]:.3f}; "
-                f"headset drives neck)",
+                f"headset drives neck; Pink IK on)",
                 flush=True,
             )
         else:
-            loco_mode = "locomotion"
-            frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
-            hold_xy_yaw = None
-            last_neck_targets = (0.0, 0.0)
-            print("Mode: LOCOMOTION (WASD + frozen upper body)", flush=True)
+            enter_locomotion_mode(capture_frozen=True)
+            print("Mode: LOCOMOTION (WASD + Pink IK hold-off + soft arm PD)", flush=True)
 
     def start_recording_instance() -> None:
         nonlocal running_recording_instance, teleoperation_active, first_active_logged
-        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_teleop_upper, last_neck_targets
+        nonlocal frozen_snapshot, last_teleop_upper
         running_recording_instance = True
         teleoperation_active = True
         first_active_logged = False
-        loco_mode = "locomotion"
-        hold_xy_yaw = None
         frozen_snapshot = None
         last_teleop_upper = None
-        last_neck_targets = (0.0, 0.0)
+        enter_locomotion_mode(capture_frozen=False)
         sync_retargeter_idle_from_robot(teleop_interface, robot)
-        print("Recording started (WASD locomotion + XR upper body; press C for static teleop)")
+        print("Recording started (WASD locomotion fast-path; press C for static teleop)")
 
     def stop_recording_instance() -> None:
         nonlocal running_recording_instance, teleoperation_active
-        nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_teleop_upper, last_neck_targets
+        nonlocal hold_xy_yaw, frozen_snapshot, last_teleop_upper, last_neck_targets
         running_recording_instance = False
         teleoperation_active = False
-        loco_mode = "locomotion"
         hold_xy_yaw = None
         frozen_snapshot = None
         last_teleop_upper = None
         last_neck_targets = (0.0, 0.0)
+        enter_locomotion_mode(capture_frozen=False)
         print("Recording paused")
 
     teleoperation_callbacks: dict[str, Callable[[], None]] = {
@@ -460,7 +704,7 @@ def main() -> None:
     )
     teleop_interface.reset()
     sync_retargeter_idle_from_robot(teleop_interface, robot)
-    idle_upper = build_idle_upper_from_robot(robot, env.device)
+    idle_upper = build_idle_upper_from_robot(robot, base_env.device)
 
     kb = RecordKeyboard(
         args_cli.speed,
@@ -478,32 +722,42 @@ def main() -> None:
 
     print(f"Using teleop device: {teleop_interface}")
     print(_HELP, flush=True)
-    if args_cli.xr:
-        print("Press START in XR to begin recording.")
+    if args_cli.xr and not args_cli.auto_start:
+        print("Press START in XR to begin recording (or relaunch with --auto_start).")
+    elif args_cli.auto_start:
+        print("Auto-start enabled: recording/WASD active immediately.", flush=True)
 
     while simulation_app.is_running():
         try:
             with torch.inference_mode():
+                kb.poll()
                 if running_recording_instance:
                     step_count += 1
+                    hz_window_steps += 1
+                    now = time.time()
+                    if now - last_hz_t >= 1.0:
+                        effective_hz = hz_window_steps / (now - last_hz_t)
+                        hz_window_steps = 0
+                        last_hz_t = now
                     robot_pos, robot_yaw = robot_root_state(robot)
                     vx = vy = wz = 0.0
                     upper_body_mode: UpperBodyMode | None = None
                     neck_yaw_cmd, neck_pitch_cmd = 0.0, 0.0
 
                     if teleoperation_active:
-                        raw = teleop_interface._get_raw_data()
-
                         if loco_mode == "locomotion":
                             vx, vy, wz = kb.command()
                             if frozen_snapshot is None:
                                 frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
+                                pink_hold.refresh(robot)
+                            # Wrist targets still recorded for replay; Pink solve is skipped.
                             upper_body = build_upper_from_frozen_snapshot(
-                                robot, frozen_snapshot, env.device
+                                robot, frozen_snapshot, base_env.device
                             )
                             upper_body_mode = "frozen"
                             last_neck_targets = (0.0, 0.0)
                         else:
+                            raw = teleop_interface._get_raw_data()
                             if hold_xy_yaw is None:
                                 hold_xy_yaw = capture_hold_pose_from_robot(robot)
                             vx, vy, wz = station_keep_command(
@@ -540,23 +794,23 @@ def main() -> None:
 
                         if upper_body.ndim == 1:
                             upper_body = upper_body.unsqueeze(0)
-                        upper_body = upper_body.to(env.device).repeat(env.num_envs, 1)
+                        upper_body = upper_body.to(base_env.device).repeat(base_env.num_envs, 1)
                     else:
-                        upper_body = idle_upper.unsqueeze(0).repeat(env.num_envs, 1)
+                        upper_body = idle_upper.unsqueeze(0).repeat(base_env.num_envs, 1)
                         upper_body_mode = "idle"
                         last_neck_targets = (0.0, 0.0)
                         neck_yaw_cmd, neck_pitch_cmd = last_neck_targets
 
                     legs = policy_leg_targets(net, vx, vy, wz)
-                    legs_tensor = torch.as_tensor(legs, dtype=torch.float32, device=env.device)
-                    legs_tensor = legs_tensor.unsqueeze(0).repeat(env.num_envs, 1)
+                    legs_tensor = torch.as_tensor(legs, dtype=torch.float32, device=base_env.device)
+                    legs_tensor = legs_tensor.unsqueeze(0).repeat(base_env.num_envs, 1)
                     neck_tensor = torch.tensor(
                         [[neck_yaw_cmd, neck_pitch_cmd]],
                         dtype=torch.float32,
-                        device=env.device,
-                    ).repeat(env.num_envs, 1)
+                        device=base_env.device,
+                    ).repeat(base_env.num_envs, 1)
                     actions = pack_sberchel_xr_action(legs_tensor, upper_body, neck_tensor)
-                    stash_locomotion_command(env, vx, vy, wz)
+                    stash_locomotion_command(base_env, vx, vy, wz)
                     env.step(actions)
 
                     should_print = False
@@ -575,35 +829,54 @@ def main() -> None:
                         print(
                             f"[step {step_count}] mode={loco_mode} upper={upper_body_mode} "
                             f"pos=({robot_pos[0]:.2f},{robot_pos[1]:.2f}) yaw={robot_yaw:.2f} "
-                            f"cmd=({vx:.2f},{vy:.2f},{wz:.2f}) "
+                            f"cmd=({vx:.2f},{vy:.2f},{wz:.2f}) keys={kb.pressed_keys()} "
+                            f"hz={effective_hz:.1f} "
                             f"neck=({neck_yaw_cmd:.2f},{neck_pitch_cmd:.2f}){hold_dbg}",
                             flush=True,
                         )
+                        if effective_hz > 0.0 and effective_hz < 60.0 and loco_mode == "locomotion":
+                            print(
+                                f"[warn] loco wall-clock {effective_hz:.1f} Hz "
+                                f"(want ~150). Try --loco_render_interval 10",
+                                flush=True,
+                            )
+                        elif effective_hz > 0.0 and effective_hz < 60.0 and loco_mode == "static":
+                            print(
+                                f"[warn] static wall-clock {effective_hz:.1f} Hz "
+                                f"(Pink IK + XR); expected slower than loco.",
+                                flush=True,
+                            )
                 else:
-                    env.sim.render()
+                    base_env.sim.render()
 
                 if should_reset or should_discard_reset:
                     discard = should_discard_reset
                     if discard:
-                        env.recorder_manager.cfg.export_in_record_pre_reset = False
+                        base_env.recorder_manager.cfg.export_in_record_pre_reset = False
+                        discard_viewport_video_frames(env)
                     env.reset()
                     if discard:
-                        env.recorder_manager.cfg.export_in_record_pre_reset = True
+                        base_env.recorder_manager.cfg.export_in_record_pre_reset = True
                     hold_xy_yaw = None
-                    loco_mode = "locomotion"
+                    enter_locomotion_mode(capture_frozen=False)
                     last_neck_targets = (0.0, 0.0)
                     (
                         frozen_snapshot,
                         last_teleop_upper,
                         idle_upper,
                     ) = reset_teleop_state(
-                        env=env, net=net, robot=robot, teleop_interface=teleop_interface
+                        env=base_env,
+                        net=net,
+                        robot=robot,
+                        teleop_interface=teleop_interface,
+                        loco_mode="locomotion",
                     )
+                    pink_hold.refresh(robot)
                     should_reset = False
                     should_discard_reset = False
                     first_active_logged = False
                     step_count = 0
-                    demo_count = exported_demo_count(env)
+                    demo_count = exported_demo_count(base_env)
                     if discard:
                         print(
                             f"Discard reset complete (episode not saved). "
@@ -616,12 +889,12 @@ def main() -> None:
                             flush=True,
                         )
 
-                if args_cli.num_demos > 0 and exported_demo_count(env) >= args_cli.num_demos:
-                    print(f"Recorded {exported_demo_count(env)} demonstrations. Exiting.")
+                if args_cli.num_demos > 0 and exported_demo_count(base_env) >= args_cli.num_demos:
+                    print(f"Recorded {exported_demo_count(base_env)} demonstrations. Exiting.")
                     break
 
                 if rate_limiter is not None and running_recording_instance:
-                    rate_limiter.sleep(env)
+                    rate_limiter.sleep(base_env)
         except Exception as exc:
             logger.error("Error during simulation step: %s", exc)
             break
@@ -629,7 +902,9 @@ def main() -> None:
     kb.close()
     env.close()
     print(f"Recording session complete. Demonstrations saved to: {args_cli.dataset_file}")
-
+    if args_cli.video:
+        video_folder = Path(args_cli.video_dir) if args_cli.video_dir else Path(output_dir) / "videos"
+        print(f"Viewport videos saved under: {video_folder}")
 
 if __name__ == "__main__":
     main()

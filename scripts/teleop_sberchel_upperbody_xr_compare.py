@@ -65,7 +65,7 @@ import torch
 
 from isaaclab.devices import Se3Gamepad, Se3GamepadCfg, Se3Keyboard, Se3KeyboardCfg, Se3SpaceMouse, Se3SpaceMouseCfg
 from isaaclab.devices.device_base import DeviceBase
-from isaaclab.devices.openxr import remove_camera_configs
+from dsynth_isaac.robots.sberchel_camera_cfg import strip_camera_configs
 from isaaclab.devices.openxr.common import HAND_JOINT_NAMES
 from isaaclab.devices.teleop_device_factory import create_teleop_device
 from isaaclab.envs import ManagerBasedRLEnvCfg
@@ -287,7 +287,7 @@ def main() -> None:
         env_cfg.terminations.object_reached_goal = DoneTerm(func=mdp.object_reached_goal)
 
     if args_cli.xr:
-        env_cfg = remove_camera_configs(env_cfg)
+        env_cfg = strip_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
 
     env_cfg.scene.scene_config_dir_path = "generated_envs/isaac_sample"

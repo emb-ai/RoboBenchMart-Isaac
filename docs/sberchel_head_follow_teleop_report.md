@@ -35,8 +35,8 @@ Additional constraints discovered in practice:
 | Phase | Legs | Upper body |
 |-------|------|------------|
 | Teleop inactive (before START) | Stand (policy with zero velocity command) | Idle from robot `hand_base_link` + zero fingers |
-| **Pursuing** (active, not arrived) | P-control toward headset XY + yaw policy | **Frozen** pelvis-relative wrists + saved finger targets |
-| **Arrived** (active, aligned) | Hold / fine correction | Live XR `retarget(raw)` → Pink IK |
+| **Pursuing** (active, not arrived) | P-control toward headset XY; long pursuit adds yaw; short pursuit is vx/vy only | **Frozen** pelvis-relative wrists + saved finger targets |
+| **Arrived** (active, aligned) | Station-keep P-control to latched headset XY + view yaw (no position deadzone) | Live XR `retarget(raw)` → Pink IK |
 | Walk away after grasp | Pursuing again | Freeze **last teleop command** (not robot state) |
 
 ### Outcome
@@ -123,7 +123,18 @@ Implemented in `_headset_follow_command()` (both scripts).
 - Error transformed to body frame; `dist_xy = hypot(err_bx, err_by)`.
 - `vx, vy = clip(lin_gain * err_body, max_lin)` with zero inside `follow_pos_deadzone`.
 
-### 4.2 Yaw modes (`yaw_mode`)
+### 4.2 Pursuit modes (`pursuit`)
+
+Hysteresis on XY distance to the **live** headset:
+
+| Mode | When | Leg commands |
+|------|------|--------------|
+| `long` | `dist_xy >= follow_short_off_gate` (default 0.65 m) | Linear + yaw (bearing / headset per `yaw_mode`) |
+| `short` | `dist_xy <= follow_short_on_gate` (default 0.55 m) | **vx, vy only** (`wz = 0`); capped by `--follow_short_max_lin` (default 0.35 m/s) |
+
+Between gates the previous mode is kept. Short pursuit strafes in the robot body frame without rotating toward the headset — useful for small forward/back/side steps when you are already near the robot.
+
+### 4.3 Yaw modes (`yaw_mode`)
 
 Controlled by `--follow_yaw_target`:
 
@@ -143,7 +154,11 @@ Distance hysteresis for `bearing_then_headset`:
 
 **Note:** `yaw_mode` affects **locomotion yaw target only**. It does **not** gate upper-body teleop.
 
-### 4.3 Heading conventions
+### 4.4 Arrived station-keep
+
+When `loco_arrived` becomes true, legs latch the headset world `(x, y)` and view yaw via `capture_hold_pose_from_headset()` and switch to `station_keep_command()` (same P-control as `teleop_sberchel.py`). Arrived hold uses zero position/yaw deadzones so fine corrections always reach the policy. Arrival **gating** still uses the **live** headset pose; pursuit resumes `headset_follow_command()` when leave thresholds are exceeded.
+
+### 4.5 Heading conventions
 
 | Frame | Forward axis for XY heading |
 |-------|----------------------------|
@@ -274,6 +289,9 @@ During teleop, Pink receives **commanded** finger targets. Under grasp contact, 
 | `--follow_yaw_off_gate` | 0.25 | Switch to headset yaw when closer (m) |
 | `--follow_yaw_target` | `bearing_then_headset` | `bearing`, `headset`, or hybrid |
 | `--follow_head_yaw_offset_deg` | 0.0 | Extra heading offset on headset view (deg) |
+| `--follow_short_on_gate` | 0.55 | Short pursuit (vx/vy only) when closer (m) |
+| `--follow_short_off_gate` | 0.65 | Long pursuit when farther (m); must be ≥ on gate |
+| `--follow_short_max_lin` | 0.35 | Max linear speed in short pursuit (m/s) |
 
 ### 8.3 Arrival gating (teleop enable)
 

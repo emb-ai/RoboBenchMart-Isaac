@@ -38,8 +38,35 @@ class LocomotionCommandRecorderCfg(RecorderTermCfg):
     class_type: type[RecorderTerm] = LocomotionCommandRecorder
 
 
+class PreStepRgbCameraObservationsRecorder(RecorderTerm):
+    """Record ``observations.rgb_camera`` terms under flat ``obs/<term>`` keys.
+
+    ``ActionStateRecorderManagerCfg`` only writes ``obs_buf["policy"]``. Sberchel puts
+    left-head RGB under ``rgb_camera``, so demos need this term or HDF5 exports omit
+    video even when ``--enable_cameras`` is set.
+
+    Terms are flattened (``obs/head_img``, not ``obs/rgb_camera/head_img``) so
+    Isaac Lab's ``hdf5_to_mp4.py --input_keys head_img`` works without nested paths.
+    """
+
+    def record_pre_step(self):
+        rgb_obs = self._env.obs_buf.get("rgb_camera")
+        if rgb_obs is None or (isinstance(rgb_obs, dict) and len(rgb_obs) == 0):
+            return None, None
+        # Flat under ``obs/`` (policy recorder also uses ``obs``; keys merge).
+        return "obs", rgb_obs
+
+
+@configclass
+class PreStepRgbCameraObservationsRecorderCfg(RecorderTermCfg):
+    """Configuration for the RGB camera observation recorder term."""
+
+    class_type: type[RecorderTerm] = PreStepRgbCameraObservationsRecorder
+
+
 @configclass
 class SberchelXRRecorderManagerCfg(ActionStateRecorderManagerCfg):
-    """Action/state recorder plus Sberchel XR locomotion velocity commands."""
+    """Action/state recorder plus locomotion commands and head-camera RGB."""
 
     record_pre_step_loco_commands = LocomotionCommandRecorderCfg()
+    record_pre_step_rgb_camera_observations = PreStepRgbCameraObservationsRecorderCfg()

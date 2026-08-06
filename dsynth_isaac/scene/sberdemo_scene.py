@@ -12,6 +12,7 @@ import numpy as np
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
+from isaaclab.sensors import CameraCfg
 from isaaclab.sim.spawners.spawner_cfg import SpawnerCfg
 from isaaclab.sim.utils import clone, standardize_xform_ops
 from isaaclab.sim.utils.stage import get_current_stage
@@ -343,6 +344,8 @@ def fix_store_usd_physics_for_isaac_lab(
 @configclass
 class SberDemoSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = MISSING
+    # Set by demo env cfgs; ``None`` is skipped by InteractiveScene.
+    left_head_camera: CameraCfg | None = None
 
     dsynth_scene = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/dsynth_scene",
