@@ -3,7 +3,7 @@
 This report documents the **hybrid open-kinematics Sberchel** stack: one primary robot config (`SBERCHEL_CONFIG_OPEN_KINEMATICS`) that keeps **policy-native crank leg joints** while preserving a **Pink-friendly serial upper body** (`wrist_pitch`, `hand_base_link`, `pelvis_link`). It supersedes the interim approach that used `v3_0_alpha_locomanipulator_open.xml` with crank→serial remapping in `sberchel_policy.py`.
 
 **Primary robot config:** `SBERCHEL_CONFIG_OPEN_KINEMATICS` in `dsynth_isaac/robots/sberchel_cfg.py`  
-**Hybrid MJCF:** `green_challenge/.../v3_0_alpha_locomanipulator/v3_0_alpha_locomanipulator_hybrid.xml`  
+**Hybrid MJCF:** `dsynth_isaac/robots/mjcf/v3_0_alpha_locomanipulator_hybrid.xml` (meshes still from green_challenge)  
 **Pink URDF pipeline:** `dsynth_isaac/robots/sberchel_mjcf_usd.py`  
 
 **Related (unchanged) reports:** [`sberchel_upperbody_xr_teleop_report.md`](sberchel_upperbody_xr_teleop_report.md), [`sberchel_xr_locomotion_teleop_report.md`](sberchel_xr_locomotion_teleop_report.md) — these describe the pre-hybrid paths and are now partially outdated on MJCF/policy wiring.
@@ -71,9 +71,13 @@ flowchart TB
 ## 3. Hybrid MJCF asset
 
 **File:**  
-`green_challenge/assets/robot_v3_0a/dependencies/robots/v3_0_alpha_locomanipulator/v3_0_alpha_locomanipulator_hybrid.xml`
+`dsynth_isaac/robots/mjcf/v3_0_alpha_locomanipulator_hybrid.xml`
 
-**Created from:** `v3_0_alpha_locomanipulator_open.xml`
+**Meshes:** green_challenge `.../v3_0_alpha_locomanipulator/meshes/` (absolute `meshdir` rewritten at import into a gitignored `*.resolved.xml`).
+
+**USD cache:** `dsynth_isaac/robots/mjcf/usd_cache/`
+
+**Created from:** green_challenge `v3_0_alpha_locomanipulator_open.xml`
 
 | Open joint name | Hybrid (policy) name |
 |-----------------|----------------------|
@@ -91,8 +95,6 @@ flowchart TB
 - `left_hand_base_link` / `right_hand_base_link`
 - Finger mimic `<equality>` constraints
 - No rod bodies or `<connect>` kinematic loops reintroduced
-
-**USD cache:** `.../usd_cache/v3_0_alpha_locomanipulator_hybrid.usd`
 
 ---
 
@@ -252,7 +254,7 @@ Leg crank joints exist in the exported URDF but are **not** in `pink_controlled_
 
 | Path | Role |
 |------|------|
-| `green_challenge/.../v3_0_alpha_locomanipulator_hybrid.xml` | **New** hybrid MJCF |
+| `dsynth_isaac/robots/mjcf/v3_0_alpha_locomanipulator_hybrid.xml` | **New** hybrid MJCF (local; meshes from green_challenge) |
 | `dsynth_isaac/robots/sberchel_cfg.py` | Unified open/XR robot configs; hybrid wrist remap; split locomotion actuators |
 | `dsynth_isaac/robots/sberchel_mjcf_usd.py` | Cache version bump for hybrid MJCF |
 | `dsynth_isaac/tasks/manager_based/sberchel_base_env_cfg.py` | `POLICY_LEG_JOINT_NAMES`, `SberchelOpenKinematicsActionsCfg`, `policy_leg_targets` |

@@ -3,15 +3,17 @@
 Reuses robot definitions from ``green_challenge`` (serialized interface JSON +
 ``ConfigManager``). ``SBERCHEL_CONFIG`` is closed kinematics (``robot_v3_0a``).
 ``SBERCHEL_CONFIG_OPEN_KINEMATICS`` uses the ``robot_green_open_source`` package
-with spawn pointed at the hybrid open MJCF (serial upper body + policy-native
-crank leg joints). ``SBERCHEL_UPPERBODY_XR_ROBOT`` adds fixed pelvis +
-ImplicitActuator PD for upper-body XR teleop. ``SBERCHEL_XR_LOCOMOTION_ROBOT``
-is free-floating open kinematics with policy leg actuators and XR arm PD.
+with spawn pointed at the local hybrid MJCF under ``mjcf/`` (serial upper body +
+policy-native crank leg joints; meshes still resolved from green_challenge).
+``SBERCHEL_UPPERBODY_XR_ROBOT`` adds fixed pelvis + ImplicitActuator PD for
+upper-body XR teleop. ``SBERCHEL_XR_LOCOMOTION_ROBOT`` is free-floating open
+kinematics with policy leg actuators and XR arm PD.
 ``SBERCHEL_XR_LOCOMOTION_NECK_ROBOT`` adds a separate ImplicitActuator neck
 group for headset look control.
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -37,12 +39,36 @@ SBERCHEL_CONFIG = _cm.load_config("sberchel_v3_0_alpha_locomanipulation_full")
 
 _cm_open = ConfigManagerGreenOpenSource.instance()
 _base_open = _cm_open.load_config("sberchel_v3_0_alpha_locomanipulation_full")
-_HYBRID_MJCF_PATH = (
+
+# Hybrid MJCF lives in this repo; meshes stay in green_challenge.
+_HYBRID_MJCF_DIR = Path(__file__).resolve().parent / "mjcf"
+_HYBRID_MJCF_SRC = _HYBRID_MJCF_DIR / "v3_0_alpha_locomanipulator_hybrid.xml"
+_GC_MESH_DIR = (
     Path(_GREEN_CHALLENGE_ROOT)
     / "assets/robot_v3_0a/dependencies/robots/v3_0_alpha_locomanipulator"
-    / "v3_0_alpha_locomanipulator_hybrid.xml"
+    / "meshes"
 )
-_HYBRID_MJCF_DIR = _HYBRID_MJCF_PATH.parent
+
+
+def _resolve_hybrid_mjcf(src: Path, mesh_dir: Path) -> Path:
+    """Write a sibling MJCF with absolute ``meshdir`` pointing at green_challenge meshes."""
+    resolved = src.with_name(f"{src.stem}.resolved{src.suffix}")
+    abs_mesh = str(mesh_dir.resolve())
+    text = src.read_text()
+    patched = re.sub(
+        r'(<compiler\b[^>]*\bmeshdir=")[^"]*(")',
+        rf"\g<1>{abs_mesh}\2",
+        text,
+        count=1,
+    )
+    if patched == text and 'meshdir="' not in text:
+        raise ValueError(f"No meshdir attribute found in {src}")
+    if not resolved.exists() or resolved.read_text() != patched:
+        resolved.write_text(patched)
+    return resolved
+
+
+_HYBRID_MJCF_PATH = _resolve_hybrid_mjcf(_HYBRID_MJCF_SRC, _GC_MESH_DIR)
 
 # green_open_source JSON uses wrist_crank; hybrid MJCF keeps serial wrist_pitch.
 _HYBRID_JOINT_KEY_REMAP = {
