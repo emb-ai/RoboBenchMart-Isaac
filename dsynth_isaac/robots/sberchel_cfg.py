@@ -51,13 +51,32 @@ _GC_MESH_DIR = (
 
 
 def _resolve_hybrid_mjcf(src: Path, mesh_dir: Path) -> Path:
-    """Write a sibling MJCF with absolute ``meshdir`` pointing at green_challenge meshes."""
-    resolved = src.with_name(f"{src.stem}.resolved{src.suffix}")
-    abs_mesh = str(mesh_dir.resolve())
+    """Write a sibling MJCF with ``meshdir`` pointing at green_challenge meshes.
+
+    Isaac Sim's native MJCF importer mirrors ``meshdir`` under its own cache
+    directory (e.g. ``~/.cache/dirol/mjcf/<meshdir>/<mesh>_tmp/``) without
+    recursively creating missing parents, so it silently fails to write the
+    per-mesh tmp USD when ``meshdir`` is a long absolute path. Keep it a
+    shallow relative path instead, via a local symlink to the real mesh dir.
+    """
+    # IsaacLab's MjcfConverter does a naive `basename.split(".")` expecting
+    # exactly one dot, so the resolved filename must not add another one.
+    resolved = src.with_name(f"{src.stem}_resolved{src.suffix}")
+    mesh_link = src.parent / "meshes"
+    abs_mesh = mesh_dir.resolve()
+    if mesh_link.is_symlink():
+        if mesh_link.resolve() != abs_mesh:
+            mesh_link.unlink()
+            mesh_link.symlink_to(abs_mesh)
+    elif mesh_link.exists():
+        raise FileExistsError(f"{mesh_link} exists and is not the expected meshes symlink")
+    else:
+        mesh_link.symlink_to(abs_mesh)
+
     text = src.read_text()
     patched = re.sub(
         r'(<compiler\b[^>]*\bmeshdir=")[^"]*(")',
-        rf"\g<1>{abs_mesh}\2",
+        r"\g<1>meshes/\g<2>",
         text,
         count=1,
     )

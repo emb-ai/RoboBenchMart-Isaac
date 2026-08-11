@@ -8,6 +8,7 @@ assets_usd
 assets_usd_uninstanced
 datasets
 
-dsynth_isaac/robots/mjcf/*.resolved.xml
+dsynth_isaac/robots/mjcf/*_resolved.xml
 dsynth_isaac/robots/mjcf/usd_cache/
+dsynth_isaac/robots/mjcf/meshes
 
