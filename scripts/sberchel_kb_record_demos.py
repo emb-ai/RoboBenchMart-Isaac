@@ -3,7 +3,8 @@
 Upper-body teleop is XR hand tracking; legs use the zest locomotion policy
 driven by keyboard velocity commands (like ``demo_sberchel_kb.py``). Press **C**
 to toggle locomotion (WASD + soft frozen upper body) vs static teleop (station-keep
-at the latch pose + live XR hands + headset neck look).
+at the latch pose + live XR hands + headset neck look). Press **T** to teleport the
+XR anchor onto the robot (same pose relative to the robot as at episode start).
 
 OpenXR often steals window focus (carb WASD drops). This script polls X11 keymap
 globally so hold-to-move works while the headset is focused. During locomotion,
@@ -208,6 +209,7 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
     station_keep_command,
     sync_retargeter_idle_from_robot,
 )
+from dsynth_isaac.teleop.xr_anchor import XrAnchorTeleporter
 from dsynth_isaac.robots.sberchel_cfg import (
     apply_sberchel_loco_upper_pd_gains,
     apply_sberchel_xr_teleop_pd_gains,
@@ -231,6 +233,7 @@ _HELP = """
   Q strafe L   E strafe R    (release = stop legs in loco mode)
   C  toggle locomotion (WASD + Pink hold-off) / static teleop
      (static: XR hands + headset neck; Pink IK on, slower)
+  T  teleport XR view onto the robot (same offset as at episode start)
   R  save episode + reset (HDF5; viewport MP4 if --video)
   X  discard episode + reset (no HDF5 / no MP4 write)
   XR START / STOP  begin or pause recording (or pass --auto_start)
@@ -240,7 +243,7 @@ _HELP = """
 """
 
 _MOVE_KEYS = ("W", "A", "S", "D", "Q", "E")
-_EDGE_KEYS = ("C", "R", "X")
+_EDGE_KEYS = ("C", "R", "X", "T")
 
 
 class PinkJointHold:
@@ -321,6 +324,7 @@ class _X11KeyPoller:
         "C": 0x0063,
         "R": 0x0072,
         "X": 0x0078,
+        "T": 0x0074,
     }
 
     def __init__(self) -> None:
@@ -370,7 +374,7 @@ class _X11KeyPoller:
 
 
 class RecordKeyboard:
-    """WASDQE hold-to-move plus edge-triggered C / R / X.
+    """WASDQE hold-to-move plus edge-triggered C / R / X / T.
 
     Uses X11 keymap polling (global, works under OpenXR focus steal) unioned with
     Isaac carb press/release events as a fallback.
@@ -385,6 +389,7 @@ class RecordKeyboard:
         on_toggle_mode: Callable[[], None] | None = None,
         on_save_reset: Callable[[], None] | None = None,
         on_discard_reset: Callable[[], None] | None = None,
+        on_teleport_view: Callable[[], None] | None = None,
     ) -> None:
         import carb
         import omni
@@ -396,6 +401,7 @@ class RecordKeyboard:
         self._on_toggle_mode = on_toggle_mode
         self._on_save_reset = on_save_reset
         self._on_discard_reset = on_discard_reset
+        self._on_teleport_view = on_teleport_view
         self._carb_pressed: set[str] = set()
         self._edge_prev: set[str] = set()
         self._ok = False
@@ -451,7 +457,7 @@ class RecordKeyboard:
         return pressed
 
     def poll(self) -> None:
-        """Process edge-triggered C / R / X; call every loop iteration."""
+        """Process edge-triggered C / R / X / T; call every loop iteration."""
         pressed = self._pressed_now()
         edge_now = pressed & set(_EDGE_KEYS)
         newly = edge_now - self._edge_prev
@@ -461,6 +467,8 @@ class RecordKeyboard:
             self._on_save_reset()
         if "X" in newly and self._on_discard_reset is not None:
             self._on_discard_reset()
+        if "T" in newly and self._on_teleport_view is not None:
+            self._on_teleport_view()
         self._edge_prev = edge_now
 
     def command(self) -> tuple[float, float, float]:
@@ -706,6 +714,27 @@ def main() -> None:
     sync_retargeter_idle_from_robot(teleop_interface, robot)
     idle_upper = build_idle_upper_from_robot(robot, base_env.device)
 
+    # Anchor prim only exists once the OpenXR device has been created above.
+    anchor_teleporter = (
+        XrAnchorTeleporter(env_cfg.xr, robot) if args_cli.xr else None
+    )
+
+    def teleport_view_to_robot() -> None:
+        """Snap the XR view back onto the robot at the episode-start offset."""
+        if anchor_teleporter is None:
+            print("[XR] Teleport ignored: no XR anchor (run with hand tracking).", flush=True)
+            return
+        pose = anchor_teleporter.teleport_to_robot(robot)
+        if pose is None:
+            print("[XR] Teleport failed: could not write the XR anchor prim.", flush=True)
+            return
+        (ax, ay, az), ayaw = pose
+        print(
+            f"[XR] View teleported to robot: anchor xy=({ax:.3f}, {ay:.3f}) "
+            f"z={az:.3f} yaw={ayaw:.3f}",
+            flush=True,
+        )
+
     kb = RecordKeyboard(
         args_cli.speed,
         args_cli.turn,
@@ -713,6 +742,7 @@ def main() -> None:
         on_toggle_mode=toggle_loco_mode,
         on_save_reset=reset_env,
         on_discard_reset=discard_reset_env,
+        on_teleport_view=teleport_view_to_robot,
     )
 
     if args_cli.xr:
@@ -872,6 +902,9 @@ def main() -> None:
                         loco_mode="locomotion",
                     )
                     pink_hold.refresh(robot)
+                    if anchor_teleporter is not None:
+                        # Robot is back at spawn; restore the start-of-episode XR view.
+                        anchor_teleporter.teleport_to_robot(robot)
                     should_reset = False
                     should_discard_reset = False
                     first_active_logged = False

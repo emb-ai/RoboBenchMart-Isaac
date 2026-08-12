@@ -153,6 +153,11 @@ python scripts/sberchel_kb_record_demos.py \
   --dataset_file ./datasets/sberchel_kb_demos.hdf5
 ```
 
+Keys: **WASD/QE** drive the legs, **C** toggles locomotion / static teleop,
+**T** teleports the XR view onto the robot (restores the pose relative to the
+robot you had at episode start), **R** saves the episode and resets, **X**
+discards it and resets.
+
 ### Replay trajectories
 
 Pass the same `--dataset_file` used for recording (script defaults for record vs replay differ):
