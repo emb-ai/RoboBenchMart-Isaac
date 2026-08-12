@@ -17,12 +17,18 @@ without writing to HDF5.
 With ``--video``, also records the viewport (``rgb_array``) via Gymnasium
 ``RecordVideo``; each RESET/R saves an MP4 (discard/X skips the video write).
 
+``--control_device gamepad`` swaps the keyboard for a PS5 (DualSense) pad read
+from ``/dev/input/js*`` (focus-independent, like the X11 poll): D-pad = WASD,
+L1/R1 = strafe, Create = C, R2 = T, Cross = R, Circle = X, Options = START/STOP.
+See ``dsynth_isaac/teleop/gamepad.py``.
+
 Usage:
     python scripts/sberchel_kb_record_demos.py \\
         --task Isaac-Demo-Sberchel-XR-v0 \\
         --teleop_device handtracking \\
         --enable_pinocchio \\
         --dataset_file ./datasets/sberchel_kb_demos.hdf5 \\
+        --control_device gamepad \\
         --video
 """
 
@@ -146,6 +152,41 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--control_device",
+    type=str,
+    default="keyboard",
+    choices=["keyboard", "gamepad", "both"],
+    help=(
+        "Locomotion/episode input: WASD keyboard, PS5 (DualSense) gamepad, or both. "
+        "Gamepad: D-pad = WASD, L1/R1 = strafe, Create = toggle locomotion, "
+        "R2 = teleport, Cross = save+reset, Circle = discard+reset, Options = START/STOP."
+    ),
+)
+parser.add_argument(
+    "--gamepad_dev",
+    type=str,
+    default="",
+    help="Joystick device for --control_device gamepad (default: auto-detect DualSense).",
+)
+parser.add_argument(
+    "--gamepad_deadzone",
+    type=float,
+    default=0.15,
+    help="Analog stick deadzone (fraction of full travel).",
+)
+parser.add_argument(
+    "--gamepad_no_sticks",
+    action="store_true",
+    default=False,
+    help="Ignore the analog sticks; drive locomotion from the D-pad and L1/R1 only.",
+)
+parser.add_argument(
+    "--gamepad_debug",
+    action="store_true",
+    default=False,
+    help="Print every gamepad button/axis event (to verify the button mapping).",
+)
+parser.add_argument(
     "--video",
     action="store_true",
     default=False,
@@ -209,6 +250,7 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
     station_keep_command,
     sync_retargeter_idle_from_robot,
 )
+from dsynth_isaac.teleop.gamepad import RecordGamepad
 from dsynth_isaac.teleop.xr_anchor import XrAnchorTeleporter
 from dsynth_isaac.robots.sberchel_cfg import (
     apply_sberchel_loco_upper_pd_gains,
@@ -227,7 +269,7 @@ logger = logging.getLogger(__name__)
 
 LocoMode = Literal["locomotion", "static"]
 
-_HELP = """
+_HELP_KEYBOARD = """
 ==================== KB RECORD CONTROLS ====================
   W forward    S backward    A turn left    D turn right
   Q strafe L   E strafe R    (release = stop legs in loco mode)
@@ -239,6 +281,23 @@ _HELP = """
   XR START / STOP  begin or pause recording (or pass --auto_start)
   Keys: X11 global poll (works while headset has focus) + Isaac window
   Tip: if loco hz still low, raise --loco_render_interval (e.g. 10)
+===========================================================
+"""
+
+_HELP_GAMEPAD = """
+================= PS5 PAD RECORD CONTROLS =================
+  D-pad up/down     forward / backward   (= W/S)
+  D-pad left/right  turn left / right    (= A/D)
+  L1 / R1           strafe left / right  (= Q/E)
+  Left stick        analog fwd/back + strafe   (--gamepad_no_sticks to disable)
+  Right stick X     analog turn
+  Create   toggle locomotion / static teleop   (= C)
+  R2       teleport XR view onto the robot     (= T)
+  Cross X  save episode + reset                (= R)
+  Circle   discard episode + reset             (= X key)
+  Options  start / stop recording        (= XR START / STOP)
+  Pad is read from /dev/input/js* — works while the headset has focus
+  Check the mapping any time: python -m dsynth_isaac.teleop.gamepad
 ===========================================================
 """
 
@@ -699,6 +758,13 @@ def main() -> None:
         enter_locomotion_mode(capture_frozen=False)
         print("Recording paused")
 
+    def toggle_recording_instance() -> None:
+        """Gamepad stand-in for the XR START / STOP buttons."""
+        if running_recording_instance:
+            stop_recording_instance()
+        else:
+            start_recording_instance()
+
     teleoperation_callbacks: dict[str, Callable[[], None]] = {
         "R": reset_env,
         "START": start_recording_instance,
@@ -735,15 +801,58 @@ def main() -> None:
             flush=True,
         )
 
-    kb = RecordKeyboard(
-        args_cli.speed,
-        args_cli.turn,
-        args_cli.strafe,
-        on_toggle_mode=toggle_loco_mode,
-        on_save_reset=reset_env,
-        on_discard_reset=discard_reset_env,
-        on_teleport_view=teleport_view_to_robot,
-    )
+    # Keyboard and gamepad expose the same poll/command/pressed_keys surface, so the
+    # loop below is agnostic to which one (or both) is driving.
+    controllers: list[RecordKeyboard | RecordGamepad] = []
+    use_keyboard = args_cli.control_device in ("keyboard", "both")
+    use_gamepad = args_cli.control_device in ("gamepad", "both")
+    if use_keyboard:
+        controllers.append(
+            RecordKeyboard(
+                args_cli.speed,
+                args_cli.turn,
+                args_cli.strafe,
+                on_toggle_mode=toggle_loco_mode,
+                on_save_reset=reset_env,
+                on_discard_reset=discard_reset_env,
+                on_teleport_view=teleport_view_to_robot,
+            )
+        )
+    if use_gamepad:
+        controllers.append(
+            RecordGamepad(
+                args_cli.speed,
+                args_cli.turn,
+                args_cli.strafe,
+                device=args_cli.gamepad_dev,
+                deadzone=args_cli.gamepad_deadzone,
+                use_sticks=not args_cli.gamepad_no_sticks,
+                debug=args_cli.gamepad_debug,
+                on_toggle_mode=toggle_loco_mode,
+                on_save_reset=reset_env,
+                on_discard_reset=discard_reset_env,
+                on_teleport_view=teleport_view_to_robot,
+                on_toggle_recording=toggle_recording_instance,
+            )
+        )
+
+    def poll_controllers() -> None:
+        for controller in controllers:
+            controller.poll()
+
+    def controller_command() -> tuple[float, float, float]:
+        """Largest-magnitude command per axis across the active input devices."""
+        vx = vy = wz = 0.0
+        for controller in controllers:
+            cx, cy, cz = controller.command()
+            vx = cx if abs(cx) > abs(vx) else vx
+            vy = cy if abs(cy) > abs(vy) else vy
+            wz = cz if abs(cz) > abs(wz) else wz
+        return vx, vy, wz
+
+    def controller_pressed() -> str:
+        active = [c.pressed_keys() for c in controllers]
+        return " ".join(a for a in active if a != "-") or "-"
 
     if args_cli.xr:
         rate_limiter = None
@@ -751,7 +860,10 @@ def main() -> None:
         rate_limiter = RateLimiter(args_cli.step_hz)
 
     print(f"Using teleop device: {teleop_interface}")
-    print(_HELP, flush=True)
+    if use_keyboard:
+        print(_HELP_KEYBOARD, flush=True)
+    if use_gamepad:
+        print(_HELP_GAMEPAD, flush=True)
     if args_cli.xr and not args_cli.auto_start:
         print("Press START in XR to begin recording (or relaunch with --auto_start).")
     elif args_cli.auto_start:
@@ -760,7 +872,7 @@ def main() -> None:
     while simulation_app.is_running():
         try:
             with torch.inference_mode():
-                kb.poll()
+                poll_controllers()
                 if running_recording_instance:
                     step_count += 1
                     hz_window_steps += 1
@@ -776,7 +888,7 @@ def main() -> None:
 
                     if teleoperation_active:
                         if loco_mode == "locomotion":
-                            vx, vy, wz = kb.command()
+                            vx, vy, wz = controller_command()
                             if frozen_snapshot is None:
                                 frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
                                 pink_hold.refresh(robot)
@@ -859,7 +971,7 @@ def main() -> None:
                         print(
                             f"[step {step_count}] mode={loco_mode} upper={upper_body_mode} "
                             f"pos=({robot_pos[0]:.2f},{robot_pos[1]:.2f}) yaw={robot_yaw:.2f} "
-                            f"cmd=({vx:.2f},{vy:.2f},{wz:.2f}) keys={kb.pressed_keys()} "
+                            f"cmd=({vx:.2f},{vy:.2f},{wz:.2f}) keys={controller_pressed()} "
                             f"hz={effective_hz:.1f} "
                             f"neck=({neck_yaw_cmd:.2f},{neck_pitch_cmd:.2f}){hold_dbg}",
                             flush=True,
@@ -932,7 +1044,8 @@ def main() -> None:
             logger.error("Error during simulation step: %s", exc)
             break
 
-    kb.close()
+    for controller in controllers:
+        controller.close()
     env.close()
     print(f"Recording session complete. Demonstrations saved to: {args_cli.dataset_file}")
     if args_cli.video:

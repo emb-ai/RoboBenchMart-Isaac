@@ -141,7 +141,7 @@ _XR_LOCK_STIFFNESS = 10000.0
 _XR_LOCK_DAMPING = 1000.0
 
 _upperbody_joint_pos = dict(SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.joint_pos)
-_upperbody_joint_pos[".*_elbow_pitch_joint"] = -1.0
+#_upperbody_joint_pos[".*_elbow_pitch_joint"] = -1.0
 
 _upperbody_spawn = SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn.replace(
     rigid_props=SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn.rigid_props.replace(disable_gravity=True)
@@ -371,7 +371,7 @@ def _open_locomotion_actuators_with_neck_pd():
 
 
 _xr_locomotion_joint_pos = dict(_upperbody_joint_pos)
-_xr_locomotion_joint_pos[".*_elbow_pitch_joint"] = -1.0
+#_xr_locomotion_joint_pos[".*_elbow_pitch_joint"] = -1.0
 
 SBERCHEL_XR_LOCOMOTION_ROBOT = ArticulationCfg(
     spawn=SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn,
