@@ -399,16 +399,67 @@ SBERCHEL_XR_LOCOMOTION_NECK_ROBOT = ArticulationCfg(
 )
 
 
-# Soft upper-body PD for locomotion (near zest policy cfg). Stiff XR teleop gains
-# (~3000) on frozen arms fight balance and make WASD walking shuffle / stall.
-_LOCO_SHOULDER_STIFFNESS = 30.0
-_LOCO_SHOULDER_DAMPING = 1.5
-_LOCO_ELBOW_STIFFNESS = 20.0
-_LOCO_ELBOW_DAMPING = 1.0
-_LOCO_WRIST_STIFFNESS = 40.0
-_LOCO_WRIST_DAMPING = 1.0
-_LOCO_FINGER_STIFFNESS = 10.0
-_LOCO_FINGER_DAMPING = 1.0
+# --- green_challenge-native upper-body PD ------------------------------------
+#
+# These are the gains the green_challenge evaluation env actually runs, so demos
+# recorded with them are demos of a plant that exists. Two sources combine:
+#
+#   1. ``sberchel_v3_0_alpha_locomanipulation_full.json`` (the same interface JSON
+#      this module loads at import time) gives the raw per-joint PD.
+#   2. green_challenge routes *body* joints (legs, torso, arms, neck) through
+#      ``jm_step`` -> ``scripts/pos2torque.py``, which converts position targets
+#      to torque with ``kp_gain_scale = kd_gain_scale = 1.4``. That path is on by
+#      default (``ENABLE_JOINT_MANAGER_TORQUE_CONTROL``, ``envs/manip_env.py:44``;
+#      only an env var disables it). Wrists and fingers stay position-controlled
+#      and are NOT scaled.
+#
+# So the effective gains below are JSON x 1.4 for arms/neck, JSON as-is for
+# wrists/fingers. Matching *effective* values is the point: raw JSON values would
+# leave us 1.4x soft on every arm joint.
+#
+# Per-joint detail matters and is easy to lose. green_challenge distinguishes
+# shoulder_yaw from shoulder pitch/roll, and thumb from the other four digits.
+# An earlier version of this table matched on substrings ("shoulder", "proximal")
+# and silently collapsed both, leaving the thumb -- the opposing digit that
+# carries most of the grip force -- 4x too soft. Match joints explicitly.
+_GC_KP_SCALE = 1.4  # pos2torque.py kp_gain_scale (body joints only)
+
+_GC_SHOULDER_PR_STIFFNESS = 30.0 * _GC_KP_SCALE  # 42.0  pitch / roll
+_GC_SHOULDER_PR_DAMPING = 1.5 * _GC_KP_SCALE  # 2.1
+_GC_SHOULDER_YAW_STIFFNESS = 20.0 * _GC_KP_SCALE  # 28.0
+_GC_SHOULDER_YAW_DAMPING = 1.0 * _GC_KP_SCALE  # 1.4
+_GC_ELBOW_STIFFNESS = 20.0 * _GC_KP_SCALE  # 28.0
+_GC_ELBOW_DAMPING = 1.0 * _GC_KP_SCALE  # 1.4
+_GC_NECK_STIFFNESS = 20.0 * _GC_KP_SCALE  # 28.0
+_GC_NECK_DAMPING = 1.0 * _GC_KP_SCALE  # 1.4
+# Position-controlled on their side: no 1.4 scale.
+_GC_WRIST_STIFFNESS = 40.0
+_GC_WRIST_DAMPING = 1.0
+_GC_THUMB_STIFFNESS = 40.0
+_GC_THUMB_DAMPING = 2.0
+_GC_FINGER_STIFFNESS = 10.0
+_GC_FINGER_DAMPING = 1.0
+
+
+def _gc_upper_gains_for_joint(j_name: str) -> tuple[float, float] | None:
+    """Return ``(stiffness, damping)`` for an ``xr_upper`` joint, or None.
+
+    Order matters: thumb must be tested before the generic ``proximal`` branch,
+    and shoulder yaw before the generic shoulder branch.
+    """
+    if "shoulder" in j_name:
+        if "yaw" in j_name:
+            return _GC_SHOULDER_YAW_STIFFNESS, _GC_SHOULDER_YAW_DAMPING
+        return _GC_SHOULDER_PR_STIFFNESS, _GC_SHOULDER_PR_DAMPING
+    if "elbow" in j_name:
+        return _GC_ELBOW_STIFFNESS, _GC_ELBOW_DAMPING
+    if "wrist" in j_name:
+        return _GC_WRIST_STIFFNESS, _GC_WRIST_DAMPING
+    if "thumb" in j_name:
+        return _GC_THUMB_STIFFNESS, _GC_THUMB_DAMPING
+    if "proximal" in j_name:
+        return _GC_FINGER_STIFFNESS, _GC_FINGER_DAMPING
+    return None
 
 
 def apply_sberchel_xr_teleop_pd_gains(robot) -> None:
@@ -429,26 +480,49 @@ def apply_sberchel_xr_teleop_pd_gains(robot) -> None:
             neck.damping[:, local_idx] = _XR_NECK_DAMPING
 
 
-def apply_sberchel_loco_upper_pd_gains(robot) -> None:
-    """Policy-scale ``xr_upper`` PD so frozen arms do not fight locomotion.
+def apply_sberchel_loco_upper_pd_gains(robot, *, include_neck: bool = True) -> None:
+    """Set ``xr_upper`` (and neck) PD to green_challenge's effective gains.
 
-    Call while WASD / head-follow walking; switch back to
-    ``apply_sberchel_xr_teleop_pd_gains`` for static hand teleop.
-    Neck PD (headset look) is left unchanged.
+    This is the plant green_challenge evaluates on, so it is the plant demos
+    intended for their VLA must be recorded on. Use it for the whole session --
+    both WASD locomotion and static hand teleop -- not as one half of a runtime
+    gain switch: switching plants mid-episode makes the dataset non-Markovian
+    (identical observations, different action->outcome mapping) and produces a
+    transition their env has no analogue for.
+
+    ``include_neck=False`` keeps the stiff XR neck PD for headset look, at the
+    cost of diverging from their config (neck sits in their ``torso_joint_pos``
+    group and moves the head camera, so it does affect recorded images).
     """
-    if "xr_upper" not in robot.actuators:
-        return
-    actuator = robot.actuators["xr_upper"]
-    for local_idx, j_name in enumerate(actuator.joint_names):
-        if "shoulder" in j_name:
-            actuator.stiffness[:, local_idx] = _LOCO_SHOULDER_STIFFNESS
-            actuator.damping[:, local_idx] = _LOCO_SHOULDER_DAMPING
-        elif "elbow" in j_name:
-            actuator.stiffness[:, local_idx] = _LOCO_ELBOW_STIFFNESS
-            actuator.damping[:, local_idx] = _LOCO_ELBOW_DAMPING
-        elif "wrist" in j_name:
-            actuator.stiffness[:, local_idx] = _LOCO_WRIST_STIFFNESS
-            actuator.damping[:, local_idx] = _LOCO_WRIST_DAMPING
-        elif "proximal" in j_name:
-            actuator.stiffness[:, local_idx] = _LOCO_FINGER_STIFFNESS
-            actuator.damping[:, local_idx] = _LOCO_FINGER_DAMPING
+    if "xr_upper" in robot.actuators:
+        actuator = robot.actuators["xr_upper"]
+        for local_idx, j_name in enumerate(actuator.joint_names):
+            gains = _gc_upper_gains_for_joint(j_name)
+            if gains is None:
+                continue
+            actuator.stiffness[:, local_idx] = gains[0]
+            actuator.damping[:, local_idx] = gains[1]
+    if include_neck and "neck" in robot.actuators:
+        neck = robot.actuators["neck"]
+        for local_idx, _j_name in enumerate(neck.joint_names):
+            neck.stiffness[:, local_idx] = _GC_NECK_STIFFNESS
+            neck.damping[:, local_idx] = _GC_NECK_DAMPING
+
+
+def sberchel_upper_pd_gain_table(robot) -> dict[str, tuple[float, float]]:
+    """Current ``(stiffness, damping)`` per joint for ``xr_upper`` + ``neck``.
+
+    Used for the startup gain dump and for recording gain provenance into the
+    demo dataset, so a converter never has to guess what plant produced a demo.
+    """
+    table: dict[str, tuple[float, float]] = {}
+    for group in ("xr_upper", "neck"):
+        actuator = robot.actuators.get(group)
+        if actuator is None:
+            continue
+        for local_idx, j_name in enumerate(actuator.joint_names):
+            table[j_name] = (
+                float(actuator.stiffness[0, local_idx].item()),
+                float(actuator.damping[0, local_idx].item()),
+            )
+    return table

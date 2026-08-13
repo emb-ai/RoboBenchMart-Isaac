@@ -257,13 +257,38 @@ def _span_target(open_value: float, closed_value: float, fraction: float) -> flo
     return open_value + fraction * (closed_value - open_value)
 
 
+def _squeeze_fraction(base: float, squeeze: float) -> float:
+    """Blend a retargeted closure fraction toward fully closed.
+
+    Grip force on a position-controlled hand is ``k_p * (commanded - achieved)``,
+    and the object -- not the command -- limits ``achieved``. So grip comes from
+    commanding closure *past* the contact point, which is exactly how
+    green_challenge is driven (its socket API and keyboard control push finger
+    targets to 1.7+ rad). XR retargeting never gets there on its own: a human
+    wrapping an object stops curling when their *own* fingers touch, so the
+    commanded angle lands right about where the object already blocks the robot
+    finger, leaving error -- and therefore grip -- near zero.
+
+    Gated on ``base > 0`` so the curl deadzone still guarantees that a fully open
+    hand stays exactly open rather than creeping closed while squeeze is held.
+    """
+    if base <= 0.0 or squeeze <= 0.0:
+        return base
+    return base + (1.0 - base) * min(1.0, squeeze)
+
+
 def _retarget_one_hand_joints(
     hand_poses: dict[str, np.ndarray],
     side: str,
     prev_targets: dict[str, float] | None,
     prev_curls: dict[str, float] | None,
+    squeeze: float = 0.0,
 ) -> tuple[dict[str, float], dict[str, float]]:
-    """Map OpenXR bones → proximal joint targets (VRD curl → joint span)."""
+    """Map OpenXR bones → proximal joint targets (VRD curl → joint span).
+
+    ``squeeze`` (0..1) drives the closure fraction toward 1.0 so a grasp
+    generates real force; see :func:`_squeeze_fraction`.
+    """
     prev_targets = prev_targets or {}
     prev_curls = prev_curls or {}
     curls: dict[str, float] = {}
@@ -285,19 +310,22 @@ def _retarget_one_hand_joints(
     curls["opposition"] = float(opposition)
     curls["opposition_signed"] = float(signed)
 
+    # Nothing downstream clamps finger targets (the Pink action term passes hand
+    # joints straight to set_joint_position_target), so clamp here.
+    def _target(limit: tuple[float, float], frac: float) -> float:
+        lo, hi = limit
+        return float(np.clip(_span_target(lo, hi, _squeeze_fraction(frac, squeeze)), lo, hi))
+
     yaw_name = f"{side}_thumb_proximal_yaw_joint"
-    lo, hi = _THUMB_YAW_LIMIT
-    out[yaw_name] = _span_target(lo, hi, _CLOSE_FRACTION["thumb_yaw"] * curls["opposition"])
+    out[yaw_name] = _target(_THUMB_YAW_LIMIT, _CLOSE_FRACTION["thumb_yaw"] * curls["opposition"])
 
     pitch_name = f"{side}_thumb_proximal_pitch_joint"
-    lo, hi = _THUMB_PITCH_LIMIT
-    out[pitch_name] = _span_target(lo, hi, _CLOSE_FRACTION["thumb_pitch"] * curls["thumb"])
+    out[pitch_name] = _target(_THUMB_PITCH_LIMIT, _CLOSE_FRACTION["thumb_pitch"] * curls["thumb"])
 
     for _, robot_digit in _DIGIT_STEMS:
         joint_name = f"{side}_{robot_digit}_proximal_joint"
-        lo, hi = _DIGIT_PROXIMAL_LIMIT
         frac = _CLOSE_FRACTION[robot_digit] * curls[robot_digit]
-        out[joint_name] = _span_target(lo, hi, frac)
+        out[joint_name] = _target(_DIGIT_PROXIMAL_LIMIT, frac)
 
     return out, curls
 
@@ -345,6 +373,10 @@ class SberchelRetargeter(GR1T2Retargeter):
         self._prev_left_curls: dict[str, float] | None = None
         self._prev_right_curls: dict[str, float] | None = None
         self._last_opposition_signed: dict[str, float] = {"left": 0.0, "right": 0.0}
+        # Extra closure commanded past the human's curl, driven live by the
+        # operator (gamepad L2 / keyboard G). See ``_squeeze_fraction``.
+        self._squeeze_scale = float(getattr(cfg, "squeeze_scale", 1.0))
+        self._squeeze: float = 0.0
 
         if self._enable_visualization:
             import isaaclab.sim as sim_utils
@@ -370,6 +402,14 @@ class SberchelRetargeter(GR1T2Retargeter):
     def recalibrate_wrists(self) -> None:
         return
 
+    def set_squeeze(self, value: float) -> None:
+        """Set the grasp squeeze command (0 = follow XR hand exactly, 1 = full close)."""
+        self._squeeze = float(np.clip(value * self._squeeze_scale, 0.0, 1.0))
+
+    @property
+    def squeeze(self) -> float:
+        return self._squeeze
+
     def retarget(self, data: dict) -> torch.Tensor:
         left_hand_poses = data[DeviceBase.TrackingTarget.HAND_LEFT]
         right_hand_poses = data[DeviceBase.TrackingTarget.HAND_RIGHT]
@@ -384,10 +424,10 @@ class SberchelRetargeter(GR1T2Retargeter):
             self._markers.visualize(translations=torch.tensor(joints_position, device=self._sim_device))
 
         left_raw, left_curls = _retarget_one_hand_joints(
-            left_hand_poses, "left", self._prev_left_fingers, self._prev_left_curls
+            left_hand_poses, "left", self._prev_left_fingers, self._prev_left_curls, self._squeeze
         )
         right_raw, right_curls = _retarget_one_hand_joints(
-            right_hand_poses, "right", self._prev_right_fingers, self._prev_right_curls
+            right_hand_poses, "right", self._prev_right_fingers, self._prev_right_curls, self._squeeze
         )
         left_targets = _blend_targets(self._prev_left_fingers, left_raw, _FINGER_BLEND)
         right_targets = _blend_targets(self._prev_right_fingers, right_raw, _FINGER_BLEND)
@@ -434,4 +474,7 @@ class SberchelRetargeterCfg(GR1T2RetargeterCfg):
     dex_cache_dir: str = ""
     left_idle_wrist_pose: tuple[float, ...] = (0.0,) * 7
     right_idle_wrist_pose: tuple[float, ...] = (0.0,) * 7
+    # Multiplier on the operator's squeeze input before it is clamped to 0..1.
+    # >1 reaches full closure at partial trigger travel.
+    squeeze_scale: float = 1.0
     retargeter_type: type = SberchelRetargeter

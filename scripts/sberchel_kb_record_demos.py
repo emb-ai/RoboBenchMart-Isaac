@@ -187,6 +187,50 @@ parser.add_argument(
     help="Print every gamepad button/axis event (to verify the button mapping).",
 )
 parser.add_argument(
+    "--legacy_stiff_teleop",
+    action="store_true",
+    default=False,
+    help=(
+        "Restore the old two-regime behaviour: stiff XR PD (arms 3000, fingers 400) "
+        "in static teleop, green_challenge gains while walking. Easier to teleop but "
+        "the demos are recorded on a plant green_challenge does not have (its arms run "
+        "at 42/28), so they are NOT valid training data for their VLA. Use only to A/B "
+        "the feel against the default single-regime run."
+    ),
+)
+parser.add_argument(
+    "--squeeze_scale",
+    type=float,
+    default=1.0,
+    help=(
+        "Multiplier on the operator squeeze input (gamepad L2 / keyboard G) before it "
+        "is clamped to 0..1. Squeeze commands finger closure past where your own hand "
+        "stopped, which is what generates grip force on a position-controlled hand. "
+        "Raise above 1.0 to reach full closure at partial trigger travel."
+    ),
+)
+parser.add_argument(
+    "--grip_report_every_n",
+    type=int,
+    default=0,
+    help=(
+        "Print a per-hand grip readout (commanded vs achieved finger angle, error, "
+        "estimated torque vs the 8.5 Nm effort limit) every N steps. 0 disables. "
+        "Use this to confirm grasps actually generate force instead of assuming it."
+    ),
+)
+parser.add_argument(
+    "--keep_stiff_neck",
+    action="store_true",
+    default=False,
+    help=(
+        "Keep the stiff XR neck PD (200/20) instead of green_challenge's 28/1.4. "
+        "Headset look feels snappier but diverges from their config -- the neck sits "
+        "in their torso_joint_pos group and aims the head camera, so it changes the "
+        "recorded images."
+    ),
+)
+parser.add_argument(
     "--video",
     action="store_true",
     default=False,
@@ -235,7 +279,11 @@ from isaaclab_tasks.utils import parse_env_cfg
 
 import dsynth_isaac.tasks.manager_based  # noqa: F401
 
-from dsynth_isaac.recorders import SberchelXRRecorderManagerCfg, stash_locomotion_command
+from dsynth_isaac.recorders import (
+    SberchelXRRecorderManagerCfg,
+    stash_locomotion_command,
+    stash_teleop_state,
+)
 
 from dsynth_isaac.teleop.sberchel_head_follow import (
     FrozenUpperSnapshot,
@@ -255,6 +303,7 @@ from dsynth_isaac.teleop.xr_anchor import XrAnchorTeleporter
 from dsynth_isaac.robots.sberchel_cfg import (
     apply_sberchel_loco_upper_pd_gains,
     apply_sberchel_xr_teleop_pd_gains,
+    sberchel_upper_pd_gain_table,
 )
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
@@ -275,6 +324,7 @@ _HELP_KEYBOARD = """
   Q strafe L   E strafe R    (release = stop legs in loco mode)
   C  toggle locomotion (WASD + Pink hold-off) / static teleop
      (static: XR hands + headset neck; Pink IK on, slower)
+  G  hold to squeeze (close fingers past your hand -> real grip force)
   T  teleport XR view onto the robot (same offset as at episode start)
   R  save episode + reset (HDF5; viewport MP4 if --video)
   X  discard episode + reset (no HDF5 / no MP4 write)
@@ -292,6 +342,7 @@ _HELP_GAMEPAD = """
   Left stick        analog fwd/back + strafe   (--gamepad_no_sticks to disable)
   Right stick X     analog turn
   Create   toggle locomotion / static teleop   (= C)
+  L2       analog grasp squeeze (0..1)         (= G)
   R2       teleport XR view onto the robot     (= T)
   Cross X  save episode + reset                (= R)
   Circle   discard episode + reset             (= X key)
@@ -319,18 +370,48 @@ class PinkJointHold:
         self._orig_apply = self._term.apply_actions
         self._targets: torch.Tensor | None = None
         self._active = False
+        self._targets_valid = False
+
+    def invalidate(self) -> None:
+        """Mark commanded targets as stale — call right after ``env.reset()``.
+
+        ``joint_pos_target`` is allocated as zeros and is *not* restored to the
+        default pose on reset (``articulation.py:1641``), so after a reset it
+        still holds the previous episode's commands while the robot has been
+        teleported back to its init pose.
+        """
+        self._targets_valid = False
+
+    def mark_stepped(self) -> None:
+        """Commanded targets are meaningful once a step has written them."""
+        self._targets_valid = True
+
+    def _capture(self, robot) -> torch.Tensor:
+        """Snapshot the *commanded* joint targets, not the measured pose.
+
+        This distinction is the whole grasp. A hand squeezing an object sits at a
+        measured angle the object allows, while the command sits deeper; the
+        difference is exactly what the PD converts into grip force. Capturing
+        ``joint_pos`` would set target := measured, zeroing that error and
+        dropping whatever is being held the instant the hold engages.
+
+        Before the first step of an episode there is no meaningful command yet,
+        so fall back to the measured pose — otherwise the arms would be driven to
+        the zero-initialised target and snap out of their init pose.
+        """
+        ids = self._term._controlled_joint_ids
+        source = robot.data.joint_pos_target if self._targets_valid else robot.data.joint_pos
+        return source[:, ids].detach().clone()
 
     def enable(self, robot) -> None:
-        ids = self._term._controlled_joint_ids
-        self._targets = robot.data.joint_pos[:, ids].detach().clone()
+        self._targets = self._capture(robot)
         if not self._active:
             self._term.apply_actions = self._apply_hold  # type: ignore[method-assign]
             self._active = True
 
     def refresh(self, robot) -> None:
-        """Re-capture hold pose (call after reset / mode entry)."""
-        ids = self._term._controlled_joint_ids
-        self._targets = robot.data.joint_pos[:, ids].detach().clone()
+        """Re-capture hold targets (call after reset / mode entry)."""
+        self._targets = self._capture(robot)
 
     def disable(self) -> None:
         if self._active:
@@ -342,6 +423,19 @@ class PinkJointHold:
             self._orig_apply()
             return
         self._term._asset.set_joint_position_target(self._targets, self._term._controlled_joint_ids)
+        # Keep ``processed_actions`` in step with what we actually applied.
+        # Bypassing apply_actions also bypasses the assignment inside it, so
+        # IsaacLab's PostStepProcessedActionsRecorder would otherwise log a stale
+        # vector from the last real IK solve for the whole locomotion segment --
+        # i.e. the dataset would disagree with the simulator.
+        processed = self._term._processed_actions
+        if processed.shape != self._targets.shape:
+            raise RuntimeError(
+                "PinkJointHold: processed_actions shape "
+                f"{tuple(processed.shape)} != held targets {tuple(self._targets.shape)}; "
+                "the upper_body_ik action layout changed and the hold would record garbage."
+            )
+        processed[:] = self._targets
 
 
 def set_render_interval(env, interval: int) -> None:
@@ -384,6 +478,7 @@ class _X11KeyPoller:
         "R": 0x0072,
         "X": 0x0078,
         "T": 0x0074,
+        "G": 0x0067,
     }
 
     def __init__(self) -> None:
@@ -530,6 +625,10 @@ class RecordKeyboard:
             self._on_teleport_view()
         self._edge_prev = edge_now
 
+    def squeeze(self) -> float:
+        """Hold G for full grasp squeeze (keyboard has no analog axis)."""
+        return 1.0 if "G" in self._pressed_now() else 0.0
+
     def command(self) -> tuple[float, float, float]:
         """Return (lin_vel_x, lin_vel_y, ang_vel_z) from held WASDQE keys."""
         p = self._pressed_now()
@@ -617,10 +716,12 @@ def reset_teleop_state(
 ) -> tuple[FrozenUpperSnapshot | None, torch.Tensor | None, torch.Tensor]:
     """Reset policy and teleop state after env.reset()."""
     net.reset()
-    if loco_mode == "static":
+    # Single regime by default: the plant must not depend on the mode, or the
+    # dataset becomes non-Markovian (same observation, different dynamics).
+    if args_cli.legacy_stiff_teleop and loco_mode == "static":
         apply_sberchel_xr_teleop_pd_gains(robot)
     else:
-        apply_sberchel_loco_upper_pd_gains(robot)
+        apply_sberchel_loco_upper_pd_gains(robot, include_neck=not args_cli.keep_stiff_neck)
     teleop_interface.reset()
     sync_retargeter_idle_from_robot(teleop_interface, robot)
     idle_upper = build_idle_upper_from_robot(robot, env.device)
@@ -655,9 +756,13 @@ def main() -> None:
 
     net = Network(env, type="zest", device="cpu", closed_kinematics=False)
     net.reset()
-    # Start in locomotion mode: soft upper PD (stiff XR gains fight WASD walking).
-    apply_sberchel_loco_upper_pd_gains(base_env.scene["robot"])
     robot = base_env.scene["robot"]
+
+    def apply_native_gains() -> None:
+        """green_challenge's effective PD -- the plant their VLA is evaluated on."""
+        apply_sberchel_loco_upper_pd_gains(robot, include_neck=not args_cli.keep_stiff_neck)
+
+    apply_native_gains()
     pink_hold = PinkJointHold(base_env)
     pink_hold.enable(robot)
     set_render_interval(base_env, args_cli.loco_render_interval)
@@ -671,6 +776,58 @@ def main() -> None:
         f">>> loco fast-path: Pink IK hold-on + render_interval={args_cli.loco_render_interval}",
         flush=True,
     )
+    if args_cli.legacy_stiff_teleop:
+        print(
+            ">>> GAINS: LEGACY two-regime (stiff XR PD in static teleop). "
+            "Demos are NOT valid green_challenge training data -- A/B use only.",
+            flush=True,
+        )
+    else:
+        print(">>> GAINS: single regime, green_challenge-native (arms 42/28)", flush=True)
+    _gain_table = sberchel_upper_pd_gain_table(robot)
+    print(
+        ">>> upper-body PD: "
+        + ", ".join(f"{n}={k:g}/{d:g}" for n, (k, d) in sorted(_gain_table.items())),
+        flush=True,
+    )
+
+    # --- dataset provenance ---------------------------------------------------
+    # Record the joint ordering and the plant the demos were produced on. Every
+    # joint-space consumer (green_challenge's VLA groups in particular) needs the
+    # name order to slice these vectors correctly, and `find_joints` does NOT
+    # preserve the order given in the cfg -- so it must be read at runtime rather
+    # than assumed. Without this a converter is guessing, and a wrong guess is
+    # silent: our 12 finger values and theirs are both length 12 but ordered
+    # differently, so thumb commands would quietly land on the pinky.
+    def _write_dataset_provenance() -> None:
+        handler = getattr(base_env.recorder_manager, "_dataset_file_handler", None)
+        if handler is None or not hasattr(handler, "add_env_args"):
+            print("[provenance] no dataset file handler; joint order NOT recorded", flush=True)
+            return
+        upper_term = base_env.action_manager.get_term("upper_body_ik")
+        try:
+            handler.add_env_args(
+                {
+                    "sberchel_joint_names": list(robot.data.joint_names),
+                    "sberchel_upper_controlled_joint_names": list(
+                        upper_term._controlled_joint_names
+                    ),
+                    "sberchel_hand_joint_names": list(upper_term._hand_joint_names),
+                    "sberchel_upper_pd_gains": {n: list(v) for n, v in _gain_table.items()},
+                    "sberchel_legacy_stiff_teleop": bool(args_cli.legacy_stiff_teleop),
+                    "sberchel_squeeze_scale": float(args_cli.squeeze_scale),
+                    "sberchel_gravity_compensation": bool(
+                        getattr(upper_term.cfg, "enable_gravity_compensation", False)
+                    ),
+                    "sberchel_action_layout": "legs(12) + neck(2) + upper_body_ik(26)",
+                    "sberchel_teleop_state_layout": "is_locomotion, squeeze, legacy_gains",
+                }
+            )
+            print(">>> dataset provenance written (joint order + gains)", flush=True)
+        except Exception as exc:  # never lose a recording session over metadata
+            print(f"[provenance] could not write env args: {exc!r}", flush=True)
+
+    _write_dataset_provenance()
 
     should_reset = False
     should_discard_reset = False
@@ -694,7 +851,10 @@ def main() -> None:
         last_neck_targets = (0.0, 0.0)
         if capture_frozen:
             frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
-        apply_sberchel_loco_upper_pd_gains(robot)
+        # Only the legacy path switches plants; by default the gains never move,
+        # so C changes what is being commanded, not what the robot physically is.
+        if args_cli.legacy_stiff_teleop:
+            apply_native_gains()
         pink_hold.enable(robot)
         set_render_interval(base_env, args_cli.loco_render_interval)
 
@@ -706,7 +866,8 @@ def main() -> None:
         frozen_snapshot = None
         last_neck_targets = (0.0, 0.0)
         pink_hold.disable()
-        apply_sberchel_xr_teleop_pd_gains(robot)
+        if args_cli.legacy_stiff_teleop:
+            apply_sberchel_xr_teleop_pd_gains(robot)
         set_render_interval(base_env, 1)
 
     def reset_env() -> None:
@@ -854,6 +1015,92 @@ def main() -> None:
         active = [c.pressed_keys() for c in controllers]
         return " ".join(a for a in active if a != "-") or "-"
 
+    def controller_squeeze() -> float:
+        """Strongest squeeze command across the active input devices."""
+        value = 0.0
+        for controller in controllers:
+            getter = getattr(controller, "squeeze", None)
+            if getter is not None:
+                value = max(value, float(getter()))
+        return value
+
+    _squeeze_sinks = [
+        r for r in getattr(teleop_interface, "_retargeters", []) if hasattr(r, "set_squeeze")
+    ]
+    for _sink in _squeeze_sinks:
+        _sink._squeeze_scale = float(args_cli.squeeze_scale)
+    if not _squeeze_sinks:
+        print(
+            "[squeeze] no retargeter accepts a squeeze command — grip force will come "
+            "only from your own hand curl, which is usually too shallow to hold anything.",
+            flush=True,
+        )
+
+    def push_squeeze(value: float) -> None:
+        for retargeter in _squeeze_sinks:
+            retargeter.set_squeeze(value)
+
+    # --- grip instrumentation -------------------------------------------------
+    # Grip force on a position-controlled hand is clip(k_p*err - k_d*qdot, +-limit)
+    # where err = commanded - achieved. Reporting it turns "does the grasp hold?"
+    # into a measurement during the session instead of a guess afterwards.
+    _FINGER_EFFORT_LIMIT = 8.5  # N.m, per green_challenge's actuator config
+    _upper_term = base_env.action_manager.get_term("upper_body_ik")
+    _finger_ids = list(_upper_term._hand_joint_ids)
+    _finger_names = list(_upper_term._hand_joint_names)
+    _finger_gains: list[tuple[float, float]] = []
+    _xr_actuator = robot.actuators.get("xr_upper")
+    for _name in _finger_names:
+        if _xr_actuator is not None and _name in _xr_actuator.joint_names:
+            _li = list(_xr_actuator.joint_names).index(_name)
+            _finger_gains.append(
+                (
+                    float(_xr_actuator.stiffness[0, _li].item()),
+                    float(_xr_actuator.damping[0, _li].item()),
+                )
+            )
+        else:
+            _finger_gains.append((0.0, 0.0))
+
+    def grip_report() -> str:
+        """Per-hand peak *closing* torque, and how many digits are saturated.
+
+        Only positive error (commanded closed of achieved) counts. All finger
+        joints run 0/open -> positive/closed, so a negative error means the hand
+        is being driven open, which is not grip. That distinction matters here:
+        the open-hand command sits at the joint's lower limit while the thumb
+        physically rests above it, so an idle hand shows a permanent -8.5 Nm
+        opening torque that would otherwise mask every real grasp.
+        """
+        target = robot.data.joint_pos_target[0, _finger_ids]
+        actual = robot.data.joint_pos[0, _finger_ids]
+        vel = robot.data.joint_vel[0, _finger_ids]
+        lines = []
+        for side in ("left", "right"):
+            peak_tau = 0.0
+            peak_name = ""
+            peak_err = 0.0
+            saturated = 0
+            count = 0
+            for idx, name in enumerate(_finger_names):
+                if not name.startswith(side):
+                    continue
+                count += 1
+                k_p, k_d = _finger_gains[idx]
+                err = float(target[idx].item() - actual[idx].item())
+                if err <= 0.0:  # opening, not gripping
+                    continue
+                tau = min(_FINGER_EFFORT_LIMIT, k_p * err - k_d * float(vel[idx].item()))
+                if tau >= _FINGER_EFFORT_LIMIT - 1e-3:
+                    saturated += 1
+                if tau > peak_tau:
+                    peak_tau, peak_err, peak_name = tau, err, name.replace(f"{side}_", "")
+            lines.append(
+                f"{side[0].upper()}: grip {peak_tau:+.2f}Nm on {peak_name or '-'} "
+                f"(err {peak_err:+.3f} rad) sat {saturated}/{count}"
+            )
+        return " | ".join(lines)
+
     if args_cli.xr:
         rate_limiter = None
     else:
@@ -885,6 +1132,8 @@ def main() -> None:
                     vx = vy = wz = 0.0
                     upper_body_mode: UpperBodyMode | None = None
                     neck_yaw_cmd, neck_pitch_cmd = 0.0, 0.0
+                    squeeze_cmd = controller_squeeze()
+                    push_squeeze(squeeze_cmd)
 
                     if teleoperation_active:
                         if loco_mode == "locomotion":
@@ -953,7 +1202,16 @@ def main() -> None:
                     ).repeat(base_env.num_envs, 1)
                     actions = pack_sberchel_xr_action(legs_tensor, upper_body, neck_tensor)
                     stash_locomotion_command(base_env, vx, vy, wz)
+                    stash_teleop_state(
+                        base_env,
+                        loco_mode=loco_mode,
+                        squeeze=squeeze_cmd,
+                        legacy_gains=args_cli.legacy_stiff_teleop,
+                    )
                     env.step(actions)
+                    # From here on joint_pos_target holds a real command, so the
+                    # Pink hold can capture grasp intent instead of measured pose.
+                    pink_hold.mark_stepped()
 
                     should_print = False
                     if args_cli.print_every_n > 0:
@@ -988,6 +1246,14 @@ def main() -> None:
                                 f"(Pink IK + XR); expected slower than loco.",
                                 flush=True,
                             )
+                    if (
+                        args_cli.grip_report_every_n > 0
+                        and step_count % args_cli.grip_report_every_n == 0
+                    ):
+                        print(
+                            f"[grip {step_count}] squeeze={squeeze_cmd:.2f} {grip_report()}",
+                            flush=True,
+                        )
                 else:
                     base_env.sim.render()
 
@@ -997,6 +1263,9 @@ def main() -> None:
                         base_env.recorder_manager.cfg.export_in_record_pre_reset = False
                         discard_viewport_video_frames(env)
                     env.reset()
+                    # Targets survive reset while the robot is teleported back to
+                    # its init pose, so they no longer describe the robot.
+                    pink_hold.invalidate()
                     if discard:
                         base_env.recorder_manager.cfg.export_in_record_pre_reset = True
                     hold_xy_yaw = None
