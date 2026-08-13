@@ -1,8 +1,16 @@
-"""Sberchel OpenXR retargeter: wrist frame offsets + VRD-style finger curl."""
+"""Sberchel OpenXR retargeters.
+
+Two finger mappings share one wrist-tracking path:
+
+* :class:`SberchelRetargeter` -- VRD-style per-digit curl (default).
+* :class:`SberchelDexRetargeter` -- DexPilot optimizer, matching the approach
+  IsaacLab ships for GR1T2.
+"""
 
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -26,6 +34,14 @@ _RIGHT_WRIST_FRAME_OFFSET_WXYZ = (0.5, 0.5, 0.5, 0.5)
 _DIGIT_PROXIMAL_LIMIT = (0.0, 1.7)
 _THUMB_PITCH_LIMIT = (0.0, 0.5)
 _THUMB_YAW_LIMIT = (-0.1, 1.3)
+
+# The thumb pitch drives two mimic-coupled slaves (intermediate = 1.334x,
+# range 0..0.8; distal = 0.898x, range 0..0.4). The distal slave hits its
+# limit at 0.4/0.898 = 0.445 rad of master travel, so pitch commands beyond
+# that are unreachable: they just park the joint against the 8.5 Nm effort
+# limit (observed live as a permanent saturated 0.4+ rad error). Cap just
+# below the blocking point.
+_THUMB_PITCH_MAX_REACHABLE = 0.44
 
 # VisionRobotDemo ARKitTrackingManager.swift
 _DIGIT_CURL_NORMALIZER = 2.6
@@ -312,20 +328,37 @@ def _retarget_one_hand_joints(
 
     # Nothing downstream clamps finger targets (the Pink action term passes hand
     # joints straight to set_joint_position_target), so clamp here.
-    def _target(limit: tuple[float, float], frac: float) -> float:
+    def _target(
+        limit: tuple[float, float],
+        frac: float,
+        squeeze_amount: float,
+        cap: float | None = None,
+    ) -> float:
         lo, hi = limit
-        return float(np.clip(_span_target(lo, hi, _squeeze_fraction(frac, squeeze)), lo, hi))
+        if cap is not None:
+            hi = min(hi, cap)
+        return float(np.clip(_span_target(*limit, _squeeze_fraction(frac, squeeze_amount)), lo, hi))
 
+    # Thumb yaw is opposition, not curl: deepening it under squeeze sweeps the
+    # thumb across an already-closed fist and jams it against the fingers, so
+    # squeeze is NOT applied there. Pitch is capped at the mimic-reachable max.
     yaw_name = f"{side}_thumb_proximal_yaw_joint"
-    out[yaw_name] = _target(_THUMB_YAW_LIMIT, _CLOSE_FRACTION["thumb_yaw"] * curls["opposition"])
+    out[yaw_name] = _target(
+        _THUMB_YAW_LIMIT, _CLOSE_FRACTION["thumb_yaw"] * curls["opposition"], 0.0
+    )
 
     pitch_name = f"{side}_thumb_proximal_pitch_joint"
-    out[pitch_name] = _target(_THUMB_PITCH_LIMIT, _CLOSE_FRACTION["thumb_pitch"] * curls["thumb"])
+    out[pitch_name] = _target(
+        _THUMB_PITCH_LIMIT,
+        _CLOSE_FRACTION["thumb_pitch"] * curls["thumb"],
+        squeeze,
+        cap=_THUMB_PITCH_MAX_REACHABLE,
+    )
 
     for _, robot_digit in _DIGIT_STEMS:
         joint_name = f"{side}_{robot_digit}_proximal_joint"
         frac = _CLOSE_FRACTION[robot_digit] * curls[robot_digit]
-        out[joint_name] = _target(_DIGIT_PROXIMAL_LIMIT, frac)
+        out[joint_name] = _target(_DIGIT_PROXIMAL_LIMIT, frac, squeeze)
 
     return out, curls
 
@@ -410,19 +443,15 @@ class SberchelRetargeter(GR1T2Retargeter):
     def squeeze(self) -> float:
         return self._squeeze
 
-    def retarget(self, data: dict) -> torch.Tensor:
-        left_hand_poses = data[DeviceBase.TrackingTarget.HAND_LEFT]
-        right_hand_poses = data[DeviceBase.TrackingTarget.HAND_RIGHT]
+    def _compute_finger_targets(
+        self, left_hand_poses: dict, right_hand_poses: dict
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        """VRD curl mapping: OpenXR bone flexion -> proximal joint targets.
 
-        left_wrist = left_hand_poses.get("wrist")
-        right_wrist = right_hand_poses.get("wrist")
-
-        if self._enable_visualization:
-            joints_position = np.zeros((self._num_open_xr_hand_joints, 3))
-            joints_position[::2] = np.array([pose[:3] for pose in left_hand_poses.values()])
-            joints_position[1::2] = np.array([pose[:3] for pose in right_hand_poses.values()])
-            self._markers.visualize(translations=torch.tensor(joints_position, device=self._sim_device))
-
+        Overridden by :class:`SberchelDexRetargeter` to use the DexPilot
+        optimizer instead. Everything else in ``retarget`` -- wrist poses,
+        packing order, logging -- is shared.
+        """
         left_raw, left_curls = _retarget_one_hand_joints(
             left_hand_poses, "left", self._prev_left_fingers, self._prev_left_curls, self._squeeze
         )
@@ -439,6 +468,22 @@ class SberchelRetargeter(GR1T2Retargeter):
             "left": float(left_curls.get("opposition_signed", 0.0)),
             "right": float(right_curls.get("opposition_signed", 0.0)),
         }
+        return left_targets, right_targets
+
+    def retarget(self, data: dict) -> torch.Tensor:
+        left_hand_poses = data[DeviceBase.TrackingTarget.HAND_LEFT]
+        right_hand_poses = data[DeviceBase.TrackingTarget.HAND_RIGHT]
+
+        left_wrist = left_hand_poses.get("wrist")
+        right_wrist = right_hand_poses.get("wrist")
+
+        if self._enable_visualization:
+            joints_position = np.zeros((self._num_open_xr_hand_joints, 3))
+            joints_position[::2] = np.array([pose[:3] for pose in left_hand_poses.values()])
+            joints_position[1::2] = np.array([pose[:3] for pose in right_hand_poses.values()])
+            self._markers.visualize(translations=torch.tensor(joints_position, device=self._sim_device))
+
+        left_targets, right_targets = self._compute_finger_targets(left_hand_poses, right_hand_poses)
 
         retargeted_hand_joints = _pack_hand_joint_targets(
             self._hand_joint_names, left_targets, right_targets
@@ -446,11 +491,9 @@ class SberchelRetargeter(GR1T2Retargeter):
         if not hasattr(self, "_finger_log_counter"):
             self._finger_log_counter = 0
         self._finger_log_counter += 1
-        if self._finger_log_counter <= 3 or self._finger_log_counter % 120 == 0:
+        if self._finger_log_counter <= 3 or self._finger_log_counter % 600 == 0:
             msg = (
-                f"[SberchelRetargeter] curls L={left_curls} R={right_curls} "
-                f"signed L={self._last_opposition_signed['left']:.3f} "
-                f"R={self._last_opposition_signed['right']:.3f} "
+                f"[{type(self).__name__}] squeeze={self._squeeze:.2f} "
                 f"packed={np.array2string(retargeted_hand_joints, precision=2)}"
             )
             print(msg, flush=True)
@@ -466,6 +509,367 @@ class SberchelRetargeter(GR1T2Retargeter):
         return torch.cat([left_wrist_tensor, right_wrist_tensor, hand_joints_tensor])
 
 
+# --- DexPilot input conversion ----------------------------------------------
+# OpenXR reports 26 hand joints; dex-retargeting expects the 21-joint MANO
+# layout. These mirror IsaacLab's GR1T2 helper
+# (gr1_t2_dex_retargeting_utils.py) so our input matches what the shipped
+# configs were tuned against.
+_DEX_HAND_JOINTS_INDEX = [1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 13, 14, 15, 17, 18, 19, 20, 22, 23, 24, 25]
+# Operator hand frame -> robot hand frame. This is ROBOT-SPECIFIC: it must align
+# the operator's fingertip directions with the robot's own, so GR1's matrix is
+# wrong here (Sberchel's hand_base_link needs a 120 deg offset from the OpenXR
+# wrist where GR1's does not).
+#
+# RIGHT: measured against the *extended* hand model (full finger chains, built by
+# scripts/sberchel_build_dex_hand_urdf.py), Kabsch-fitted over 6 open-hand and 3
+# fist captures -- averaged within each pose group, then fitted jointly so one
+# rotation has to serve both. Residual: 3.1 deg open / 3.8 deg fist.
+#
+# Two earlier attempts, both worse for instructive reasons:
+#   * Open pose only, against the 1-DOF stub: 3.8 deg open but 32.7 deg fist, and
+#     the fingers moved OPPOSITE to the operator's. Aligning one pose does not
+#     constrain the direction of travel.
+#   * One open + one fist capture, extended model: 8.2 / 14.0 deg. A single frame
+#     of hand tracking is noisy enough to dominate the fit; averaging several
+#     captures per pose cut the error by ~4x. Do not fit from one frame.
+#
+# LEFT: measured via mirror symmetry rather than direct capture. OpenXR's hands
+# are mirror images in the operator frame (x flip -- confirmed by comparing
+# left/right captures of similar poses) and the robot's hands are mirrored in the
+# MJCF (z flip), so the right-hand captures, x-flipped, were Kabsch-fitted onto
+# the LEFT model's open/fist directions: 2.5 deg open / 5.3 deg fist residual,
+# and the result agrees with the analytic prediction
+# diag(-1,1,1) @ R_right @ diag(1,1,-1) to 3.4 deg -- two independent routes to
+# the same rotation. If the left hand still misbehaves, capture left open+fist
+# TIPFIT lines and fit it directly with scripts/sberchel_fit_dex_frame.py.
+_OPERATOR2MANO = {
+    "left": np.array(
+        [
+            [-0.162853, +0.274354, +0.947739],
+            [+0.985250, +0.096384, +0.141397],
+            [-0.052554, +0.956786, -0.286004],
+        ]
+    ),
+    "right": np.array(
+        [
+            [+0.214515, -0.295084, +0.931079],
+            [+0.974730, +0.125511, -0.184794],
+            [-0.062331, +0.947192, +0.314552],
+        ]
+    ),
+}
+
+
+def _dex_operator_frame_landmarks(hand_poses: dict[str, np.ndarray]) -> np.ndarray:
+    """OpenXR hand poses -> (21, 3) MANO-ordered points in the *operator* frame.
+
+    Wrist-relative and de-rotated by the wrist orientation, but NOT yet mapped
+    into the robot's canonical frame. Split out from
+    :func:`_dex_convert_hand_joints` so the operator->robot rotation can be
+    *measured* rather than assumed -- see ``scripts/sberchel_fit_dex_frame.py``.
+    """
+    from scipy.spatial.transform import Rotation
+
+    joint_position = np.zeros((21, 3))
+    joints = list(hand_poses.values())
+    for i, src in enumerate(_DEX_HAND_JOINTS_INDEX):
+        joint_position[i] = joints[src][:3]
+    joint_position = joint_position - joint_position[0:1, :]
+    wxyz = hand_poses["wrist"][3:]
+    # OpenXR quaternions are wxyz; scipy wants xyzw.
+    wrist_rot = Rotation.from_quat([wxyz[1], wxyz[2], wxyz[3], wxyz[0]]).as_matrix()
+    return joint_position @ wrist_rot
+
+
+def _dex_convert_hand_joints(hand_poses: dict[str, np.ndarray], operator2mano: np.ndarray) -> np.ndarray:
+    """OpenXR hand poses -> (21, 3) MANO joint positions in the canonical frame."""
+    return _dex_operator_frame_landmarks(hand_poses) @ operator2mano
+
+
+def _dex_compute_ref_value(joint_position: np.ndarray, indices: np.ndarray, retargeting_type: str) -> np.ndarray:
+    """Reference value for the optimizer: tip positions, or inter-tip vectors."""
+    if retargeting_type == "POSITION":
+        return joint_position[indices, :]
+    return joint_position[indices[1, :], :] - joint_position[indices[0, :], :]
+
+
+class SberchelDexRetargeter(SberchelRetargeter):
+    """Same wrist tracking, but fingers come from the DexPilot optimizer.
+
+    Where the VRD mapping converts each digit's measured flexion into a joint
+    angle independently, DexPilot solves for joint angles that reproduce the
+    *inter-fingertip vectors* of the operator's hand -- notably thumb-to-finger
+    distances, which is what makes a pinch a pinch. That is the argument for it
+    on precision grasps.
+
+    STATUS: does not track a real hand yet. Keep using the VRD mapping for data
+    collection. Root cause NOT yet established -- below is what has been ruled in
+    and out, measured live in XR on 2026-08-13.
+
+    Ruled OUT -- input conversion. The debug dump shows 26 keys in the expected
+    OpenXR order (palm, wrist, thumb_metacarpal, ...) and human wrist-to-tip
+    distances that are anatomically sane and respond correctly to hand motion:
+    an open hand reads thumb 14 / index 18 / middle 18 / ring 17 / pinky 15 cm, a
+    closed fist reads index 9.9 / middle 6.8 / ring 6.2. The landmarks reaching
+    the optimizer are a real hand, correctly ordered and scaled.
+
+    Ruled OUT -- fingertip workspace. An earlier theory held that the robot's
+    4 cm of fingertip travel (18.0 -> 14.1 cm) could not cover a human's ~11 cm,
+    so the solver saturated. The data contradicts it: an OPEN hand at 17.7 cm --
+    comfortably inside the robot's reachable band -- still returns q = 1.70
+    (fully closed) on all four digits. And one frame with near-identical input
+    (index 17.1, middle 18.5) returned a correct open pose (middle 0.42, pinky
+    0.05, ring 0.35). Reachable targets *can* produce open poses, so the
+    workspace ceiling is not the binding constraint.
+
+    PRIME SUSPECT -- the canonical frame transform. ``_OPERATOR2MANO`` was copied
+    verbatim from IsaacLab's GR1T2 helper, but that matrix aligns the operator's
+    hand to a *specific robot's* hand frame, so it is robot-specific. Sberchel's
+    ``hand_base_link`` is plainly not GR1's: our own wrist path applies a 120 deg
+    ``(0.5, 0.5, 0.5, 0.5)`` offset to reach it. Consistent with this, the output
+    depends on hand *orientation* rather than curl alone and flips between full
+    closure and a sensible pose -- the signature of landmarks rotated into a frame
+    the solver does not expect.
+
+    To settle it: dump the five fingertip unit vectors for a known open hand and
+    Kabsch-fit the rotation onto the robot's own open-hand tip directions. That
+    yields the matrix directly instead of guessing.
+
+    Two integration details matter:
+
+    * ``dof_joint_names`` from the optimizer is NOT our ``hand_joint_names``
+      order (it comes out as index/middle/pinky/ring/thumb_yaw/thumb_pitch), so
+      results are mapped back by name, never by position.
+    * The DexPilot config carries its own ``low_pass_alpha``, so this path does
+      not additionally apply ``_FINGER_BLEND``. Stacking both filters would
+      double the lag for no benefit.
+
+    Validate the hand geometry with ``scripts/sberchel_check_dex_retargeting.py``
+    -- a wrong thumb frame silently produces a hand that cannot oppose.
+    """
+
+    def __init__(self, cfg: SberchelDexRetargeterCfg):
+        super().__init__(cfg)
+        import yaml
+        from dex_retargeting.retargeting_config import RetargetingConfig
+
+        from dsynth_isaac.devices.sberchel_hand_urdf import (
+            prepare_sberchel_dex_retargeting_configs,
+        )
+
+        cache = cfg.dex_cache_dir or os.path.join(
+            os.path.expanduser("~"), ".cache", "dsynth_isaac", "sberchel_dex"
+        )
+        left_cfg, right_cfg = prepare_sberchel_dex_retargeting_configs(cache)
+
+        self._dex = {}
+        self._dex_limits: dict[str, tuple[float, float]] = {}
+        for side, path in (("left", left_cfg), ("right", right_cfg)):
+            # Global scaling is forced to 1.0 (or the explicit override): absolute
+            # hand size is handled per digit below, and leaving the YAML's 0.92 on
+            # top of that would shrink every target inside the model's reach.
+            doc = yaml.safe_load(open(path))
+            doc["retargeting"]["scaling_factor"] = float(cfg.dex_scaling_factor or 1.0)
+            with open(path, "w") as fh:
+                yaml.dump(doc, fh)
+            rt = RetargetingConfig.load_from_file(path).build()
+            self._dex[side] = rt
+            for name, (lo, hi) in zip(rt.optimizer.robot.dof_joint_names, rt.optimizer.robot.joint_limits):
+                self._dex_limits[name] = (float(lo), float(hi))
+
+        # Per-digit fingertip scale: model open length / operator open length.
+        # A single global factor cannot reconcile unequal human digits with the
+        # robot's equal-length ones -- calibrated per digit, an open operator
+        # hand lands exactly on the model's open pose. (Reshaping the model
+        # instead was tried and failed: the pinky's target length is shorter
+        # than its joint chain, which collapses the tip onto the intermediate
+        # joint and disconnects that joint from the objective entirely.)
+        self._dex_tip_scale: dict[str, np.ndarray] = {}
+        human_open = np.asarray(cfg.dex_human_open_cm, dtype=float) / 100.0
+        for side, rt in self._dex.items():
+            robot = rt.optimizer.robot
+            lo_q = np.array([l for l, _ in robot.joint_limits])
+            robot.compute_forward_kinematics(lo_q)
+            origin = robot.get_link_pose(robot.get_link_index(f"{side}_hand_base_link"))[:3, 3]
+            model_open = np.array([
+                np.linalg.norm(robot.get_link_pose(
+                    robot.get_link_index(f"{side}_{d}_tip"))[:3, 3] - origin)
+                for d in ("thumb", "index", "middle", "ring", "pinky")
+            ])
+            self._dex_tip_scale[side] = model_open / human_open
+
+        missing = [n for n in self._hand_joint_names if n not in self._dex_limits]
+        if missing:
+            raise RuntimeError(
+                f"DexPilot configs do not cover these hand joints: {missing}. "
+                "Check target_joint_names in dsynth_isaac/assets/sberchel_xr/*.yml."
+            )
+
+        # Commandable joint -> the intermediate joint that is mimic-coupled to it
+        # on the real robot. pinocchio ignores <mimic>, so the optimizer treats
+        # the pair as two free DOFs about parallel axes and only their SUM is
+        # determined -- the split between them is a null direction it may resolve
+        # arbitrarily. Reading the proximal alone therefore samples a free
+        # variable: in one capture three near-identical hand poses gave proximal
+        # 0.49 / 0.48 / 0.15 while the coupled projection gave 0.62 / 0.63 / 0.64.
+        # Thumb yaw has no partner -- it abducts rather than curls.
+        self._dex_coupled: dict[str, str] = {}
+        for side in ("left", "right"):
+            for digit in ("index", "middle", "ring", "pinky"):
+                self._dex_coupled[f"{side}_{digit}_proximal_joint"] = f"{side}_{digit}_intermediate_joint"
+            self._dex_coupled[f"{side}_thumb_proximal_pitch_joint"] = f"{side}_thumb_intermediate_joint"
+        self._dex_coupled = {
+            k: v for k, v in self._dex_coupled.items()
+            if k in self._dex_limits and v in self._dex_limits
+        }
+        scales = " ".join(
+            f"{d}={v:.2f}" for d, v in zip(
+                ("thumb", "index", "middle", "ring", "pinky"), self._dex_tip_scale["right"])
+        )
+        print(
+            f"[SberchelDexRetargeter] ready — DexPilot fingers "
+            f"(global scaling={cfg.dex_scaling_factor or 1.0}, per-digit tip scale "
+            f"{scales}), configs in {cache}",
+            flush=True,
+        )
+
+    def _debug_dump(self, side: str, hand_poses: dict, joint_pos: np.ndarray, q) -> None:
+        """One-shot dump of what the optimizer is actually being asked for.
+
+        Separates the two failure modes that look alike from the outside:
+
+        * **Bad input** -- the converted landmarks do not look like a hand
+          (wrong key order, wrong frame). Wrist-to-tip distances will be
+          nonsense, or the fingers will not lie in a sensible spread.
+        * **Unreachable input** -- the landmarks are a sane human hand but the
+          targets sit outside the robot's fingertip workspace, so the solver
+          saturates. Distances look human (~18 cm) and the robot pins to limits.
+        """
+        names = list(hand_poses.keys())
+        tips = {"thumb": 4, "index": 8, "middle": 12, "ring": 16, "pinky": 20}
+        d = {k: float(np.linalg.norm(joint_pos[i] - joint_pos[0])) * 100 for k, i in tips.items()}
+
+        # Fingertip unit vectors in the OPERATOR frame -- i.e. before the
+        # suspect _OPERATOR2MANO rotation. Feeding these to
+        # scripts/sberchel_fit_dex_frame.py measures the correct
+        # operator->robot rotation instead of guessing at it.
+        op = _dex_operator_frame_landmarks(hand_poses)
+        units = []
+        for i in tips.values():
+            v = op[i] - op[0]
+            n = float(np.linalg.norm(v))
+            units.extend((v / n if n > 1e-9 else v).tolist())
+
+        # Report the COMMANDED angle (after collapsing the mimic-coupled pair),
+        # not the raw solver DOFs. The raw proximal is a null direction of the
+        # QP and swings wildly on a still hand, which reads as a bug that isn't.
+        dof_names = list(self._dex[side].optimizer.robot.dof_joint_names)
+        solved = dict(zip(dof_names, (float(v) for v in q)))
+        cmd = []
+        for n in dof_names:
+            if n not in self._hand_joint_names:
+                continue
+            lo, hi = self._dex_limits[n]
+            frac = self._coupled_fraction(n, solved, lo, hi)
+            label = n.replace(f"{side}_", "").replace("_joint", "").replace("_proximal", "")
+            cmd.append(f"{label[:11]}={lo + frac * (hi - lo):+.2f}")
+
+        print(
+            f"[dex-debug {side}] keys={len(names)} first5={names[:5]}\n"
+            f"    human wrist->tip cm: " + " ".join(f"{k}={v:.1f}" for k, v in d.items()) + "\n"
+            f"    commanded: " + " ".join(cmd) + "\n"
+            f"    raw solver q: " + " ".join(f"{n.split('_')[1][:5]}={v:+.2f}"
+                                             for n, v in zip(dof_names, q)) + "\n"
+            f"    TIPFIT {side} " + " ".join(f"{x:+.5f}" for x in units),
+            flush=True,
+        )
+
+    def _retarget_side(self, side: str, hand_poses: dict | None) -> dict[str, float]:
+        rt = self._dex[side]
+        opt = rt.optimizer
+        if not hand_poses:
+            return {}
+        joint_pos = _dex_convert_hand_joints(hand_poses, _OPERATOR2MANO[side])
+        # Stretch each fingertip to the model's digit length (see __init__);
+        # joint_pos is wrist-relative, so scaling the tip rows is exact.
+        scaled = joint_pos.copy()
+        for slot, factor in zip((4, 8, 12, 16, 20), self._dex_tip_scale[side]):
+            scaled[slot] *= factor
+        ref = _dex_compute_ref_value(
+            scaled,
+            indices=np.asarray(opt.target_link_human_indices),
+            retargeting_type=opt.retargeting_type,
+        )
+        # dex-retargeting uses autograd internally; the teleop loop runs under
+        # torch.inference_mode(), which would otherwise make retarget() throw.
+        with torch.enable_grad(), torch.inference_mode(False):
+            q = rt.retarget(ref)
+
+        self._dex_debug_count = getattr(self, "_dex_debug_count", 0) + 1
+        if self._dex_debug_count <= 4 or self._dex_debug_count % 300 == 0:
+            self._debug_dump(side, hand_poses, joint_pos, q)
+
+        solved = dict(zip(opt.robot.dof_joint_names, (float(v) for v in q)))
+
+        out: dict[str, float] = {}
+        for name in opt.robot.dof_joint_names:
+            if name not in self._hand_joint_names:
+                continue
+            lo, hi = self._dex_limits[name]
+            frac = self._coupled_fraction(name, solved, lo, hi)
+            # Thumb yaw is opposition, not curl -- squeeze-deepening it sweeps
+            # the thumb across an already-closed fist and jams it against the
+            # fingers, so squeeze applies to every digit except it.
+            if not name.endswith("thumb_proximal_yaw_joint"):
+                frac = _squeeze_fraction(frac, self._squeeze)
+            target = lo + frac * (hi - lo)
+            if name.endswith("thumb_proximal_pitch_joint"):
+                target = min(target, _THUMB_PITCH_MAX_REACHABLE)
+            out[name] = float(np.clip(target, lo, hi))
+        return out
+
+    def _coupled_fraction(
+        self, name: str, solved: dict[str, float], lo: float, hi: float
+    ) -> float:
+        """How far closed this digit is, as a fraction, honouring mimic coupling.
+
+        The real finger has one degree of freedom: proximal and intermediate move
+        together, so the physical configurations form a line through joint space
+        from fully open (both at their lower limits) to fully closed (both upper).
+        The optimizer does not know that and returns a point off the line. Project
+        onto it -- a least-squares fit in joint space -- and report where it lands.
+
+        Using the raw proximal instead reads a quantity the solver never pinned
+        down, which is what made the fingers jump between 0.0 and 1.3 while the
+        operator's hand sat still. See ``_dex_coupled``.
+        """
+        partner = self._dex_coupled.get(name)
+        if partner is None:
+            span = hi - lo
+            return float(np.clip((solved[name] - lo) / span, 0.0, 1.0)) if span > 0 else 0.0
+
+        p_lo, p_hi = lo, hi
+        i_lo, i_hi = self._dex_limits[partner]
+        dp, di = p_hi - p_lo, i_hi - i_lo
+        denom = dp * dp + di * di
+        if denom <= 0.0:
+            return 0.0
+        t = ((solved[name] - p_lo) * dp + (solved[partner] - i_lo) * di) / denom
+        return float(np.clip(t, 0.0, 1.0))
+
+    def _compute_finger_targets(
+        self, left_hand_poses: dict, right_hand_poses: dict
+    ) -> tuple[dict[str, float], dict[str, float]]:
+        left = self._retarget_side("left", left_hand_poses)
+        right = self._retarget_side("right", right_hand_poses)
+        # Hold the last solution when tracking drops out, rather than snapping open.
+        if left:
+            self._prev_left_fingers = left
+        if right:
+            self._prev_right_fingers = right
+        return (self._prev_left_fingers or {}), (self._prev_right_fingers or {})
+
+
 @dataclass
 class SberchelRetargeterCfg(GR1T2RetargeterCfg):
     """Sberchel retargeter config."""
@@ -478,3 +882,27 @@ class SberchelRetargeterCfg(GR1T2RetargeterCfg):
     # >1 reaches full closure at partial trigger travel.
     squeeze_scale: float = 1.0
     retargeter_type: type = SberchelRetargeter
+
+
+@dataclass
+class SberchelDexRetargeterCfg(SberchelRetargeterCfg):
+    """Config for the DexPilot finger mapping."""
+
+    # Where the patched hand URDFs / DexPilot YAMLs are staged.
+    dex_cache_dir: str = ""
+    # Human-hand-to-robot-hand size calibration. 0 keeps whatever the YAML says
+    # (0.92). Lower = the robot curls further for the same human pose; this is
+    # per-operator and can only be tuned wearing the headset.
+    dex_scaling_factor: float = 0.0
+    # The operator's open-hand wrist->fingertip distance per digit, in cm,
+    # measured from OpenXR captures. Each fingertip is scaled by
+    # (model open length / this) before solving, which corrects the digit
+    # PROPORTION mismatch that a single global scaling factor cannot: human
+    # digits are unequal (pinky ~18% shorter than middle) while the robot's are
+    # equal, so without this an open pinky target lands well inside the model's
+    # reach and the solver curls it (~0.8 rad on a flat hand). Re-measure for a
+    # different operator by reading "human wrist->tip cm" off the dex-debug log
+    # with a flat open hand.
+    dex_human_open_cm: tuple[float, float, float, float, float] = (
+        15.3, 19.9, 21.0, 19.6, 17.2)  # thumb, index, middle, ring, pinky
+    retargeter_type: type = SberchelDexRetargeter

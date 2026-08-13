@@ -130,6 +130,80 @@ parser.add_argument(
     help="Max angular velocity for static-mode station-keep (rad/s).",
 )
 parser.add_argument(
+    "--station_pos_deadzone",
+    type=float,
+    default=0.06,
+    help=(
+        "XY engage threshold for static-mode station-keep (m). Below it the legs get "
+        "an exact zero command and the robot stands still, like green_challenge's own "
+        "stack during manipulation. Once the base drifts past it, a correction runs "
+        "until the error is back under half this value (hysteresis) -- a single "
+        "threshold parks the base exactly on the boundary and chatters forever."
+    ),
+)
+parser.add_argument(
+    "--station_yaw_deadzone",
+    type=float,
+    default=0.10,
+    help="Yaw engage threshold for static-mode station-keep (rad). See --station_pos_deadzone.",
+)
+parser.add_argument(
+    "--station_min_lin",
+    type=float,
+    default=0.15,
+    help=(
+        "Minimum linear speed while a station-keep correction is engaged (m/s). "
+        "Boundary-sized commands (~0.09 m/s) are below what the zest policy turns "
+        "into actual motion, so without a floor the correction stalls and the error "
+        "never closes."
+    ),
+)
+parser.add_argument(
+    "--station_min_ang",
+    type=float,
+    default=0.3,
+    help="Minimum yaw rate while a station-keep correction is engaged (rad/s).",
+)
+parser.add_argument(
+    "--ik_gain",
+    type=float,
+    default=None,
+    help=(
+        "Override Pink FrameTask gain (fraction of task error corrected per sim step). "
+        "Default: whatever the env cfg ships (0.85). Raise toward 1.0 for snappier "
+        "tracking of the hand markers; lower if the arms feel twitchy."
+    ),
+)
+parser.add_argument(
+    "--ik_lm_damping",
+    type=float,
+    default=None,
+    help=(
+        "Override Pink FrameTask lm_damping. Scales with squared task error, so high "
+        "values brake hardest exactly when the target is far. Default: env cfg (1.0)."
+    ),
+)
+parser.add_argument(
+    "--ik_damping_cost",
+    type=float,
+    default=None,
+    help="Override the Pink DampingTask cost (resists joint motion). Default: env cfg (0.1).",
+)
+parser.add_argument(
+    "--gravity_compensation",
+    action="store_true",
+    default=False,
+    help=(
+        "Feed forward gravity torques on the Pink-controlled joints. With the soft "
+        "green_challenge arm PD (42/28 Nm/rad) gravity droop is a constant offset the "
+        "PD cannot close, so the hands sit below the markers; this removes it without "
+        "touching the gains. NOTE: it is still a plant change (extra effort feedforward) "
+        "-- recorded into dataset provenance as sberchel_gravity_compensation. During "
+        "WASD locomotion the Pink hold bypasses the feedforward update, so the last "
+        "static-mode torques persist on the frozen arms."
+    ),
+)
+parser.add_argument(
     "--print_every_n",
     type=int,
     default=30,
@@ -199,6 +273,19 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--retargeter",
+    type=str,
+    default="vrd",
+    choices=["vrd", "dex"],
+    help=(
+        "Finger mapping. 'vrd' = per-digit curl heuristic (default). 'dex' = DexPilot "
+        "optimizer matching inter-fingertip vectors, as IsaacLab ships for GR1T2; better "
+        "in principle for pinch/precision grasps. Affects only how your hand becomes "
+        "finger commands -- the robot, its gains and the recorded action layout are "
+        "identical either way. Validate first: scripts/sberchel_check_dex_retargeting.py"
+    ),
+)
+parser.add_argument(
     "--squeeze_scale",
     type=float,
     default=1.0,
@@ -207,6 +294,29 @@ parser.add_argument(
         "is clamped to 0..1. Squeeze commands finger closure past where your own hand "
         "stopped, which is what generates grip force on a position-controlled hand. "
         "Raise above 1.0 to reach full closure at partial trigger travel."
+    ),
+)
+parser.add_argument(
+    "--squeeze_binary",
+    action="store_true",
+    default=False,
+    help=(
+        "Make grasp squeeze 0/1 instead of analog: L2 travel is latched through a "
+        "Schmitt trigger (engage above 0.6, release below 0.4 -- hysteresis so a "
+        "half-pulled trigger cannot flutter the grip open mid-carry) into either 0 or "
+        "--squeeze_on_value. Matches green_challenge's own convention (their keyboard/"
+        "socket paths always push finger targets to full closure, never modulate) and "
+        "makes every recorded grasp identical."
+    ),
+)
+parser.add_argument(
+    "--squeeze_on_value",
+    type=float,
+    default=1.0,
+    help=(
+        "Squeeze level commanded while the binary latch is engaged (0..1; applies to "
+        "keyboard G too). Lower toward ~0.6 for gentler contact on small rigid objects. "
+        "Only used with --squeeze_binary; --squeeze_scale still multiplies on top."
     ),
 )
 parser.add_argument(
@@ -295,7 +405,7 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
     headset_to_neck_targets,
     pack_sberchel_xr_action,
     robot_root_state,
-    station_keep_command,
+    StationKeeper,
     sync_retargeter_idle_from_robot,
 )
 from dsynth_isaac.teleop.gamepad import RecordGamepad
@@ -304,6 +414,9 @@ from dsynth_isaac.robots.sberchel_cfg import (
     apply_sberchel_loco_upper_pd_gains,
     apply_sberchel_xr_teleop_pd_gains,
     sberchel_upper_pd_gain_table,
+)
+from dsynth_isaac.tasks.manager_based.sberchel_upperbody_xr_env_cfg import (
+    build_sberchel_teleop_devices,
 )
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
@@ -690,6 +803,39 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
             env_cfg = strip_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
 
+    if args_cli.retargeter != "vrd":
+        # Swap the finger mapping only; the Pink export done in the env cfg's
+        # __post_init__ still stands, so no need to redo it.
+        build_sberchel_teleop_devices(env_cfg, args_cli.retargeter)
+        print(f">>> retargeter: {args_cli.retargeter}", flush=True)
+
+    # Optional Pink IK task overrides for in-headset tuning. These shape only how
+    # commanded joint targets chase the operator's hand -- the demonstrator, not
+    # the plant -- so they never invalidate demos for green_challenge.
+    from pink.tasks import DampingTask as _PinkDampingTask
+    from pink.tasks import FrameTask as _PinkFrameTask
+
+    ik_tasks = env_cfg.actions.upper_body_ik.controller.variable_input_tasks
+    for task in ik_tasks:
+        if isinstance(task, _PinkFrameTask):
+            if args_cli.ik_gain is not None:
+                task.gain = float(args_cli.ik_gain)
+            if args_cli.ik_lm_damping is not None:
+                task.lm_damping = float(args_cli.ik_lm_damping)
+        elif isinstance(task, _PinkDampingTask) and args_cli.ik_damping_cost is not None:
+            task.cost = float(args_cli.ik_damping_cost)
+    _frame_tasks = [t for t in ik_tasks if isinstance(t, _PinkFrameTask)]
+    if _frame_tasks:
+        print(
+            f">>> Pink IK: gain={_frame_tasks[0].gain:g} "
+            f"lm_damping={_frame_tasks[0].lm_damping:g}",
+            flush=True,
+        )
+
+    if args_cli.gravity_compensation:
+        env_cfg.actions.upper_body_ik.enable_gravity_compensation = True
+        print(">>> gravity compensation: ON (recorded in dataset provenance)", flush=True)
+
     env_cfg.recorders = SberchelXRRecorderManagerCfg()
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
@@ -763,6 +909,16 @@ def main() -> None:
         apply_sberchel_loco_upper_pd_gains(robot, include_neck=not args_cli.keep_stiff_neck)
 
     apply_native_gains()
+    station_keeper = StationKeeper(
+        lin_gain=args_cli.station_lin_gain,
+        ang_gain=args_cli.station_ang_gain,
+        max_lin=args_cli.station_max_lin,
+        max_ang=args_cli.station_max_ang,
+        pos_engage=args_cli.station_pos_deadzone,
+        yaw_engage=args_cli.station_yaw_deadzone,
+        min_lin=args_cli.station_min_lin,
+        min_ang=args_cli.station_min_ang,
+    )
     pink_hold = PinkJointHold(base_env)
     pink_hold.enable(robot)
     set_render_interval(base_env, args_cli.loco_render_interval)
@@ -816,9 +972,27 @@ def main() -> None:
                     "sberchel_upper_pd_gains": {n: list(v) for n, v in _gain_table.items()},
                     "sberchel_legacy_stiff_teleop": bool(args_cli.legacy_stiff_teleop),
                     "sberchel_squeeze_scale": float(args_cli.squeeze_scale),
+                    "sberchel_squeeze_binary": bool(args_cli.squeeze_binary),
+                    "sberchel_squeeze_on_value": float(args_cli.squeeze_on_value),
+                    # Which finger mapping produced these demos. Not a plant
+                    # difference (the robot is identical), but it is a
+                    # demonstrator-style difference, so keep episodes separable.
+                    "sberchel_retargeter": str(args_cli.retargeter),
                     "sberchel_gravity_compensation": bool(
                         getattr(upper_term.cfg, "enable_gravity_compensation", False)
                     ),
+                    # Demonstrator-side Pink IK shaping (not a plant difference,
+                    # but affects how closely demos track the operator's hand).
+                    "sberchel_pink_ik_tasks": [
+                        {
+                            "type": type(t).__name__,
+                            "gain": float(t.gain),
+                            "lm_damping": float(t.lm_damping),
+                        }
+                        if hasattr(t, "frame")  # FrameTask and subclasses
+                        else {"type": type(t).__name__, "cost": float(getattr(t, "cost", 0.0) or 0.0)}
+                        for t in upper_term.cfg.controller.variable_input_tasks
+                    ],
                     "sberchel_action_layout": "legs(12) + neck(2) + upper_body_ik(26)",
                     "sberchel_teleop_state_layout": "is_locomotion, squeeze, legacy_gains",
                 }
@@ -862,6 +1036,7 @@ def main() -> None:
         nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
         loco_mode = "static"
         hold_xy_yaw = capture_hold_pose_from_robot(robot)
+        station_keeper.reset()
         sync_retargeter_idle_from_robot(teleop_interface, robot)
         frozen_snapshot = None
         last_neck_targets = (0.0, 0.0)
@@ -1024,6 +1199,24 @@ def main() -> None:
                 value = max(value, float(getter()))
         return value
 
+    # --squeeze_binary: Schmitt-trigger the raw trigger travel into 0 / on_value.
+    # Hysteresis (0.6 up, 0.4 down), not a single threshold: a trigger held near
+    # the switching point would otherwise flutter the grip open mid-carry.
+    _SQUEEZE_ENGAGE = 0.6
+    _SQUEEZE_RELEASE = 0.4
+    _squeeze_latched = False
+
+    def shape_squeeze(raw: float) -> float:
+        nonlocal _squeeze_latched
+        if not args_cli.squeeze_binary:
+            return raw
+        if _squeeze_latched:
+            if raw < _SQUEEZE_RELEASE:
+                _squeeze_latched = False
+        elif raw > _SQUEEZE_ENGAGE:
+            _squeeze_latched = True
+        return float(args_cli.squeeze_on_value) if _squeeze_latched else 0.0
+
     _squeeze_sinks = [
         r for r in getattr(teleop_interface, "_retargeters", []) if hasattr(r, "set_squeeze")
     ]
@@ -1132,7 +1325,7 @@ def main() -> None:
                     vx = vy = wz = 0.0
                     upper_body_mode: UpperBodyMode | None = None
                     neck_yaw_cmd, neck_pitch_cmd = 0.0, 0.0
-                    squeeze_cmd = controller_squeeze()
+                    squeeze_cmd = shape_squeeze(controller_squeeze())
                     push_squeeze(squeeze_cmd)
 
                     if teleoperation_active:
@@ -1151,16 +1344,7 @@ def main() -> None:
                             raw = teleop_interface._get_raw_data()
                             if hold_xy_yaw is None:
                                 hold_xy_yaw = capture_hold_pose_from_robot(robot)
-                            vx, vy, wz = station_keep_command(
-                                robot,
-                                hold_xy_yaw,
-                                lin_gain=args_cli.station_lin_gain,
-                                ang_gain=args_cli.station_ang_gain,
-                                max_lin=args_cli.station_max_lin,
-                                max_ang=args_cli.station_max_ang,
-                                pos_deadzone=0.0,
-                                yaw_deadzone=0.0,
-                            )
+                            vx, vy, wz = station_keeper.command(robot, hold_xy_yaw)
                             upper_body = torch.cat(
                                 [r.retarget(raw) for r in teleop_interface._retargeters],
                                 dim=-1,

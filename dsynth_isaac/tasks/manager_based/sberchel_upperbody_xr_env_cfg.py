@@ -14,7 +14,10 @@ from isaaclab.devices.openxr import ManusViveCfg, OpenXRDeviceCfg, XrCfg
 from isaaclab.envs.mdp.actions.pink_actions_cfg import PinkInverseKinematicsActionCfg
 from isaaclab.utils import configclass
 
-from dsynth_isaac.devices.sberchel_retargeter import SberchelRetargeterCfg
+from dsynth_isaac.devices.sberchel_retargeter import (
+    SberchelDexRetargeterCfg,
+    SberchelRetargeterCfg,
+)
 from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_UPPERBODY_XR_ROBOT
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
@@ -23,8 +26,16 @@ from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
 )
 
 
-def setup_sberchel_xr_pink_and_teleop(cfg) -> None:
-    """Shared Pink URDF export + OpenXR teleop device wiring."""
+def setup_sberchel_xr_pink_and_teleop(cfg, retargeter: str = "vrd") -> None:
+    """Shared Pink URDF export + OpenXR teleop device wiring.
+
+    ``retargeter`` selects the finger mapping only -- the wrist path, the robot
+    and its gains are identical either way:
+
+    * ``"vrd"``  -- per-digit curl mapping (default).
+    * ``"dex"``  -- DexPilot optimizer, as IsaacLab ships for GR1T2. Validate the
+      hand geometry first with ``scripts/sberchel_check_dex_retargeting.py``.
+    """
     from dsynth_isaac.robots.sberchel_mjcf_usd import (
         prepare_sberchel_pink_ik_urdf,
         resolve_sberchel_spawn_usd_path,
@@ -36,29 +47,36 @@ def setup_sberchel_xr_pink_and_teleop(cfg) -> None:
     cfg.actions.upper_body_ik.controller.urdf_path = pink_urdf_path
     cfg.actions.upper_body_ik.controller.mesh_path = None
 
+    build_sberchel_teleop_devices(cfg, retargeter)
+
+
+def build_sberchel_teleop_devices(cfg, retargeter: str = "vrd") -> None:
+    """(Re)build ``cfg.teleop_devices`` for the chosen finger mapping.
+
+    Split out so a script can swap the retargeter on an already-configured env
+    cfg without repeating the Pink URDF export.
+    """
+    if retargeter not in ("vrd", "dex"):
+        raise ValueError(f"Unknown retargeter {retargeter!r}; expected 'vrd' or 'dex'.")
+    retargeter_cfg_type = SberchelDexRetargeterCfg if retargeter == "dex" else SberchelRetargeterCfg
+
+    def _make():
+        return retargeter_cfg_type(
+            enable_visualization=True,
+            num_open_xr_hand_joints=2 * cfg.NUM_OPENXR_HAND_JOINTS,
+            sim_device=cfg.sim.device,
+            hand_joint_names=cfg.actions.upper_body_ik.hand_joint_names,
+        )
+
     cfg.teleop_devices = DevicesCfg(
         devices={
             "handtracking": OpenXRDeviceCfg(
-                retargeters=[
-                    SberchelRetargeterCfg(
-                        enable_visualization=True,
-                        num_open_xr_hand_joints=2 * cfg.NUM_OPENXR_HAND_JOINTS,
-                        sim_device=cfg.sim.device,
-                        hand_joint_names=cfg.actions.upper_body_ik.hand_joint_names,
-                    ),
-                ],
+                retargeters=[_make()],
                 sim_device=cfg.sim.device,
                 xr_cfg=cfg.xr,
             ),
             "manusvive": ManusViveCfg(
-                retargeters=[
-                    SberchelRetargeterCfg(
-                        enable_visualization=True,
-                        num_open_xr_hand_joints=2 * cfg.NUM_OPENXR_HAND_JOINTS,
-                        sim_device=cfg.sim.device,
-                        hand_joint_names=cfg.actions.upper_body_ik.hand_joint_names,
-                    ),
-                ],
+                retargeters=[_make()],
                 sim_device=cfg.sim.device,
                 xr_cfg=cfg.xr,
             ),
@@ -120,21 +138,29 @@ class UpperbodySberchelXRActionsCfg:
             show_ik_warnings=True,
             fail_on_joint_limit_violation=False,
             variable_input_tasks=[
+                # gain is the fraction of remaining task error corrected per sim
+                # step (dt=1/150 s), lm_damping scales with ||error||^2 and brakes
+                # exactly when the target is far -- i.e. when teleop wants to move.
+                # The old 0.5 / 10.0 made the commanded targets themselves crawl
+                # toward the operator's hand, which read as lag + offset from the
+                # red markers. Joint-velocity limits still bound each step, and
+                # the soft green_challenge arm PD low-passes tracking noise, so a
+                # high gain does not inject jitter into the plant.
                 FrameTask(
                     _LEFT_HAND_BASE_FRAME,
                     position_cost=8.0,
                     orientation_cost=2.0,
-                    lm_damping=10.0,
-                    gain=0.5,
+                    lm_damping=1.0,
+                    gain=0.85,
                 ),
                 FrameTask(
                     _RIGHT_HAND_BASE_FRAME,
                     position_cost=8.0,
                     orientation_cost=2.0,
-                    lm_damping=10.0,
-                    gain=0.5,
+                    lm_damping=1.0,
+                    gain=0.85,
                 ),
-                DampingTask(cost=0.5),
+                DampingTask(cost=0.1),
                 NullSpacePostureTask(
                     cost=0.5,
                     lm_damping=1.0,

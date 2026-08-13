@@ -551,6 +551,106 @@ def station_keep_command(
     return vx, vy, wz
 
 
+class StationKeeper:
+    """Hysteretic station-keep: exact zero command until the base drifts out of
+    the engage radius, then one decisive correction until it is well back
+    inside, then exact zero again.
+
+    Why not a plain deadzone (:func:`station_keep_command`): a single threshold
+    parks the system exactly on the boundary. Corrections only push the error
+    back TO the line, arm-reaction torques push it back out, and the command
+    chatters between zero and ``gain * deadzone`` forever -- observed as yaw
+    pinned at exactly the 0.10 rad edge with wz flapping 0 <-> 0.25 for a whole
+    session. Worse, the boundary-sized command (~0.09 m/s) is below what the
+    zest policy turns into actual base motion, so the error never closes at all.
+
+    Two mechanisms fix both failure modes:
+
+    * **Hysteresis** -- engage past ``pos_engage`` / ``yaw_engage``, release
+      only below ``release_ratio`` times that, so a triggered correction
+      carries the base well inside the quiet zone before shutting off.
+    * **Minimum command** -- while engaged, command at least ``min_lin`` /
+      ``min_ang`` so the correction actually completes instead of stalling
+      at a magnitude the policy ignores.
+
+    The result is the command stream green_challenge's own stack produces
+    during manipulation: zeros almost always, occasionally a short deliberate
+    repositioning burst (their presets are 0.5 m/s / 0.8 rad/s -- never a
+    trickle).
+    """
+
+    def __init__(
+        self,
+        *,
+        lin_gain: float,
+        ang_gain: float,
+        max_lin: float,
+        max_ang: float,
+        pos_engage: float,
+        yaw_engage: float,
+        min_lin: float = 0.15,
+        min_ang: float = 0.3,
+        release_ratio: float = 0.5,
+    ) -> None:
+        self._lin_gain = lin_gain
+        self._ang_gain = ang_gain
+        self._max_lin = max_lin
+        self._max_ang = max_ang
+        self._pos_engage = pos_engage
+        self._yaw_engage = yaw_engage
+        # A floor above the ceiling would command max_* forever; keep sane.
+        self._min_lin = min(min_lin, max_lin)
+        self._min_ang = min(min_ang, max_ang)
+        self._release_ratio = release_ratio
+        self._xy_active = False
+        self._yaw_active = False
+
+    def reset(self) -> None:
+        """Drop back to the quiet state -- call when (re)entering static mode."""
+        self._xy_active = False
+        self._yaw_active = False
+
+    def command(
+        self, robot, hold_xy_yaw: tuple[float, float, float]
+    ) -> tuple[float, float, float]:
+        """Body-frame (vx, vy, wz) toward the hold pose, or exact zeros."""
+        hold_x, hold_y, hold_yaw = hold_xy_yaw
+        cur_x, cur_y = robot.data.root_pos_w[0, :2].detach().cpu().tolist()
+        cur_yaw = yaw_from_quat_wxyz(robot.data.root_quat_w[0])
+
+        err_x = hold_x - cur_x
+        err_y = hold_y - cur_y
+        err_yaw = wrap_angle(hold_yaw - cur_yaw)
+
+        c = math.cos(cur_yaw)
+        s = math.sin(cur_yaw)
+        err_bx = c * err_x + s * err_y
+        err_by = -s * err_x + c * err_y
+        dist = math.hypot(err_bx, err_by)
+
+        if self._xy_active:
+            if dist < self._pos_engage * self._release_ratio:
+                self._xy_active = False
+        elif dist > self._pos_engage:
+            self._xy_active = True
+
+        if self._yaw_active:
+            if abs(err_yaw) < self._yaw_engage * self._release_ratio:
+                self._yaw_active = False
+        elif abs(err_yaw) > self._yaw_engage:
+            self._yaw_active = True
+
+        vx = vy = wz = 0.0
+        if self._xy_active and dist > 1e-9:
+            speed = min(max(self._lin_gain * dist, self._min_lin), self._max_lin)
+            vx = speed * err_bx / dist
+            vy = speed * err_by / dist
+        if self._yaw_active:
+            mag = min(max(self._ang_gain * abs(err_yaw), self._min_ang), self._max_ang)
+            wz = math.copysign(mag, err_yaw)
+        return vx, vy, wz
+
+
 def robot_root_state(robot) -> tuple[tuple[float, float, float], float]:
     """Return ((x, y, z), yaw) of env-0 root in world frame."""
     pos = robot.data.root_pos_w[0, :3].detach().cpu().tolist()
