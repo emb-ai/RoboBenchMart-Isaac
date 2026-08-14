@@ -18,8 +18,8 @@ With ``--video``, also records the viewport (``rgb_array``) via Gymnasium
 ``RecordVideo``; each RESET/R saves an MP4 (discard/X skips the video write).
 
 ``--control_device gamepad`` swaps the keyboard for a PS5 (DualSense) pad read
-from ``/dev/input/js*`` (focus-independent, like the X11 poll): D-pad = WASD,
-L1/R1 = strafe, Create = C, R2 = T, Cross = R, Circle = X, Options = START/STOP.
+from ``/dev/input/js*`` (focus-independent, like the X11 poll): left stick = WASD,
+Create = C, L1 = T, D-pad right = R, D-pad left = X, Options = START/STOP.
 See ``dsynth_isaac/teleop/gamepad.py``.
 
 Usage:
@@ -232,8 +232,8 @@ parser.add_argument(
     choices=["keyboard", "gamepad", "both"],
     help=(
         "Locomotion/episode input: WASD keyboard, PS5 (DualSense) gamepad, or both. "
-        "Gamepad: D-pad = WASD, L1/R1 = strafe, Create = toggle locomotion, "
-        "R2 = teleport, Cross = save+reset, Circle = discard+reset, Options = START/STOP."
+        "Gamepad: left stick = WASD, Create = toggle locomotion, L1 = teleport, "
+        "D-pad right = save+reset, D-pad left = discard+reset, Options = START/STOP."
     ),
 )
 parser.add_argument(
@@ -252,7 +252,8 @@ parser.add_argument(
     "--gamepad_no_sticks",
     action="store_true",
     default=False,
-    help="Ignore the analog sticks; drive locomotion from the D-pad and L1/R1 only.",
+    help="Ignore the analog sticks; drive locomotion from the D-pad (digital WASD) only. "
+    "D-pad left/right then turn instead of discarding/saving episodes.",
 )
 parser.add_argument(
     "--gamepad_debug",
@@ -449,16 +450,14 @@ _HELP_KEYBOARD = """
 
 _HELP_GAMEPAD = """
 ================= PS5 PAD RECORD CONTROLS =================
-  D-pad up/down     forward / backward   (= W/S)
-  D-pad left/right  turn left / right    (= A/D)
-  L1 / R1           strafe left / right  (= Q/E)
-  Left stick        analog fwd/back + strafe   (--gamepad_no_sticks to disable)
-  Right stick X     analog turn
+  Left stick        forward/back + turn  (= WASD)
+  Right stick X     analog strafe
+  D-pad             digital WASD fallback (with --gamepad_no_sticks)
   Create   toggle locomotion / static teleop   (= C)
   L2       analog grasp squeeze (0..1)         (= G)
-  R2       teleport XR view onto the robot     (= T)
-  Cross X  save episode + reset                (= R)
-  Circle   discard episode + reset             (= X key)
+  L1       teleport XR view onto the robot     (= T)
+  D-pad >  save episode + reset                (= R)
+  D-pad <  discard episode + reset             (= X key)
   Options  start / stop recording        (= XR START / STOP)
   Pad is read from /dev/input/js* — works while the headset has focus
   Check the mapping any time: python -m dsynth_isaac.teleop.gamepad

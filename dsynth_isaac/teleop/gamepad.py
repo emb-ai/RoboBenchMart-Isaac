@@ -9,16 +9,15 @@ DualSense there as soon as it is plugged in / paired).
 
 Default DualSense mapping (kernel ``hid-playstation`` js layout, 8 axes / 13 buttons)::
 
-    D-pad up/down     forward / backward      (WASD's W/S)
-    D-pad left/right  turn left / right       (WASD's A/D)
-    L1 / R1           strafe left / right     (Q/E)
+    Left stick        forward/back + turn     (WASD)
+    Right stick X     analog strafe
     Create            toggle locomotion       (C)
-    R2                teleport XR view        (T)
-    Cross (X)         save episode + reset    (R)
-    Circle            discard episode + reset (X)
+    L1                teleport XR view        (T)
+    D-pad right       save episode + reset    (R)
+    D-pad left        discard episode + reset (X)
     Options           start / stop recording  (XR START / STOP)
-    Left stick        analog translate (fwd/back + strafe)
-    Right stick X     analog turn
+    D-pad             digital fwd/back + turn fallback (only with sticks disabled;
+                      left/right then turn instead of save/discard)
 
 Run standalone to check the mapping of a connected pad without launching Isaac::
 
@@ -299,12 +298,6 @@ class RecordGamepad:
         label = BUTTON_NAMES.get(number, "?") if kind == "button" else ""
         print(f"[PAD-DEBUG] {kind} {number} {label} = {value:+.2f}", flush=True)
 
-    def _teleport_held(self) -> bool:
-        """R2 as a button, or the analog trigger past half travel (rest is -1)."""
-        if self._js is None:
-            return False
-        return self._js.button(BTN_R2) or self._js.axis(AX_R2) > 0.0
-
     def squeeze(self) -> float:
         """L2 analog travel as a 0..1 grasp squeeze command.
 
@@ -326,13 +319,16 @@ class RecordGamepad:
         edges = set()
         if js.button(BTN_CREATE):
             edges.add("TOGGLE_MODE")
-        if js.button(BTN_CROSS):
-            edges.add("SAVE")
-        if js.button(BTN_CIRCLE):
-            edges.add("DISCARD")
+        if self._use_sticks:
+            # With sticks disabled the D-pad drives locomotion instead.
+            hat_x = js.axis(AX_HAT_X)
+            if hat_x > 0.5:
+                edges.add("SAVE")
+            elif hat_x < -0.5:
+                edges.add("DISCARD")
         if js.button(BTN_OPTIONS):
             edges.add("TOGGLE_RECORDING")
-        if self._teleport_held():
+        if js.button(BTN_L1):
             edges.add("TELEPORT")
         return edges
 
@@ -365,24 +361,21 @@ class RecordGamepad:
                 callback()
 
     def command(self) -> tuple[float, float, float]:
-        """Return (lin_vel_x, lin_vel_y, ang_vel_z) from the D-pad, L1/R1 and sticks."""
+        """Return (lin_vel_x, lin_vel_y, ang_vel_z) from the left and right sticks."""
         js = self._js
         if js is None or not js.connected:
             return 0.0, 0.0, 0.0
-        hat_x, hat_y = js.axis(AX_HAT_X), js.axis(AX_HAT_Y)
-        # D-pad up is -1 on HAT_Y, left is -1 on HAT_X.
-        vx = self._speed if hat_y < -0.5 else (-self._speed if hat_y > 0.5 else 0.0)
-        wz = self._turn if hat_x < -0.5 else (-self._turn if hat_x > 0.5 else 0.0)
-        vy = (self._strafe if js.button(BTN_L1) else 0.0) - (
-            self._strafe if js.button(BTN_R1) else 0.0
-        )
+        vy = 0.0
         if self._use_sticks:
-            if vx == 0.0:
-                vx = -_deadzone(js.axis(AX_LEFT_Y), self._deadzone) * self._speed
-            if vy == 0.0:
-                vy = -_deadzone(js.axis(AX_LEFT_X), self._deadzone) * self._strafe
-            if wz == 0.0:
-                wz = -_deadzone(js.axis(AX_RIGHT_X), self._deadzone) * self._turn
+            # WASD layout on the left stick: Y = forward/back (W/S), X = turn (A/D).
+            vx = -_deadzone(js.axis(AX_LEFT_Y), self._deadzone) * self._speed
+            wz = -_deadzone(js.axis(AX_LEFT_X), self._deadzone) * self._turn
+            vy = -_deadzone(js.axis(AX_RIGHT_X), self._deadzone) * self._strafe
+        else:
+            hat_x, hat_y = js.axis(AX_HAT_X), js.axis(AX_HAT_Y)
+            # D-pad up is -1 on HAT_Y, left is -1 on HAT_X.
+            vx = self._speed if hat_y < -0.5 else (-self._speed if hat_y > 0.5 else 0.0)
+            wz = self._turn if hat_x < -0.5 else (-self._turn if hat_x > 0.5 else 0.0)
         # ``+ 0.0`` keeps a negated zero from printing as "-0.00" in the debug line.
         return vx + 0.0, vy + 0.0, wz + 0.0
 
@@ -392,19 +385,6 @@ class RecordGamepad:
         if js is None or not js.connected:
             return "-"
         parts = []
-        hat_x, hat_y = js.axis(AX_HAT_X), js.axis(AX_HAT_Y)
-        if hat_y < -0.5:
-            parts.append("UP")
-        elif hat_y > 0.5:
-            parts.append("DOWN")
-        if hat_x < -0.5:
-            parts.append("LEFT")
-        elif hat_x > 0.5:
-            parts.append("RIGHT")
-        if js.button(BTN_L1):
-            parts.append("L1")
-        if js.button(BTN_R1):
-            parts.append("R1")
         if self._use_sticks:
             lx = _deadzone(js.axis(AX_LEFT_X), self._deadzone)
             ly = _deadzone(js.axis(AX_LEFT_Y), self._deadzone)
@@ -413,6 +393,16 @@ class RecordGamepad:
                 parts.append(f"LS({lx:+.1f},{ly:+.1f})")
             if rx:
                 parts.append(f"RS({rx:+.1f})")
+        else:
+            hat_x, hat_y = js.axis(AX_HAT_X), js.axis(AX_HAT_Y)
+            if hat_y < -0.5:
+                parts.append("UP")
+            elif hat_y > 0.5:
+                parts.append("DOWN")
+            if hat_x < -0.5:
+                parts.append("LEFT")
+            elif hat_x > 0.5:
+                parts.append("RIGHT")
         return "".join(p + " " for p in parts).strip() or "-"
 
     def close(self) -> None:
@@ -433,9 +423,9 @@ def _main() -> None:
         0.6,
         debug=True,
         on_toggle_mode=lambda: print(">>> CREATE: toggle locomotion", flush=True),
-        on_save_reset=lambda: print(">>> CROSS: save episode + reset", flush=True),
-        on_discard_reset=lambda: print(">>> CIRCLE: discard episode + reset", flush=True),
-        on_teleport_view=lambda: print(">>> R2: teleport XR view", flush=True),
+        on_save_reset=lambda: print(">>> D-PAD RIGHT: save episode + reset", flush=True),
+        on_discard_reset=lambda: print(">>> D-PAD LEFT: discard episode + reset", flush=True),
+        on_teleport_view=lambda: print(">>> L1: teleport XR view", flush=True),
         on_toggle_recording=lambda: print(">>> OPTIONS: toggle recording", flush=True),
     )
     if not pad.connected:
