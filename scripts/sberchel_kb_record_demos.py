@@ -321,6 +321,17 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--disable_left_hand",
+    action="store_true",
+    default=False,
+    help=(
+        "The left arm/hand never follows the operator: in static mode it holds the "
+        "pose (wrist + fingers, pelvis-relative) it had when static mode was entered, "
+        "and squeeze does not affect the left fingers. Locomotion-mode freeze/replay "
+        "is unchanged."
+    ),
+)
+parser.add_argument(
     "--grip_report_every_n",
     type=int,
     default=0,
@@ -417,6 +428,7 @@ from dsynth_isaac.robots.sberchel_cfg import (
     sberchel_upper_pd_gain_table,
 )
 from dsynth_isaac.tasks.manager_based.sberchel_upperbody_xr_env_cfg import (
+    SBERCHEL_HAND_JOINT_NAMES,
     build_sberchel_teleop_devices,
 )
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
@@ -431,6 +443,13 @@ from green_challenge.policy.network import Network
 logger = logging.getLogger(__name__)
 
 LocoMode = Literal["locomotion", "static"]
+
+# Left-hand slots in the 26D upper command (--disable_left_hand): wrist pose7 at
+# [0:7], plus the left entries of the 12D finger block at [14:26].
+_LEFT_WRIST_SLICE = slice(0, 7)
+_LEFT_FINGER_DIMS = tuple(
+    14 + i for i, name in enumerate(SBERCHEL_HAND_JOINT_NAMES) if name.startswith("left_")
+)
 
 _HELP_KEYBOARD = """
 ==================== KB RECORD CONTROLS ====================
@@ -1011,6 +1030,7 @@ def main() -> None:
     loco_mode: LocoMode = "locomotion"
     hold_xy_yaw: tuple[float, float, float] | None = None
     frozen_snapshot: FrozenUpperSnapshot | None = None
+    left_hold_snapshot: FrozenUpperSnapshot | None = None
     last_teleop_upper: torch.Tensor | None = None
     last_neck_targets: tuple[float, float] = (0.0, 0.0)
     last_hz_t = time.time()
@@ -1033,10 +1053,14 @@ def main() -> None:
 
     def enter_static_mode() -> None:
         nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
+        nonlocal left_hold_snapshot
         loco_mode = "static"
         hold_xy_yaw = capture_hold_pose_from_robot(robot)
         station_keeper.reset()
         sync_retargeter_idle_from_robot(teleop_interface, robot)
+        if args_cli.disable_left_hand:
+            # The left hand is never used, so the measured pose is the hold target.
+            left_hold_snapshot = capture_frozen_upper(robot)
         frozen_snapshot = None
         last_neck_targets = (0.0, 0.0)
         pink_hold.disable()
@@ -1348,6 +1372,13 @@ def main() -> None:
                                 [r.retarget(raw) for r in teleop_interface._retargeters],
                                 dim=-1,
                             )
+                            if args_cli.disable_left_hand and left_hold_snapshot is not None:
+                                left_hold = build_upper_from_frozen_snapshot(
+                                    robot, left_hold_snapshot, upper_body.device
+                                ).to(upper_body.dtype)
+                                upper_body[..., _LEFT_WRIST_SLICE] = left_hold[_LEFT_WRIST_SLICE]
+                                for dim in _LEFT_FINGER_DIMS:
+                                    upper_body[..., dim] = left_hold[dim]
                             last_teleop_upper = (
                                 upper_body.squeeze(0).clone()
                                 if upper_body.ndim > 1
