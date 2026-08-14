@@ -101,6 +101,39 @@ class TeleopStateRecorderCfg(RecorderTermCfg):
     class_type: type[RecorderTerm] = TeleopStateRecorder
 
 
+class PostStepStoreProductsRecorder(RecorderTerm):
+    """Record store product rigid-body poses and velocities each step.
+
+    Store products are plain USD rigid bodies, not registered scene assets, so
+    the scene-state recorder misses them. Without these rows a replay can only
+    state-sync the robot: objects run open-loop physics and a grasped item
+    drifts out of the hand. Replay restores the previous step's rows before
+    each step, pinning products to the recorded trajectory.
+
+    Single-env only (teleop always is): the PhysX view spans every env's
+    products in one flat list.
+    """
+
+    def record_post_step(self):
+        if self._env.num_envs != 1:
+            return None, None
+        capture = getattr(self._env.scene, "capture_store_rigid_body_state", None)
+        state = capture(self._env.sim) if capture is not None else None
+        if state is None:
+            return None, None
+        return "store_products", {
+            "transforms": state["transforms"].unsqueeze(0),
+            "velocities": state["velocities"].unsqueeze(0),
+        }
+
+
+@configclass
+class PostStepStoreProductsRecorderCfg(RecorderTermCfg):
+    """Configuration for the store product state recorder term."""
+
+    class_type: type[RecorderTerm] = PostStepStoreProductsRecorder
+
+
 class PostStepJointTargetsRecorder(RecorderTerm):
     """Record full-articulation commanded and achieved joint positions.
 
@@ -140,4 +173,5 @@ class SberchelXRRecorderManagerCfg(ActionStateRecorderManagerCfg):
     record_pre_step_loco_commands = LocomotionCommandRecorderCfg()
     record_pre_step_teleop_state = TeleopStateRecorderCfg()
     record_post_step_joint_targets = PostStepJointTargetsRecorderCfg()
+    record_post_step_store_products = PostStepStoreProductsRecorderCfg()
     record_pre_step_rgb_camera_observations = PreStepRgbCameraObservationsRecorderCfg()

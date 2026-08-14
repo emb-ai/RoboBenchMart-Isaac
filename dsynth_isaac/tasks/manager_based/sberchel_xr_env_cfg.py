@@ -6,11 +6,8 @@ from isaaclab.devices.openxr import XrCfg
 from isaaclab.utils import configclass
 from isaaclab.envs import ManagerBasedRLEnvCfg
 
-from isaaclab.managers import ObservationTermCfg as ObsTerm
-from isaaclab.managers import SceneEntityCfg
-
 from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_XR_LOCOMOTION_NECK_ROBOT
-from dsynth_isaac.robots.sberchel_camera_cfg import make_sberchel_left_head_camera_cfg
+from dsynth_isaac.robots.sberchel_camera_cfg import add_sberchel_cameras
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     NECK_JOINT_NAMES,
@@ -139,12 +136,9 @@ class SberchelXRDemoEnvCfg(ManagerBasedRLEnvCfg):
         )
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
         self.scene.robot.init_state.pos = (5.5, 5, SBERCHEL_STAND_HEIGHT)
-        self.scene.left_head_camera = make_sberchel_left_head_camera_cfg()
-        # Raw RGB for HDF5 demo video (default ``normalize=True`` mean-centers floats).
-        self.observations.rgb_camera.head_img = ObsTerm(
-            func=mdp.image,
-            params={"sensor_cfg": SceneEntityCfg("left_head_camera"), "normalize": False},
-        )
+        # All four green_challenge cameras (left/right head, left/right wrist).
+        # Record/replay scripts strip the ones not selected via --cameras.
+        add_sberchel_cameras(self)
 
         self.sim.dt = 1.0 / 150.0
         self.decimation = 1

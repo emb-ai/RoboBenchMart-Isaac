@@ -8,7 +8,14 @@ Supports the 40D action layout ``[legs(12), neck(2), upper_body_ik(26)]`` with h
 neck targets. Legacy 38D demos are padded with zero neck where needed.
 
 With ``--output_dataset_file`` and ``--enable_cameras``, each replayed episode is copied
-into a new HDF5 with live left-head RGB under ``obs/head_img`` (one frame per action).
+into a new HDF5 with live robot RGB for every camera selected via ``--cameras``:
+``obs/head_img`` (left head), ``obs/right_head_img``, ``obs/left_wrist_img`` and
+``obs/right_wrist_img``. Defaults target the LeRobot sample layout
+(``cam_head``/``cam_left_wrist``/``cam_right_wrist``): the left-head + wrists trio,
+one frame per ``--frame_stride`` env steps (150/5 = 30 fps), processed through the
+green_challenge runtime pipeline (native 960x600 render -> fisheye mask -> full-frame
+squash to 448x448; see ``--camera_pipeline``/``--camera_size``). Stride/fps/resolution/
+pipeline go into the output's ``env_args`` for the conversion.
 
 With ``--video``, also records viewport MP4s (one per replayed episode) via Gymnasium
 ``RecordVideo``, following the robot camera like ``demo_random_actions.py``.
@@ -56,7 +63,53 @@ parser.add_argument(
     default="",
     help=(
         "If set, write a new HDF5 that copies each replayed episode and adds live "
-        "left-head RGB under obs/head_img. Requires --enable_cameras."
+        "robot RGB for the cameras selected via --cameras (obs/head_img, "
+        "obs/right_head_img, obs/left_wrist_img, obs/right_wrist_img). "
+        "Requires --enable_cameras."
+    ),
+)
+parser.add_argument(
+    "--cameras",
+    type=str,
+    default="left_head,left_wrist,right_wrist",
+    help=(
+        "Comma-separated robot cameras to render/export with --output_dataset_file: "
+        "left_head,right_head,left_wrist,right_wrist (or 'all'). The default trio "
+        "matches the LeRobot sample layout (cam_head/cam_left_wrist/cam_right_wrist). "
+        "Cameras not listed are stripped from the scene to save render time."
+    ),
+)
+parser.add_argument(
+    "--camera_size",
+    type=str,
+    default="448x448",
+    help=(
+        "Output image size: 'WxH', a single square size, or 'native' (960x600). "
+        "Default 448x448 matches the LeRobot sample layout."
+    ),
+)
+parser.add_argument(
+    "--camera_pipeline",
+    type=str,
+    choices=("green_challenge", "center_crop"),
+    default="green_challenge",
+    help=(
+        "How frames become --camera_size. 'green_challenge' (default) reproduces the "
+        "challenge runtime exactly: render native 960x600, zero pixels outside the "
+        "per-camera fisheye mask, then squash-resize the full frame (keeps the full "
+        "horizontal FoV). 'center_crop' renders directly at --camera_size with "
+        "center-crop-resize rescaled intrinsics (no mask, narrower FoV)."
+    ),
+)
+parser.add_argument(
+    "--frame_stride",
+    type=int,
+    default=5,
+    help=(
+        "Store every Nth env step's camera frames. With the 150 Hz env step the "
+        "default 5 gives 30 fps, the LeRobot sample rate. The stride is written to "
+        "the output file's env_args so the conversion can align frames with the "
+        "full-rate states/actions (frame k <-> step k*stride)."
     ),
 )
 parser.add_argument(
@@ -134,8 +187,41 @@ simulation_app = app_launcher.app
 
 import contextlib
 
+import cv2
 import gymnasium as gym
+import h5py
+import numpy as np
 import torch
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
+
+class _PlainProgress:
+    """Line-based progress fallback when tqdm is unavailable."""
+
+    def __init__(self, total: int):
+        self.total = max(1, total)
+        self.n = 0
+        self._last_pct = -1
+
+    def update(self, n: int = 1) -> None:
+        self.n += n
+        pct = int(100 * self.n / self.total)
+        if pct != self._last_pct and pct % 2 == 0:
+            print(f"[replay] {self.n}/{self.total} steps ({pct}%)", flush=True)
+            self._last_pct = pct
+
+    def close(self) -> None:
+        pass
+
+
+def make_step_progress(total_steps: int):
+    if tqdm is not None:
+        return tqdm(total=total_steps, desc="replay", unit="step", dynamic_ncols=True)
+    return _PlainProgress(total_steps)
 
 from isaaclab.devices import Se3Keyboard, Se3KeyboardCfg
 from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
@@ -154,6 +240,39 @@ from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     policy_leg_targets,
 )
 from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
+from dsynth_isaac.robots.sberchel_camera_cfg import (
+    SBERCHEL_CAMERA_OBS_KEYS,
+    apply_sberchel_camera_size,
+    load_sberchel_camera_masks,
+    parse_camera_names,
+    parse_camera_size,
+    strip_camera_configs,
+)
+
+
+def make_green_challenge_frame_postprocess(mask: np.ndarray, out_size: tuple[int, int] | None):
+    """Mask at native resolution then squash-resize the full frame.
+
+    Mirrors green_challenge's ``LatestFrameHandler``: ``rgb_image[mask == 0] = 0``
+    followed by ``cv2.resize`` (default INTER_LINEAR) of the whole 960x600 frame,
+    keeping the full horizontal fisheye FoV.
+    """
+    invalid = mask == 0
+
+    def _apply(frame: torch.Tensor) -> torch.Tensor:
+        img = frame.numpy()
+        if img.shape[:2] != invalid.shape:
+            raise ValueError(
+                f"Frame {img.shape[:2]} does not match camera mask {invalid.shape}; "
+                "the green_challenge pipeline requires native-resolution rendering."
+            )
+        img = img.copy()
+        img[invalid] = 0
+        if out_size is not None and out_size != (img.shape[1], img.shape[0]):
+            img = cv2.resize(img, out_size)
+        return torch.from_numpy(img)
+
+    return _apply
 from green_challenge.policy.network import Network
 
 is_paused = False
@@ -504,6 +623,40 @@ def sync_scene_to_recorded_state(env, recorded_state: dict, env_id: int) -> None
     env.sim.forward()
 
 
+_warned_no_store_products = False
+
+
+def sync_store_products_to_recorded(env, episode_data: EpisodeData, step_idx: int, num_envs: int) -> None:
+    """Pin unregistered store product bodies to their recorded step state.
+
+    Store products are plain USD rigid bodies, not scene assets, so the robot
+    state sync alone leaves them on open-loop physics and a grasped item drifts
+    out of the hand. No-op with a one-time warning for demos recorded before
+    ``PostStepStoreProductsRecorder`` existed.
+    """
+    global _warned_no_store_products
+    store = episode_data.data.get("store_products")
+    restore = getattr(env.scene, "restore_store_rigid_body_state", None)
+    if store is None or restore is None or num_envs != 1:
+        if not _warned_no_store_products:
+            _warned_no_store_products = True
+            if store is None:
+                reason = "episode has no store_products rows (recorded before store-state recording)"
+            elif restore is None:
+                reason = "scene cannot restore store products"
+            else:
+                reason = "store product sync is single-env only"
+            print(f"Warning: store products not synced — {reason}; grasped objects may drift.")
+        return
+    restore(
+        env.sim,
+        {
+            "transforms": store["transforms"][step_idx],
+            "velocities": store["velocities"][step_idx],
+        },
+    )
+
+
 def _clone_tensor_tree(value):
     """Deep-clone nested dicts of tensors (leave non-tensors unchanged)."""
     if isinstance(value, dict):
@@ -523,25 +676,34 @@ def clone_episode_data(episode: EpisodeData) -> EpisodeData:
     return cloned
 
 
-def write_episode_with_head_img(
+def _expected_frame_count(num_actions: int, frame_stride: int) -> int:
+    """Frames stored at action indices 0, stride, 2*stride, ..."""
+    return -(-num_actions // frame_stride)
+
+
+def write_episode_with_camera_frames(
     output_handler: HDF5DatasetFileHandler,
     source_episode: EpisodeData,
-    head_frames: list[torch.Tensor],
+    frames_by_key: dict[str, list[torch.Tensor]],
     demo_id: int | None = None,
+    frame_stride: int = 1,
 ) -> None:
-    """Copy ``source_episode`` and append stacked ``obs/head_img`` frames."""
+    """Copy ``source_episode`` and append stacked ``obs/<img_key>`` frames per camera."""
     actions = source_episode.data.get("actions")
     if actions is None:
         raise ValueError("Source episode is missing 'actions'; cannot export augmented demo.")
-    expected = len(actions)
-    if len(head_frames) != expected:
-        raise ValueError(
-            f"Collected {len(head_frames)} head_img frames but episode has {expected} actions."
-        )
+    expected = _expected_frame_count(len(actions), frame_stride)
+    for img_key, frames in frames_by_key.items():
+        if len(frames) != expected:
+            raise ValueError(
+                f"Collected {len(frames)} {img_key} frames but episode has {len(actions)} "
+                f"actions (expected {expected} frames at stride {frame_stride})."
+            )
     episode = clone_episode_data(source_episode)
     if "obs" not in episode.data or episode.data["obs"] is None:
         episode.data["obs"] = {}
-    episode.data["obs"]["head_img"] = torch.stack(head_frames, dim=0)
+    for img_key, frames in frames_by_key.items():
+        episode.data["obs"][img_key] = torch.stack(frames, dim=0)
     output_handler.write_episode(episode, demo_id=demo_id)
     output_handler.flush()
 
@@ -549,27 +711,34 @@ def write_episode_with_head_img(
 def _maybe_flush_incomplete_ok(
     output_handler: HDF5DatasetFileHandler | None,
     source_episode: EpisodeData | None,
-    head_frames: list[torch.Tensor],
+    frames_by_key: dict[str, list[torch.Tensor]],
     demo_id: int | None,
     *,
     allow_incomplete: bool,
+    frame_stride: int = 1,
 ) -> bool:
     """Write augmented episode; return True if written. Incomplete skipped when allowed."""
-    if output_handler is None or source_episode is None or not head_frames:
+    if output_handler is None or source_episode is None:
+        return False
+    if not any(frames_by_key.values()):
         return False
     actions = source_episode.data.get("actions")
-    expected = 0 if actions is None else len(actions)
-    if len(head_frames) != expected:
-        if allow_incomplete:
-            print(
-                f"Warning: skipping incomplete camera augment for demo_{demo_id} "
-                f"({len(head_frames)}/{expected} frames)."
+    expected = 0 if actions is None else _expected_frame_count(len(actions), frame_stride)
+    for img_key, frames in frames_by_key.items():
+        if len(frames) != expected:
+            if allow_incomplete:
+                print(
+                    f"Warning: skipping incomplete camera augment for demo_{demo_id} "
+                    f"({len(frames)}/{expected} {img_key} frames)."
+                )
+                return False
+            raise ValueError(
+                f"Collected {len(frames)} {img_key} frames but expected {expected} "
+                f"at stride {frame_stride}."
             )
-            return False
-        raise ValueError(
-            f"Collected {len(head_frames)} head_img frames but episode has {expected} actions."
-        )
-    write_episode_with_head_img(output_handler, source_episode, head_frames, demo_id=demo_id)
+    write_episode_with_camera_frames(
+        output_handler, source_episode, frames_by_key, demo_id=demo_id, frame_stride=frame_stride
+    )
     return True
 
 
@@ -621,14 +790,37 @@ def main() -> None:
     env_cfg.recorders = {}
     env_cfg.terminations = {}
 
+    selected_cameras = parse_camera_names(args_cli.cameras) if camera_augment else ()
+    if camera_augment and not selected_cameras:
+        raise ValueError("--output_dataset_file requires at least one camera in --cameras.")
+    frame_stride = int(args_cli.frame_stride)
+    if frame_stride < 1:
+        raise ValueError(f"--frame_stride must be >= 1, got {frame_stride}.")
+    camera_size = parse_camera_size(args_cli.camera_size)
+    use_gc_pipeline = args_cli.camera_pipeline == "green_challenge"
+    # Robot cameras that are not exported only cost render time; strip them
+    # (all of them when not augmenting -- viewport --video does not need them).
+    strip_camera_configs(env_cfg, keep=selected_cameras)
+    # green_challenge pipeline masks+resizes after capture, so render native.
+    apply_sberchel_camera_size(env_cfg, None if use_gc_pipeline else camera_size, selected_cameras)
+    augment_img_keys: list[str] = []
+    frame_postprocess: dict[str, object] = {}
     if camera_augment:
-        cam_cfg = getattr(env_cfg.scene, "left_head_camera", None)
-        if cam_cfg is None:
-            raise ValueError(
-                "Environment has no left_head_camera; cannot augment demos with head RGB."
-            )
-        # One fresh RGB frame per env step (default cfg is ~15 Hz).
-        cam_cfg.update_period = 0.0
+        camera_masks = load_sberchel_camera_masks(selected_cameras) if use_gc_pipeline else {}
+        for camera in selected_cameras:
+            scene_attr, img_key = SBERCHEL_CAMERA_OBS_KEYS[camera]
+            cam_cfg = getattr(env_cfg.scene, scene_attr, None)
+            if cam_cfg is None:
+                raise ValueError(
+                    f"Environment has no {scene_attr}; cannot augment demos with {camera} RGB."
+                )
+            # One fresh RGB frame per env step (default cfg is ~15 Hz).
+            cam_cfg.update_period = 0.0
+            augment_img_keys.append(img_key)
+            if use_gc_pipeline:
+                frame_postprocess[img_key] = make_green_challenge_frame_postprocess(
+                    camera_masks[camera], camera_size
+                )
 
     # if args_cli.video:
     #     env_cfg.viewer.origin_type = "asset_root"
@@ -670,7 +862,30 @@ def main() -> None:
     if camera_augment:
         output_dataset_handler = HDF5DatasetFileHandler()
         output_dataset_handler.create(args_cli.output_dataset_file, env_name=env_name)
-        print(f"Camera augment: writing obs/head_img -> {args_cli.output_dataset_file}")
+        # Conversion metadata: frame k corresponds to action/state step k*stride.
+        step_hz = 1.0 / (env_cfg.sim.dt * env_cfg.decimation)
+        camera_fps = step_hz / frame_stride
+        first_cam = getattr(env_cfg.scene, SBERCHEL_CAMERA_OBS_KEYS[selected_cameras[0]][0])
+        if camera_size is not None:
+            out_width, out_height = camera_size
+        else:
+            out_width, out_height = first_cam.width, first_cam.height
+        output_dataset_handler.add_env_args(
+            {
+                "camera_keys": list(augment_img_keys),
+                "camera_frame_stride": frame_stride,
+                "camera_fps": camera_fps,
+                "camera_width": out_width,
+                "camera_height": out_height,
+                "camera_pipeline": args_cli.camera_pipeline,
+            }
+        )
+        keys_str = ", ".join(f"obs/{key}" for key in augment_img_keys)
+        print(
+            f"Camera augment: writing {keys_str} "
+            f"({out_width}x{out_height} @ {camera_fps:g} fps, stride {frame_stride}, "
+            f"pipeline {args_cli.camera_pipeline}) -> {args_cli.output_dataset_file}"
+        )
 
     state_sync_enabled = (
         args_cli.replay_source == "processed_joint_targets" and not args_cli.no_state_sync
@@ -691,10 +906,12 @@ def main() -> None:
         print("Zest policy: inactive (Network used only to restore locomotion PD gains)")
         print("State sync: disabled")
 
-    teleop_interface = Se3Keyboard(Se3KeyboardCfg(pos_sensitivity=0.1, rot_sensitivity=0.1))
-    teleop_interface.add_callback("N", play_cb)
-    teleop_interface.add_callback("B", pause_cb)
-    print('Press "B" to pause and "N" to resume the replayed actions.')
+    teleop_interface = None
+    if not args_cli.headless:
+        teleop_interface = Se3Keyboard(Se3KeyboardCfg(pos_sensitivity=0.1, rot_sensitivity=0.1))
+        teleop_interface.add_callback("N", play_cb)
+        teleop_interface.add_callback("B", pause_cb)
+        print('Press "B" to pause and "N" to resume the replayed actions.')
 
     state_validation_enabled = args_cli.validate_states and num_envs == 1
     if args_cli.validate_states and num_envs > 1:
@@ -720,9 +937,18 @@ def main() -> None:
     else:
         env.reset()
     idle_action = prepare_sberchel_xr_episode_replay(env, env_cfg, num_envs)
-    teleop_interface.reset()
+    if teleop_interface is not None:
+        teleop_interface.reset()
 
     episode_names = list(dataset_file_handler.get_episode_names())
+    # Overall progress across every step of every episode queued for replay.
+    with h5py.File(args_cli.dataset_file, "r") as _f:
+        total_steps = sum(
+            _f[f"data/{episode_names[i]}/actions"].shape[0]
+            for i in episode_indices_to_replay
+            if i < episode_count
+        )
+    step_progress = make_step_progress(total_steps)
     replayed_episode_count = 0
     recorded_episode_count = 0
     augmented_episode_count = 0
@@ -736,7 +962,9 @@ def main() -> None:
     episode_step_counters = [0] * num_envs
     policy_loco_steps: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * num_envs
     export_episode_snapshots: list[EpisodeData | None] = [None] * num_envs
-    head_img_buffers: list[list[torch.Tensor]] = [[] for _ in range(num_envs)]
+    camera_frame_buffers: list[dict[str, list[torch.Tensor]]] = [
+        {key: [] for key in augment_img_keys} for _ in range(num_envs)
+    ]
 
     def _write_validation(line: str) -> None:
         if validate_report_file is not None:
@@ -747,23 +975,26 @@ def main() -> None:
         nonlocal augmented_episode_count
         if not camera_augment or output_dataset_handler is None:
             return
-        frames = head_img_buffers[env_id]
+        frames_by_key = camera_frame_buffers[env_id]
         snapshot = export_episode_snapshots[env_id]
         demo_id = current_episode_indices[env_id]
         wrote = _maybe_flush_incomplete_ok(
             output_dataset_handler,
             snapshot,
-            frames,
+            frames_by_key,
             demo_id,
             allow_incomplete=allow_incomplete,
+            frame_stride=frame_stride,
         )
         if wrote:
             augmented_episode_count += 1
+            frame_count = len(frames_by_key[augment_img_keys[0]]) if augment_img_keys else 0
             print(
                 f"Wrote augmented episode demo_{demo_id} "
-                f"({len(frames)} head_img frames) -> {args_cli.output_dataset_file}"
+                f"({frame_count} frames x {len(augment_img_keys)} cameras) "
+                f"-> {args_cli.output_dataset_file}"
             )
-        head_img_buffers[env_id] = []
+        camera_frame_buffers[env_id] = {key: [] for key in augment_img_keys}
         export_episode_snapshots[env_id] = None
 
     with contextlib.suppress(KeyboardInterrupt) and torch.inference_mode():
@@ -832,7 +1063,7 @@ def main() -> None:
                             env_episode_data_map[env_id] = episode_data
                             if camera_augment:
                                 export_episode_snapshots[env_id] = clone_episode_data(episode_data)
-                                head_img_buffers[env_id] = []
+                                camera_frame_buffers[env_id] = {key: [] for key in augment_img_keys}
                             episode_step_counters[env_id] = 0
                             initial_state = episode_data.get_initial_state()
                             env.reset_to(initial_state, torch.tensor([env_id], device=env.device), is_relative=True)
@@ -885,6 +1116,42 @@ def main() -> None:
                                     f"Episode is missing recorded states required for state sync at step {step_idx}."
                                 )
                             sync_scene_to_recorded_state(env, prev_state, env_id)
+                            sync_store_products_to_recorded(env, episode_data, step_idx - 1, num_envs)
+                if camera_augment and envs_with_step:
+                    # Pre-step capture: pair frame k with action k the way teleop
+                    # and LeRobot do (the state the operator saw when issuing
+                    # action k). With state sync this renders the exact recorded
+                    # state k-1 injected above. Store only the stride grid
+                    # (action indices 0, stride, 2*stride, ...).
+                    stride_envs = [
+                        env_id
+                        for env_id in envs_with_step
+                        if episode_step_counters[env_id] % frame_stride == 0
+                    ]
+                    if stride_envs:
+                        # Re-render so annotators reflect the state-synced scene.
+                        env.sim.render()
+                        env.obs_buf = env.observation_manager.compute()
+                        rgb_obs = env.obs_buf.get("rgb_camera")
+                        missing = [
+                            key for key in augment_img_keys if rgb_obs is None or key not in rgb_obs
+                        ]
+                        if missing:
+                            raise RuntimeError(
+                                f"Missing observations.rgb_camera terms {missing}; "
+                                "ensure --enable_cameras and the demo env camera cfg are active."
+                            )
+                        for img_key in augment_img_keys:
+                            img_batch = rgb_obs[img_key]
+                            postprocess = frame_postprocess.get(img_key)
+                            for env_id in stride_envs:
+                                # Keep frames on CPU — buffering a full episode of RGB on CUDA OOMs.
+                                frame = img_batch[env_id].detach().to("cpu", non_blocking=False).contiguous()
+                                if frame.is_floating_point():
+                                    frame = frame.clamp(0, 255).to(torch.uint8)
+                                if postprocess is not None:
+                                    frame = postprocess(frame)
+                                camera_frame_buffers[env_id][img_key].append(frame)
                 if args_cli.replay_source == "policy_loco":
                     legs_dim, neck_dim, upper_dim = _processed_term_dims(env)
                     legs_batch = torch.zeros(num_envs, legs_dim, device=env.device, dtype=torch.float32)
@@ -935,22 +1202,7 @@ def main() -> None:
                 for env_id in range(num_envs):
                     if env_episode_data_map[env_id].next_action_index > episode_step_counters[env_id]:
                         episode_step_counters[env_id] += 1
-
-                if camera_augment and envs_with_step:
-                    env.obs_buf = env.observation_manager.compute()
-                    rgb_obs = env.obs_buf.get("rgb_camera")
-                    if rgb_obs is None or "head_img" not in rgb_obs:
-                        raise RuntimeError(
-                            "Missing observations.rgb_camera.head_img; "
-                            "ensure --enable_cameras and the demo env camera cfg are active."
-                        )
-                    head_batch = rgb_obs["head_img"]
-                    for env_id in envs_with_step:
-                        # Keep frames on CPU — buffering a full episode of 960x600 RGB on CUDA OOMs.
-                        frame = head_batch[env_id].detach().to("cpu", non_blocking=False).contiguous()
-                        if frame.is_floating_point():
-                            frame = frame.clamp(0, 255).to(torch.uint8)
-                        head_img_buffers[env_id].append(frame)
+                step_progress.update(len(envs_with_step))
 
                 robot = env.scene["robot"]
                 step_index = env_episode_data_map[0].next_state_index - 1 if state_validation_enabled else -1
@@ -981,6 +1233,8 @@ def main() -> None:
                         if not states_matched:
                             _write_validation(comparison_log.rstrip())
             break
+
+    step_progress.close()
 
     # Flush any episode that finished via interrupt / loop exit without a next load.
     for env_id in range(num_envs):

@@ -386,6 +386,39 @@ parser.add_argument(
     default="",
     help="Directory for viewport MP4s. Default: <dataset_dir>/videos.",
 )
+parser.add_argument(
+    "--cameras",
+    type=str,
+    default="left_head",
+    help=(
+        "Comma-separated robot cameras to render and record into the HDF5 when "
+        "--enable_cameras is set: left_head,right_head,left_wrist,right_wrist "
+        "(or 'all'/'none'). Default keeps only the left head camera; extra "
+        "cameras slow teleop rendering. Prefer recording without cameras and "
+        "adding RGB later via sberchel_replay_demos.py --output_dataset_file."
+    ),
+)
+parser.add_argument(
+    "--camera_size",
+    type=str,
+    default="448x448",
+    help=(
+        "Robot camera resolution: 'WxH', a single square size, or 'native' (960x600). "
+        "Default 448x448 matches the LeRobot sample layout (center-crop-resize "
+        "rescaled intrinsics)."
+    ),
+)
+parser.add_argument(
+    "--camera_hz",
+    type=float,
+    default=30.0,
+    help=(
+        "Robot camera refresh rate during teleop (sensor update_period = 1/hz; "
+        "0 = re-render every env step). The recorder still writes an image row "
+        "per 150 Hz env step, so rows repeat the latest frame between refreshes; "
+        "30 Hz matches the LeRobot target rate (green_challenge's default is 15)."
+    ),
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -416,7 +449,13 @@ import gymnasium as gym
 import torch
 
 from isaaclab.devices.device_base import DeviceBase
-from dsynth_isaac.robots.sberchel_camera_cfg import strip_camera_configs
+from dsynth_isaac.robots.sberchel_camera_cfg import (
+    SBERCHEL_CAMERA_OBS_KEYS,
+    apply_sberchel_camera_size,
+    parse_camera_names,
+    parse_camera_size,
+    strip_camera_configs,
+)
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import DatasetExportMode
 from isaaclab_tasks.utils import parse_env_cfg
@@ -898,9 +937,27 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
     env_cfg.terminations.time_out = None
     env_cfg.observations.policy.concatenate_terms = False
 
+    if args_cli.enable_cameras:
+        # Keep only the requested robot cameras: extras slow teleop rendering
+        # and bloat the HDF5 via the RGB recorder term.
+        selected_cameras = parse_camera_names(args_cli.cameras)
+        env_cfg = strip_camera_configs(env_cfg, keep=selected_cameras)
+        apply_sberchel_camera_size(env_cfg, parse_camera_size(args_cli.camera_size), selected_cameras)
+        update_period = (1.0 / args_cli.camera_hz) if args_cli.camera_hz > 0 else 0.0
+        for camera in selected_cameras:
+            scene_attr, _ = SBERCHEL_CAMERA_OBS_KEYS[camera]
+            cam_cfg = getattr(env_cfg.scene, scene_attr, None)
+            if cam_cfg is not None:
+                cam_cfg.update_period = update_period
+        if selected_cameras:
+            print(
+                f">>> robot cameras: {', '.join(selected_cameras)} "
+                f"({args_cli.camera_size} @ {args_cli.camera_hz:g} Hz refresh)",
+                flush=True,
+            )
+    else:
+        env_cfg = strip_camera_configs(env_cfg)
     if args_cli.xr:
-        if not args_cli.enable_cameras:
-            env_cfg = strip_camera_configs(env_cfg)
         env_cfg.sim.render.antialiasing_mode = "DLSS"
 
     if args_cli.retargeter != "vrd":
