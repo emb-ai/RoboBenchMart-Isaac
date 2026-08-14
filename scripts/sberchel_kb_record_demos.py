@@ -19,7 +19,8 @@ With ``--video``, also records the viewport (``rgb_array``) via Gymnasium
 
 ``--control_device gamepad`` swaps the keyboard for a PS5 (DualSense) pad read
 from ``/dev/input/js*`` (focus-independent, like the X11 poll): left stick = WASD,
-Create = C, L1 = T, D-pad right = R, D-pad left = X, Options = START/STOP.
+Create = C, L1 = T, R1 = V, D-pad up = R, D-pad down = X, D-pad left = V,
+Options = START/STOP.
 See ``dsynth_isaac/teleop/gamepad.py``.
 
 Usage:
@@ -223,6 +224,27 @@ parser.add_argument(
         "Physics steps per render while in locomotion mode (1 = every step). "
         "Higher skips Pink-free frames' XR/GUI presents and raises wall-clock Hz. "
         "Static teleop always renders every step."
+    ),
+)
+parser.add_argument(
+    "--idle_pause",
+    action="store_true",
+    default=False,
+    help=(
+        "Freeze the sim (no physics, no recording) whenever locomotion mode has a "
+        "zero stick/WASD command. Stepping resumes the instant a command arrives or "
+        "static mode is toggled. Idle standing between mode switches never reaches "
+        "the dataset. The view keeps rendering while frozen."
+    ),
+)
+parser.add_argument(
+    "--idle_pause_settle",
+    type=float,
+    default=1.5,
+    help=(
+        "Seconds to keep stepping after the loco command returns to zero before "
+        "--idle_pause freezes the sim. Lets the policy damp walking momentum into a "
+        "stand so the frozen state (and any later static-mode hold pose) is calm."
     ),
 )
 parser.add_argument(
@@ -459,8 +481,10 @@ _HELP_KEYBOARD = """
      (static: XR hands + headset neck; Pink IK on, slower)
   G  hold to squeeze (close fingers past your hand -> real grip force)
   T  teleport XR view onto the robot (same offset as at episode start)
-  R  save episode + reset (HDF5; viewport MP4 if --video)
-  X  discard episode + reset (no HDF5 / no MP4 write)
+  V / Left   restore last checkpoint (auto-taken at each C into static
+             mode: rolls sim + recording back — retry a grasp seamlessly)
+  R / Up     save episode + reset (HDF5; viewport MP4 if --video)
+  X / Down   discard episode + reset (no HDF5 / no MP4 write)
   XR START / STOP  begin or pause recording (or pass --auto_start)
   Keys: X11 global poll (works while headset has focus) + Isaac window
   Tip: if loco hz still low, raise --loco_render_interval (e.g. 10)
@@ -475,8 +499,10 @@ _HELP_GAMEPAD = """
   Create   toggle locomotion / static teleop   (= C)
   L2       analog grasp squeeze (0..1)         (= G)
   L1       teleport XR view onto the robot     (= T)
-  D-pad >  save episode + reset                (= R)
-  D-pad <  discard episode + reset             (= X key)
+  R1       restore loco->static checkpoint     (= V / Left arrow)
+  D-pad ^  save episode + reset                (= R / Up arrow)
+  D-pad v  discard episode + reset             (= X / Down arrow)
+  D-pad <  restore loco->static checkpoint     (= V / Left arrow)
   Options  start / stop recording        (= XR START / STOP)
   Pad is read from /dev/input/js* — works while the headset has focus
   Check the mapping any time: python -m dsynth_isaac.teleop.gamepad
@@ -484,7 +510,7 @@ _HELP_GAMEPAD = """
 """
 
 _MOVE_KEYS = ("W", "A", "S", "D", "Q", "E")
-_EDGE_KEYS = ("C", "R", "X", "T")
+_EDGE_KEYS = ("C", "R", "X", "T", "V", "UP", "DOWN", "LEFT")
 
 
 class PinkJointHold:
@@ -610,6 +636,11 @@ class _X11KeyPoller:
         "X": 0x0078,
         "T": 0x0074,
         "G": 0x0067,
+        "V": 0x0076,
+        # Arrow keys (X11 cursor keysyms).
+        "UP": 0xFF52,
+        "DOWN": 0xFF54,
+        "LEFT": 0xFF51,
     }
 
     def __init__(self) -> None:
@@ -659,7 +690,10 @@ class _X11KeyPoller:
 
 
 class RecordKeyboard:
-    """WASDQE hold-to-move plus edge-triggered C / R / X / T.
+    """WASDQE hold-to-move plus edge-triggered C / R / X / T / V and arrows.
+
+    Arrow aliases: Up = save+reset (R), Down = discard+reset (X),
+    Left = restore checkpoint (V).
 
     Uses X11 keymap polling (global, works under OpenXR focus steal) unioned with
     Isaac carb press/release events as a fallback.
@@ -675,6 +709,7 @@ class RecordKeyboard:
         on_save_reset: Callable[[], None] | None = None,
         on_discard_reset: Callable[[], None] | None = None,
         on_teleport_view: Callable[[], None] | None = None,
+        on_restore_checkpoint: Callable[[], None] | None = None,
     ) -> None:
         import carb
         import omni
@@ -687,6 +722,7 @@ class RecordKeyboard:
         self._on_save_reset = on_save_reset
         self._on_discard_reset = on_discard_reset
         self._on_teleport_view = on_teleport_view
+        self._on_restore_checkpoint = on_restore_checkpoint
         self._carb_pressed: set[str] = set()
         self._edge_prev: set[str] = set()
         self._ok = False
@@ -742,18 +778,20 @@ class RecordKeyboard:
         return pressed
 
     def poll(self) -> None:
-        """Process edge-triggered C / R / X / T; call every loop iteration."""
+        """Process edge-triggered C / R / X / T / V / arrows; call every loop iteration."""
         pressed = self._pressed_now()
         edge_now = pressed & set(_EDGE_KEYS)
         newly = edge_now - self._edge_prev
         if "C" in newly and self._on_toggle_mode is not None:
             self._on_toggle_mode()
-        if "R" in newly and self._on_save_reset is not None:
+        if newly & {"R", "UP"} and self._on_save_reset is not None:
             self._on_save_reset()
-        if "X" in newly and self._on_discard_reset is not None:
+        if newly & {"X", "DOWN"} and self._on_discard_reset is not None:
             self._on_discard_reset()
         if "T" in newly and self._on_teleport_view is not None:
             self._on_teleport_view()
+        if newly & {"V", "LEFT"} and self._on_restore_checkpoint is not None:
+            self._on_restore_checkpoint()
         self._edge_prev = edge_now
 
     def squeeze(self) -> float:
@@ -804,6 +842,50 @@ def discard_viewport_video_frames(env: gym.Env) -> None:
     """Drop in-progress RecordVideo frames so RESET discard does not write an MP4."""
     if isinstance(env, gym.wrappers.RecordVideo) and env.recording:
         env.recorded_frames.clear()
+
+
+def viewport_video_frame_count(env: gym.Env) -> int:
+    """In-progress RecordVideo frame count (0 when video is off)."""
+    if isinstance(env, gym.wrappers.RecordVideo) and env.recording:
+        return len(env.recorded_frames)
+    return 0
+
+
+def truncate_viewport_video_frames(env: gym.Env, keep: int) -> None:
+    """Roll the in-progress RecordVideo buffer back to ``keep`` frames."""
+    if isinstance(env, gym.wrappers.RecordVideo) and env.recording:
+        del env.recorded_frames[keep:]
+
+
+def episode_leaf_lengths(data: dict, prefix: str = "") -> dict[str, int]:
+    """Per-leaf frame counts of an in-memory ``EpisodeData.data`` dict.
+
+    Leaves are lists of per-frame tensors (``EpisodeData.add`` appends), keyed
+    here by their "a/b/c" path. Counting every leaf separately keeps rollback
+    correct even for keys recorded at a different cadence (e.g. the once-per-
+    episode ``initial_state``).
+    """
+    lengths: dict[str, int] = {}
+    for key, value in data.items():
+        path = f"{prefix}/{key}" if prefix else key
+        if isinstance(value, dict):
+            lengths.update(episode_leaf_lengths(value, path))
+        elif isinstance(value, list):
+            lengths[path] = len(value)
+    return lengths
+
+
+def truncate_episode_data(data: dict, lengths: dict[str, int], prefix: str = "") -> None:
+    """Drop frames appended after ``lengths`` was captured (checkpoint rollback).
+
+    A leaf that did not exist at capture time is truncated to zero frames.
+    """
+    for key, value in data.items():
+        path = f"{prefix}/{key}" if prefix else key
+        if isinstance(value, dict):
+            truncate_episode_data(value, lengths, path)
+        elif isinstance(value, list):
+            del value[lengths.get(path, 0):]
 
 
 def create_environment_config(output_dir: str, output_file_name: str) -> ManagerBasedRLEnvCfg:
@@ -1036,12 +1118,21 @@ def main() -> None:
     last_hz_t = time.time()
     hz_window_steps = 0
     effective_hz = 0.0
+    # --idle_pause: wall-clock of the last nonzero loco command. None means "no
+    # command since entering locomotion mode" -> frozen immediately, no settle.
+    last_loco_cmd_t: float | None = None
+    idle_paused_prev = False
+    # Auto-checkpoint taken at every loco->static switch: full scene physics
+    # state + policy carry-over + episode/video frame counts for rollback.
+    sim_checkpoint: dict | None = None
 
     def enter_locomotion_mode(*, capture_frozen: bool) -> None:
         nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
+        nonlocal last_loco_cmd_t
         loco_mode = "locomotion"
         hold_xy_yaw = None
         last_neck_targets = (0.0, 0.0)
+        last_loco_cmd_t = None
         if capture_frozen:
             frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
         # Only the legacy path switches plants; by default the gains never move,
@@ -1078,11 +1169,73 @@ def main() -> None:
         should_discard_reset = True
         print("Discard reset requested — episode will NOT be saved; environment reset on next step")
 
+    def capture_checkpoint() -> None:
+        """Snapshot everything needed to roll the episode back to this instant.
+
+        The scene state covers the robot (root + joints + velocities) and every
+        rigid object, so a dropped item is teleported back too. The zest policy's
+        only cross-step state is ``controller.actions`` (last action, fed back
+        into its observation); the commander is rewritten every tick. Episode
+        and video buffers are rolled back by frame count, which is exact because
+        restore reproduces the checkpoint state bit-for-bit — the stitched
+        recording stays continuous.
+        """
+        nonlocal sim_checkpoint
+        episode = base_env.recorder_manager.get_episode(0)
+        sim_checkpoint = {
+            "scene_state": base_env.scene.get_state(is_relative=False),
+            # Store products are plain USD rigid bodies, not registered scene
+            # assets, so scene.get_state() misses them — snapshot via PhysX view.
+            "store_state": (
+                base_env.scene.capture_store_rigid_body_state(base_env.sim)
+                if hasattr(base_env.scene, "capture_store_rigid_body_state")
+                else None
+            ),
+            "policy_actions": net.controller.actions.clone(),
+            "episode_lengths": episode_leaf_lengths(episode.data),
+            "video_frames": viewport_video_frame_count(env),
+        }
+        print("[checkpoint] captured (V / R1 rolls sim + recording back here)", flush=True)
+
+    def restore_checkpoint() -> None:
+        nonlocal last_teleop_upper
+        if not teleoperation_active:
+            print("[checkpoint] ignored — recording is stopped", flush=True)
+            return
+        if sim_checkpoint is None:
+            print("[checkpoint] none captured yet this episode (press C to enter static mode first)", flush=True)
+            return
+        base_env.scene.reset_to(sim_checkpoint["scene_state"], None, is_relative=False)
+        if sim_checkpoint["store_state"] is not None:
+            restored = base_env.scene.restore_store_rigid_body_state(
+                base_env.sim, sim_checkpoint["store_state"]
+            )
+            print(f"[checkpoint] store products restored: {restored}", flush=True)
+        net.controller.actions.copy_(sim_checkpoint["policy_actions"])
+        truncate_episode_data(
+            base_env.recorder_manager.get_episode(0).data,
+            sim_checkpoint["episode_lengths"],
+        )
+        truncate_viewport_video_frames(env, sim_checkpoint["video_frames"])
+        # Commanded targets were overwritten by scene.reset_to; treat them as
+        # stale until the next stepped frame, same as after env.reset().
+        pink_hold.invalidate()
+        last_teleop_upper = None
+        enter_static_mode()
+        if anchor_teleporter is not None:
+            anchor_teleporter.teleport_to_robot(robot)
+        print(
+            "[checkpoint] restored — static teleop re-latched at the checkpoint pose "
+            "(checkpoint kept; V / R1 works again)",
+            flush=True,
+        )
+
     def toggle_loco_mode() -> None:
         if not teleoperation_active:
             return
         if loco_mode == "locomotion":
             enter_static_mode()
+            capture_checkpoint()
             print(
                 f"Mode: STATIC teleop (station-keep at "
                 f"xy=({hold_xy_yaw[0]:.3f}, {hold_xy_yaw[1]:.3f}) yaw={hold_xy_yaw[2]:.3f}; "
@@ -1175,6 +1328,7 @@ def main() -> None:
                 on_save_reset=reset_env,
                 on_discard_reset=discard_reset_env,
                 on_teleport_view=teleport_view_to_robot,
+                on_restore_checkpoint=restore_checkpoint,
             )
         )
     if use_gamepad:
@@ -1192,6 +1346,7 @@ def main() -> None:
                 on_discard_reset=discard_reset_env,
                 on_teleport_view=teleport_view_to_robot,
                 on_toggle_recording=toggle_recording_instance,
+                on_restore_checkpoint=restore_checkpoint,
             )
         )
 
@@ -1327,6 +1482,12 @@ def main() -> None:
         print(_HELP_KEYBOARD, flush=True)
     if use_gamepad:
         print(_HELP_GAMEPAD, flush=True)
+    if args_cli.idle_pause:
+        print(
+            f"Idle-pause ON: sim freezes whenever the loco command is zero "
+            f"(settle {args_cli.idle_pause_settle:.1f}s; stick/WASD or C resumes).",
+            flush=True,
+        )
     if args_cli.xr and not args_cli.auto_start:
         print("Press START in XR to begin recording (or relaunch with --auto_start).")
     elif args_cli.auto_start:
@@ -1336,7 +1497,34 @@ def main() -> None:
         try:
             with torch.inference_mode():
                 poll_controllers()
-                if running_recording_instance:
+                idle_paused = False
+                if (
+                    args_cli.idle_pause
+                    and running_recording_instance
+                    and teleoperation_active
+                    and loco_mode == "locomotion"
+                ):
+                    if any(abs(c) > 1e-9 for c in controller_command()):
+                        last_loco_cmd_t = time.time()
+                    idle_paused = (
+                        last_loco_cmd_t is None
+                        or time.time() - last_loco_cmd_t >= args_cli.idle_pause_settle
+                    )
+                if idle_paused != idle_paused_prev:
+                    idle_paused_prev = idle_paused
+                    if idle_paused:
+                        print(
+                            "[idle-pause] loco command zero — sim frozen "
+                            "(stick/WASD resumes, C/Create for static teleop)",
+                            flush=True,
+                        )
+                    elif running_recording_instance:
+                        # Drop the frozen span from the Hz window so the first
+                        # post-resume rate print is not diluted by wall-clock pause.
+                        last_hz_t = time.time()
+                        hz_window_steps = 0
+                        print("[idle-pause] sim resumed", flush=True)
+                if running_recording_instance and not idle_paused:
                     step_count += 1
                     hz_window_steps += 1
                     now = time.time()
@@ -1483,6 +1671,7 @@ def main() -> None:
                     if discard:
                         base_env.recorder_manager.cfg.export_in_record_pre_reset = True
                     hold_xy_yaw = None
+                    sim_checkpoint = None  # belongs to the finished episode
                     enter_locomotion_mode(capture_frozen=False)
                     last_neck_targets = (0.0, 0.0)
                     (

@@ -13,11 +13,13 @@ Default DualSense mapping (kernel ``hid-playstation`` js layout, 8 axes / 13 but
     Right stick X     analog strafe
     Create            toggle locomotion       (C)
     L1                teleport XR view        (T)
-    D-pad right       save episode + reset    (R)
-    D-pad left        discard episode + reset (X)
+    R1                restore checkpoint      (V / Left arrow)
+    D-pad up          save episode + reset    (R / Up arrow)
+    D-pad down        discard episode + reset (X / Down arrow)
+    D-pad left        restore checkpoint      (V / Left arrow)
     Options           start / stop recording  (XR START / STOP)
     D-pad             digital fwd/back + turn fallback (only with sticks disabled;
-                      left/right then turn instead of save/discard)
+                      then the D-pad drives locomotion instead of save/discard/restore)
 
 Run standalone to check the mapping of a connected pad without launching Isaac::
 
@@ -251,6 +253,7 @@ class RecordGamepad:
         on_discard_reset: Callable[[], None] | None = None,
         on_teleport_view: Callable[[], None] | None = None,
         on_toggle_recording: Callable[[], None] | None = None,
+        on_restore_checkpoint: Callable[[], None] | None = None,
     ) -> None:
         self._speed = speed
         self._turn = turn
@@ -262,6 +265,7 @@ class RecordGamepad:
         self._on_discard_reset = on_discard_reset
         self._on_teleport_view = on_teleport_view
         self._on_toggle_recording = on_toggle_recording
+        self._on_restore_checkpoint = on_restore_checkpoint
         self._edge_prev: set[str] = set()
         self._seed_edges = True
         self._js: LinuxJoystick | None = None
@@ -322,14 +326,19 @@ class RecordGamepad:
         if self._use_sticks:
             # With sticks disabled the D-pad drives locomotion instead.
             hat_x = js.axis(AX_HAT_X)
-            if hat_x > 0.5:
+            hat_y = js.axis(AX_HAT_Y)
+            if hat_y < -0.5:  # D-pad up
                 edges.add("SAVE")
-            elif hat_x < -0.5:
+            elif hat_y > 0.5:  # D-pad down
                 edges.add("DISCARD")
+            if hat_x < -0.5:  # D-pad left
+                edges.add("RESTORE")
         if js.button(BTN_OPTIONS):
             edges.add("TOGGLE_RECORDING")
         if js.button(BTN_L1):
             edges.add("TELEPORT")
+        if js.button(BTN_R1):
+            edges.add("RESTORE")
         return edges
 
     def poll(self) -> None:
@@ -354,6 +363,7 @@ class RecordGamepad:
             "DISCARD": self._on_discard_reset,
             "TELEPORT": self._on_teleport_view,
             "TOGGLE_RECORDING": self._on_toggle_recording,
+            "RESTORE": self._on_restore_checkpoint,
         }
         for action in newly:
             callback = callbacks.get(action)
@@ -423,10 +433,11 @@ def _main() -> None:
         0.6,
         debug=True,
         on_toggle_mode=lambda: print(">>> CREATE: toggle locomotion", flush=True),
-        on_save_reset=lambda: print(">>> D-PAD RIGHT: save episode + reset", flush=True),
-        on_discard_reset=lambda: print(">>> D-PAD LEFT: discard episode + reset", flush=True),
+        on_save_reset=lambda: print(">>> D-PAD UP: save episode + reset", flush=True),
+        on_discard_reset=lambda: print(">>> D-PAD DOWN: discard episode + reset", flush=True),
         on_teleport_view=lambda: print(">>> L1: teleport XR view", flush=True),
         on_toggle_recording=lambda: print(">>> OPTIONS: toggle recording", flush=True),
+        on_restore_checkpoint=lambda: print(">>> R1 / D-PAD LEFT: restore checkpoint", flush=True),
     )
     if not pad.connected:
         return

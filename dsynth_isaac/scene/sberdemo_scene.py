@@ -166,6 +166,83 @@ class StoreRigidBodySnapshot:
     orientations: np.ndarray = field(default_factory=lambda: np.zeros((0, 4), dtype=np.float32))
     _physx_view: object | None = field(default=None, repr=False)
 
+    def _ensure_view(self, sim: SimulationContext):
+        if self._physx_view is None:
+            self._physx_view = sim.physics_sim_view.create_rigid_body_view(self.prim_paths)
+            if self._physx_view._backend is None:
+                raise RuntimeError(
+                    "[SberDemo] Failed to create rigid-body view for store products. "
+                    "Check that simulation is playing and prim paths are valid."
+                )
+        return self._physx_view
+
+    def capture_live_state(self, sim: SimulationContext) -> dict | None:
+        """Current PhysX poses + velocities of the bodies, for mid-episode checkpoints.
+
+        Unlike the dataclass fields (authoring-time USD poses used by :meth:`restore`),
+        this reads the live simulated state, so a later :meth:`restore_live_state`
+        puts dropped/knocked-over products back where they were at capture time.
+        """
+        if len(self.prim_paths) == 0:
+            return None
+        view = self._ensure_view(sim)
+        return {
+            "transforms": view.get_transforms().clone(),  # (N, 7) pos + quat xyzw
+            "velocities": view.get_velocities().clone(),  # (N, 6)
+        }
+
+    def restore_live_state(
+        self,
+        sim: SimulationContext,
+        state: dict | None,
+        *,
+        only_moved: bool = True,
+        pos_tol: float = 0.02,
+        ang_tol: float = 4e-3,
+        lin_vel_tol: float = 0.25,
+    ) -> int:
+        """Write a :meth:`capture_live_state` snapshot back to PhysX.
+
+        With ``only_moved`` (default) only bodies genuinely disturbed since the
+        snapshot are written: displaced beyond ``pos_tol`` (m), rotated beyond
+        ``ang_tol`` (as 1 - |quat dot|; 4e-3 is about 10 degrees), or currently
+        translating faster than ``lin_vel_tol`` (m/s, catches a mid-fall body
+        near its captured pose). The thresholds are deliberately coarse — well
+        above the contact micro-jitter of never-sleeping shelf products (mm /
+        mrad / small angular velocities), which must NOT count as moved: a PhysX
+        state write wakes the body and drops its contact warm-start, so writing
+        jitter-flagged products makes whole shelves visibly re-settle on every
+        restore. Angular velocity is ignored for the same reason.
+
+        Returns the number of bodies written.
+        """
+        if state is None or len(self.prim_paths) == 0:
+            return 0
+
+        import torch
+
+        view = self._ensure_view(sim)
+        if only_moved:
+            current_tf = view.get_transforms()
+            current_vel = view.get_velocities()
+            dpos = torch.linalg.norm(current_tf[:, :3] - state["transforms"][:, :3], dim=-1)
+            quat_dot = (
+                (current_tf[:, 3:] * state["transforms"][:, 3:]).sum(dim=-1).abs().clamp(max=1.0)
+            )
+            moved = (
+                (dpos > pos_tol)
+                | (quat_dot < 1.0 - ang_tol)
+                | (torch.linalg.norm(current_vel[:, :3], dim=-1) > lin_vel_tol)
+            )
+            indices = torch.nonzero(moved).flatten().to(device=sim.device, dtype=torch.int32)
+        else:
+            indices = torch.arange(len(self.prim_paths), device=sim.device, dtype=torch.int32)
+        if indices.numel() == 0:
+            return 0
+        view.set_transforms(state["transforms"], indices=indices)
+        view.set_velocities(state["velocities"], indices=indices)
+        return int(indices.numel())
+
     def restore(self, sim: SimulationContext) -> int:
         """Write snapshot poses to PhysX and zero velocities. Returns body count."""
         if len(self.prim_paths) == 0:
@@ -174,13 +251,7 @@ class StoreRigidBodySnapshot:
         import torch
         from isaaclab.utils import math as math_utils
 
-        if self._physx_view is None:
-            self._physx_view = sim.physics_sim_view.create_rigid_body_view(self.prim_paths)
-            if self._physx_view._backend is None:
-                raise RuntimeError(
-                    "[SberDemo] Failed to create rigid-body view for store products. "
-                    "Check that simulation is playing and prim paths are valid."
-                )
+        self._ensure_view(sim)
 
         device = sim.device
         poses_wxyz = torch.cat(
@@ -392,3 +463,11 @@ class SberDemoInteractiveScene(InteractiveScene):
         if count > 0:
             logger.info("[SberDemo] Reset %d store rigid bodies to initial poses", count)
         return count
+
+    def capture_store_rigid_body_state(self, sim: SimulationContext) -> dict | None:
+        """Live poses + velocities of dynamic store products (mid-episode checkpoint)."""
+        return self._store_rigid_snapshot.capture_live_state(sim)
+
+    def restore_store_rigid_body_state(self, sim: SimulationContext, state: dict | None) -> int:
+        """Put dynamic store products back to a captured live state."""
+        return self._store_rigid_snapshot.restore_live_state(sim, state)
