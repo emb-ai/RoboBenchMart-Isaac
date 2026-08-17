@@ -27,6 +27,12 @@ logger = logging.getLogger(__name__)
 # Keep SubUSDs/ next to store.usd (relative refs in the USD).
 _STORE_PKG = Path(__file__).resolve().parents[2] / "small_store_aij"
 _STORE_PKG_VER2 = Path(__file__).resolve().parents[2] / "small_store_aij_ver2"
+# ver3 = ver2 with aggressive convex-decomposition colliders (error 3%,
+# 64 hulls; too slow with all store products). ver4 = ver2 with product
+# colliders at errorPercentage=4/maxConvexHulls=24: tighter hulls at
+# ver2 sim cost (note: shrinkWrap is a cooking no-op in Isaac Sim 5.x).
+_STORE_PKG_VER3 = Path(__file__).resolve().parents[2] / "small_store_aij_ver3"
+_STORE_PKG_VER4 = Path(__file__).resolve().parents[2] / "small_store_aij_ver4"
 STORE_USD = (_STORE_PKG_VER2 / "store.usd").resolve()
 
 # Exported store layout (see small_store_aij/store.usd).
