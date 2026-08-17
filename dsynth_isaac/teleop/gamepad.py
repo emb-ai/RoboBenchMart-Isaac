@@ -14,8 +14,9 @@ Default DualSense mapping (kernel ``hid-playstation`` js layout, 8 axes / 13 but
     Create            toggle locomotion       (C)
     L1                teleport XR view        (T)
     R1                restore checkpoint      (V / Left arrow)
-    D-pad up          save episode + reset    (R / Up arrow)
-    D-pad down        discard episode + reset (X / Down arrow)
+    D-pad up          save episode + reset, new start pose      (R / Up arrow)
+    D-pad down        discard episode + reset, SAME start pose  (X / Down arrow)
+    D-pad right       discard episode + reset, new start pose   (Right arrow)
     D-pad left        restore checkpoint      (V / Left arrow)
     Options           start / stop recording  (XR START / STOP)
     D-pad             digital fwd/back + turn fallback (only with sticks disabled;
@@ -251,6 +252,7 @@ class RecordGamepad:
         on_toggle_mode: Callable[[], None] | None = None,
         on_save_reset: Callable[[], None] | None = None,
         on_discard_reset: Callable[[], None] | None = None,
+        on_next_pose_reset: Callable[[], None] | None = None,
         on_teleport_view: Callable[[], None] | None = None,
         on_toggle_recording: Callable[[], None] | None = None,
         on_restore_checkpoint: Callable[[], None] | None = None,
@@ -263,6 +265,7 @@ class RecordGamepad:
         self._on_toggle_mode = on_toggle_mode
         self._on_save_reset = on_save_reset
         self._on_discard_reset = on_discard_reset
+        self._on_next_pose_reset = on_next_pose_reset
         self._on_teleport_view = on_teleport_view
         self._on_toggle_recording = on_toggle_recording
         self._on_restore_checkpoint = on_restore_checkpoint
@@ -333,6 +336,8 @@ class RecordGamepad:
                 edges.add("DISCARD")
             if hat_x < -0.5:  # D-pad left
                 edges.add("RESTORE")
+            elif hat_x > 0.5:  # D-pad right
+                edges.add("NEXT")
         if js.button(BTN_OPTIONS):
             edges.add("TOGGLE_RECORDING")
         if js.button(BTN_L1):
@@ -361,6 +366,7 @@ class RecordGamepad:
             "TOGGLE_MODE": self._on_toggle_mode,
             "SAVE": self._on_save_reset,
             "DISCARD": self._on_discard_reset,
+            "NEXT": self._on_next_pose_reset,
             "TELEPORT": self._on_teleport_view,
             "TOGGLE_RECORDING": self._on_toggle_recording,
             "RESTORE": self._on_restore_checkpoint,

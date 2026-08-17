@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -62,7 +63,13 @@ parser.add_argument(
     help="Number of demonstrations to record. Set to 0 for unlimited.",
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
-parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=None,
+    help="Random seed. Defaults to a fresh entropy-based seed each run (printed at startup); "
+    "pass an explicit value to reproduce a session's start poses.",
+)
 parser.add_argument(
     "--enable_pinocchio",
     action="store_true",
@@ -72,6 +79,10 @@ parser.add_argument(
 add_head_follow_v3_cli_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+
+if args_cli.seed is None:
+    args_cli.seed = int.from_bytes(os.urandom(4), "little") % (2**31)
+    print(f"[INFO] No --seed given; using seed {args_cli.seed} (pass --seed {args_cli.seed} to reproduce this session)")
 
 app_launcher_args = vars(args_cli)
 _use_handtracking = "handtracking" in args_cli.teleop_device.lower()
@@ -167,7 +178,39 @@ def setup_output_directories() -> tuple[str, str]:
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
         print(f"Created output directory: {output_dir}")
+    # The HDF5 handler opens the dataset with mode "w" (truncate), so reusing a
+    # filename would wipe previously recorded demos — auto-suffix instead.
+    base_name = output_file_name
+    suffix = 0
+    while os.path.exists(os.path.join(output_dir, output_file_name + ".hdf5")):
+        suffix += 1
+        output_file_name = f"{base_name}_{suffix:03d}"
+    if suffix:
+        print(f"Dataset file {base_name}.hdf5 already exists; writing to {output_file_name}.hdf5 instead")
     return output_dir, output_file_name
+
+
+def repo_git_commit() -> str:
+    """Current commit hash of this repo, with a ``-dirty`` marker for uncommitted changes."""
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_repo_root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        dirty = (
+            subprocess.run(
+                ["git", "diff", "--quiet", "HEAD"],
+                cwd=_repo_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            != 0
+        )
+        return f"{commit}-dirty" if dirty else commit
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
 
 
 def exported_demo_count(env) -> int:
@@ -225,6 +268,14 @@ def main() -> None:
 
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
     enable_async_episode_export(env)
+    # Stamp session provenance (seed + code version) into the dataset's env_args attrs.
+    session_meta = {"seed": args_cli.seed, "git_commit": repo_git_commit()}
+    for handler in (
+        env.recorder_manager._dataset_file_handler,
+        env.recorder_manager._failed_episode_dataset_file_handler,
+    ):
+        if handler is not None:
+            handler.add_env_args(session_meta)
     env.sim.reset()
     env.reset(seed=args_cli.seed)
 

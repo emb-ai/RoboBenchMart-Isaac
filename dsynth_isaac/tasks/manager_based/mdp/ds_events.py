@@ -63,6 +63,47 @@ def reset_joints(
     asset.write_joint_state_to_sim(joint_pos, joint_vel, env_ids=env_ids)
 
 
+def reset_root_pose_in_region_facing_target(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    pos_x_range: tuple[float, float],
+    pos_y_range: tuple[float, float],
+    target_x_range: tuple[float, float],
+    target_y_range: tuple[float, float],
+    yaw_noise_range: tuple[float, float] = (0.0, 0.0),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+):
+    """Teleport the root to a random (x, y) in a region, yawed toward a random target point.
+
+    Position is sampled uniformly in ``pos_x_range`` x ``pos_y_range`` (env-local frame);
+    z and roll/pitch come from the asset's default root state. Yaw is chosen so the robot's
+    +x axis points at a point sampled uniformly in ``target_x_range`` x ``target_y_range``
+    (e.g. the shelf front), plus uniform noise from ``yaw_noise_range``. Root velocities
+    are zeroed.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    num = len(env_ids)
+
+    def _uniform(low: float, high: float) -> torch.Tensor:
+        return torch.rand(num, device=env.device) * (high - low) + low
+
+    x = _uniform(*pos_x_range)
+    y = _uniform(*pos_y_range)
+    target_x = _uniform(*target_x_range)
+    target_y = _uniform(*target_y_range)
+    yaw = torch.atan2(target_y - y, target_x - x) + _uniform(*yaw_noise_range)
+
+    default_root = asset.data.default_root_state[env_ids]
+    pos = torch.stack([x, y, default_root[:, 2]], dim=-1) + env.scene.env_origins[env_ids]
+    zeros = torch.zeros_like(yaw)
+    quat = math_utils.quat_mul(math_utils.quat_from_euler_xyz(zeros, zeros, yaw), default_root[:, 3:7])
+
+    asset.write_root_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=env_ids)
+    asset.write_root_velocity_to_sim(torch.zeros(num, 6, device=env.device), env_ids=env_ids)
+
+
 def set_default_base_pose(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor,

@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -81,7 +82,13 @@ parser.add_argument(
     help="Number of demonstrations to record. Set to 0 for unlimited.",
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
-parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+parser.add_argument(
+    "--seed",
+    type=int,
+    default=None,
+    help="Random seed. Defaults to a fresh entropy-based seed each run (printed at startup); "
+    "pass an explicit value to reproduce a session's start poses.",
+)
 parser.add_argument(
     "--enhanced_determinism",
     action="store_true",
@@ -446,6 +453,10 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
+if args_cli.seed is None:
+    args_cli.seed = int.from_bytes(os.urandom(4), "little") % (2**31)
+    print(f"[INFO] No --seed given; using seed {args_cli.seed} (pass --seed {args_cli.seed} to reproduce this session)")
+
 app_launcher_args = vars(args_cli)
 _use_handtracking = "handtracking" in args_cli.teleop_device.lower()
 if args_cli.enable_pinocchio or _use_handtracking:
@@ -559,8 +570,9 @@ _HELP_KEYBOARD = """
   T  teleport XR view onto the robot (same offset as at episode start)
   V / Left   restore last checkpoint (auto-taken at each C into static
              mode: rolls sim + recording back — retry a grasp seamlessly)
-  R / Up     save episode + reset (HDF5; viewport MP4 if --video)
-  X / Down   discard episode + reset (no HDF5 / no MP4 write)
+  R / Up     save episode + reset, new random start pose
+  X / Down   discard episode + reset, SAME start pose (retry attempt)
+  Right      discard episode + reset, new random start pose
   XR START / STOP  begin or pause recording (or pass --auto_start)
   Keys: X11 global poll (works while headset has focus) + Isaac window
   Tip: if loco hz still low, raise --loco_render_interval (e.g. 10)
@@ -576,8 +588,9 @@ _HELP_GAMEPAD = """
   L2       analog grasp squeeze (0..1)         (= G)
   L1       teleport XR view onto the robot     (= T)
   R1       restore loco->static checkpoint     (= V / Left arrow)
-  D-pad ^  save episode + reset                (= R / Up arrow)
-  D-pad v  discard episode + reset             (= X / Down arrow)
+  D-pad ^  save episode + reset, new pose      (= R / Up arrow)
+  D-pad v  discard + reset, SAME pose (retry)  (= X / Down arrow)
+  D-pad >  discard + reset, new pose           (= Right arrow)
   D-pad <  restore loco->static checkpoint     (= V / Left arrow)
   Options  start / stop recording        (= XR START / STOP)
   Pad is read from /dev/input/js* — works while the headset has focus
@@ -586,7 +599,7 @@ _HELP_GAMEPAD = """
 """
 
 _MOVE_KEYS = ("W", "A", "S", "D", "Q", "E")
-_EDGE_KEYS = ("C", "R", "X", "T", "V", "UP", "DOWN", "LEFT")
+_EDGE_KEYS = ("C", "R", "X", "T", "V", "UP", "DOWN", "LEFT", "RIGHT")
 
 
 class PinkJointHold:
@@ -717,6 +730,7 @@ class _X11KeyPoller:
         "UP": 0xFF52,
         "DOWN": 0xFF54,
         "LEFT": 0xFF51,
+        "RIGHT": 0xFF53,
     }
 
     def __init__(self) -> None:
@@ -784,6 +798,7 @@ class RecordKeyboard:
         on_toggle_mode: Callable[[], None] | None = None,
         on_save_reset: Callable[[], None] | None = None,
         on_discard_reset: Callable[[], None] | None = None,
+        on_next_pose_reset: Callable[[], None] | None = None,
         on_teleport_view: Callable[[], None] | None = None,
         on_restore_checkpoint: Callable[[], None] | None = None,
     ) -> None:
@@ -797,6 +812,7 @@ class RecordKeyboard:
         self._on_toggle_mode = on_toggle_mode
         self._on_save_reset = on_save_reset
         self._on_discard_reset = on_discard_reset
+        self._on_next_pose_reset = on_next_pose_reset
         self._on_teleport_view = on_teleport_view
         self._on_restore_checkpoint = on_restore_checkpoint
         self._carb_pressed: set[str] = set()
@@ -864,6 +880,8 @@ class RecordKeyboard:
             self._on_save_reset()
         if newly & {"X", "DOWN"} and self._on_discard_reset is not None:
             self._on_discard_reset()
+        if "RIGHT" in newly and self._on_next_pose_reset is not None:
+            self._on_next_pose_reset()
         if "T" in newly and self._on_teleport_view is not None:
             self._on_teleport_view()
         if newly & {"V", "LEFT"} and self._on_restore_checkpoint is not None:
@@ -904,7 +922,39 @@ def setup_output_directories() -> tuple[str, str]:
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
         print(f"Created output directory: {output_dir}")
+    # The HDF5 handler opens the dataset with mode "w" (truncate), so reusing a
+    # filename would wipe previously recorded demos — auto-suffix instead.
+    base_name = output_file_name
+    suffix = 0
+    while os.path.exists(os.path.join(output_dir, output_file_name + ".hdf5")):
+        suffix += 1
+        output_file_name = f"{base_name}_{suffix:03d}"
+    if suffix:
+        print(f"Dataset file {base_name}.hdf5 already exists; writing to {output_file_name}.hdf5 instead")
     return output_dir, output_file_name
+
+
+def repo_git_commit() -> str:
+    """Current commit hash of this repo, with a ``-dirty`` marker for uncommitted changes."""
+    try:
+        commit = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=_repo_root,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        dirty = (
+            subprocess.run(
+                ["git", "diff", "--quiet", "HEAD"],
+                cwd=_repo_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            ).returncode
+            != 0
+        )
+        return f"{commit}-dirty" if dirty else commit
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
 
 
 def exported_demo_count(env) -> int:
@@ -1180,6 +1230,10 @@ def main() -> None:
         try:
             handler.add_env_args(
                 {
+                    # Session provenance: the seed that drove start-pose randomization
+                    # and the code version that produced these demos.
+                    "seed": int(args_cli.seed),
+                    "git_commit": repo_git_commit(),
                     "sberchel_joint_names": list(robot.data.joint_names),
                     "sberchel_upper_controlled_joint_names": list(
                         upper_term._controlled_joint_names
@@ -1224,6 +1278,10 @@ def main() -> None:
 
     should_reset = False
     should_discard_reset = False
+    should_next_reset = False
+    # Start pose of the episode in progress; discard-reset (D-pad down / X) reapplies
+    # it after env.reset() so a failed attempt can be retried from the same spawn.
+    episode_start_root_pose = robot.data.root_state_w[:, :7].clone()
     teleoperation_active = (not args_cli.xr) or args_cli.auto_start
     running_recording_instance = (not args_cli.xr) or args_cli.auto_start
     step_count = 0
@@ -1320,7 +1378,16 @@ def main() -> None:
     def discard_reset_env() -> None:
         nonlocal should_discard_reset
         should_discard_reset = True
-        print("Discard reset requested — episode will NOT be saved; environment reset on next step")
+        print(
+            "Discard reset requested — episode will NOT be saved; retrying the SAME start pose"
+        )
+
+    def next_pose_reset_env() -> None:
+        nonlocal should_next_reset
+        should_next_reset = True
+        print(
+            "Next-pose reset requested — episode will NOT be saved; advancing to a NEW start pose"
+        )
 
     def capture_checkpoint() -> None:
         """Snapshot everything needed to roll the episode back to this instant.
@@ -1484,6 +1551,7 @@ def main() -> None:
                 on_toggle_mode=toggle_loco_mode,
                 on_save_reset=reset_env,
                 on_discard_reset=discard_reset_env,
+                on_next_pose_reset=next_pose_reset_env,
                 on_teleport_view=teleport_view_to_robot,
                 on_restore_checkpoint=restore_checkpoint,
             )
@@ -1501,6 +1569,7 @@ def main() -> None:
                 on_toggle_mode=toggle_loco_mode,
                 on_save_reset=reset_env,
                 on_discard_reset=discard_reset_env,
+                on_next_pose_reset=next_pose_reset_env,
                 on_teleport_view=teleport_view_to_robot,
                 on_toggle_recording=toggle_recording_instance,
                 on_restore_checkpoint=restore_checkpoint,
@@ -1848,12 +1917,25 @@ def main() -> None:
                 else:
                     base_env.sim.render()
 
-                if should_reset or should_discard_reset:
-                    discard = should_discard_reset
+                if should_reset or should_discard_reset or should_next_reset:
+                    discard = should_discard_reset or should_next_reset
+                    retry_same_pose = should_discard_reset
                     if discard:
                         base_env.recorder_manager.cfg.export_in_record_pre_reset = False
                         discard_viewport_video_frames(env)
                     env.reset()
+                    if retry_same_pose:
+                        # Overwrite the freshly sampled random spawn with the pose the
+                        # discarded attempt started from, so it can be retried.
+                        robot.write_root_pose_to_sim(episode_start_root_pose)
+                        robot.write_root_velocity_to_sim(
+                            torch.zeros_like(robot.data.root_state_w[:, 7:13])
+                        )
+                        # env.reset() already recorded initial_state with the discarded
+                        # sample; recapture it so the episode replays from the true spawn.
+                        base_env.recorder_manager.reset()
+                        base_env.recorder_manager.record_post_reset(None)
+                    episode_start_root_pose = robot.data.root_state_w[:, :7].clone()
                     # Targets survive reset while the robot is teleported back to
                     # its init pose, so they no longer describe the robot.
                     pink_hold.invalidate()
@@ -1883,12 +1965,16 @@ def main() -> None:
                         anchor_teleporter.teleport_to_robot(robot)
                     should_reset = False
                     should_discard_reset = False
+                    should_next_reset = False
                     first_active_logged = False
                     step_count = 0
                     demo_count = exported_demo_count(base_env)
                     if discard:
+                        pose_note = (
+                            "same start pose retried" if retry_same_pose else "new start pose"
+                        )
                         print(
-                            f"Discard reset complete (episode not saved). "
+                            f"Discard reset complete (episode not saved, {pose_note}). "
                             f"Recorded {demo_count} episode(s).",
                             flush=True,
                         )

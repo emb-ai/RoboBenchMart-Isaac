@@ -3,8 +3,11 @@
 import torch
 import isaaclab.envs.mdp as mdp
 from isaaclab.devices.openxr import XrCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.utils import configclass
 from isaaclab.envs import ManagerBasedRLEnvCfg
+
+import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events
 
 from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_XR_LOCOMOTION_NECK_ROBOT
 from dsynth_isaac.robots.sberchel_camera_cfg import add_sberchel_cameras
@@ -78,10 +81,30 @@ class SberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
         setup_sberchel_xr_pink_and_teleop(self)
 
 @configclass
+class SberDemoEventCfg:
+    """Randomize the start pose on every reset so trajectories don't all begin identically."""
+
+    randomize_robot_start_pose = EventTerm(
+        func=ds_events.reset_root_pose_in_region_facing_target,
+        mode="reset",
+        params={
+            # Free floor strip behind (west of) the packing table, which spans
+            # x in [6.1, 6.9], y in [4.8, 7.2] in the small_store_aij layout.
+            "pos_x_range": (4.7, 5.7),
+            "pos_y_range": (4.6, 7.4),
+            # Yaw aims at a random point on the shelf-row front (shelves sit at x ~ 9.65).
+            "target_x_range": (9.4, 9.7),
+            "target_y_range": (3.2, 8.8),
+            "yaw_noise_range": (-0.1, 0.1),
+        },
+    )
+
+
+@configclass
 class SberchelXRDemoEnvCfg(ManagerBasedRLEnvCfg):
     scene: SberDemoSceneCfg = SberDemoSceneCfg(replicate_physics=False, env_spacing=20.5, filter_collisions=False)
     actions = SberchelXRActionsCfg()
-    events: None
+    events: SberDemoEventCfg = SberDemoEventCfg()
     observations: SberchelObservationsCfg = SberchelObservationsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
 
