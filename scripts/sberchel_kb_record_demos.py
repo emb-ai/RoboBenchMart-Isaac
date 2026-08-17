@@ -347,10 +347,10 @@ parser.add_argument(
     action="store_true",
     default=False,
     help=(
-        "The left arm/hand never follows the operator: in static mode it holds the "
-        "pose (wrist + fingers, pelvis-relative) it had when static mode was entered, "
-        "and squeeze does not affect the left fingers. Locomotion-mode freeze/replay "
-        "is unchanged."
+        "The left arm/hand never follows the operator: it holds the measured pose "
+        "(wrist pelvis-relative + fingers) latched shortly after each episode reset, "
+        "re-latched on every static-mode entry, in both locomotion and static modes; "
+        "squeeze does not affect the left fingers."
     ),
 )
 parser.add_argument(
@@ -511,6 +511,16 @@ _LEFT_WRIST_SLICE = slice(0, 7)
 _LEFT_FINGER_DIMS = tuple(
     14 + i for i, name in enumerate(SBERCHEL_HAND_JOINT_NAMES) if name.startswith("left_")
 )
+
+# The reset pose writes left thumb yaw at -0.1, inside the palm collision hull
+# (PhysX self-collisions ignore the MJCF contype/conaffinity filters), so PhysX
+# kicks the thumb out and it settles onto a contact equilibrium near 0.24 rad.
+# Commanding the unreachable -0.1 back at it saturates the 8.5 Nm finger drive
+# against that contact and the joint chatters at ~37 Hz. Latch the
+# --disable_left_hand hold from the *measured* pose only after this many env
+# steps (~0.2 s at 150 Hz) so it records the reachable equilibrium, not the
+# in-penetration reset value.
+_LEFT_HOLD_SETTLE_STEPS = 30
 
 _HELP_KEYBOARD = """
 ==================== KB RECORD CONTROLS ====================
@@ -1216,6 +1226,18 @@ def main() -> None:
             apply_sberchel_xr_teleop_pd_gains(robot)
         set_render_interval(base_env, 1)
 
+    def apply_left_hold(upper_body: torch.Tensor) -> torch.Tensor:
+        """Overwrite left wrist/finger slots with the --disable_left_hand hold."""
+        if not args_cli.disable_left_hand or left_hold_snapshot is None:
+            return upper_body
+        left_hold = build_upper_from_frozen_snapshot(
+            robot, left_hold_snapshot, upper_body.device
+        ).to(upper_body.dtype)
+        upper_body[..., _LEFT_WRIST_SLICE] = left_hold[_LEFT_WRIST_SLICE]
+        for dim in _LEFT_FINGER_DIMS:
+            upper_body[..., dim] = left_hold[dim]
+        return upper_body
+
     def reset_env() -> None:
         nonlocal should_reset
         should_reset = True
@@ -1590,6 +1612,19 @@ def main() -> None:
                         hz_window_steps = 0
                         last_hz_t = now
                     robot_pos, robot_yaw = robot_root_state(robot)
+                    # Latch the left-hand hold from the settled measured pose so
+                    # it applies from (nearly) step 0 of every episode, not only
+                    # after the first static-mode entry.
+                    if (
+                        args_cli.disable_left_hand
+                        and left_hold_snapshot is None
+                        and step_count >= _LEFT_HOLD_SETTLE_STEPS
+                    ):
+                        left_hold_snapshot = capture_frozen_upper(robot)
+                        print(
+                            f"[left-hold] latched at step {step_count} from measured pose",
+                            flush=True,
+                        )
                     vx = vy = wz = 0.0
                     upper_body_mode: UpperBodyMode | None = None
                     neck_yaw_cmd, neck_pitch_cmd = 0.0, 0.0
@@ -1603,8 +1638,10 @@ def main() -> None:
                                 frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
                                 pink_hold.refresh(robot)
                             # Wrist targets still recorded for replay; Pink solve is skipped.
-                            upper_body = build_upper_from_frozen_snapshot(
-                                robot, frozen_snapshot, base_env.device
+                            upper_body = apply_left_hold(
+                                build_upper_from_frozen_snapshot(
+                                    robot, frozen_snapshot, base_env.device
+                                )
                             )
                             upper_body_mode = "frozen"
                             last_neck_targets = (0.0, 0.0)
@@ -1617,13 +1654,7 @@ def main() -> None:
                                 [r.retarget(raw) for r in teleop_interface._retargeters],
                                 dim=-1,
                             )
-                            if args_cli.disable_left_hand and left_hold_snapshot is not None:
-                                left_hold = build_upper_from_frozen_snapshot(
-                                    robot, left_hold_snapshot, upper_body.device
-                                ).to(upper_body.dtype)
-                                upper_body[..., _LEFT_WRIST_SLICE] = left_hold[_LEFT_WRIST_SLICE]
-                                for dim in _LEFT_FINGER_DIMS:
-                                    upper_body[..., dim] = left_hold[dim]
+                            upper_body = apply_left_hold(upper_body)
                             last_teleop_upper = (
                                 upper_body.squeeze(0).clone()
                                 if upper_body.ndim > 1
@@ -1729,6 +1760,9 @@ def main() -> None:
                         base_env.recorder_manager.cfg.export_in_record_pre_reset = True
                     hold_xy_yaw = None
                     sim_checkpoint = None  # belongs to the finished episode
+                    # Re-latch after the reset pose settles; the stale hold's
+                    # pelvis-relative wrist belongs to the previous episode.
+                    left_hold_snapshot = None
                     enter_locomotion_mode(capture_frozen=False)
                     last_neck_targets = (0.0, 0.0)
                     (
