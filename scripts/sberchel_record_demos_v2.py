@@ -104,7 +104,11 @@ from isaaclab_tasks.utils import parse_env_cfg
 
 import dsynth_isaac.tasks.manager_based  # noqa: F401
 
-from dsynth_isaac.recorders import SberchelXRRecorderManagerCfg, stash_locomotion_command
+from dsynth_isaac.recorders import (
+    SberchelXRRecorderManagerCfg,
+    enable_async_episode_export,
+    stash_locomotion_command,
+)
 
 from dsynth_isaac.teleop.sberchel_head_follow import (
     UpperBodyMode,
@@ -220,6 +224,7 @@ def main() -> None:
     env_cfg = create_environment_config(output_dir, output_file_name)
 
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
+    enable_async_episode_export(env)
     env.sim.reset()
     env.reset(seed=args_cli.seed)
 

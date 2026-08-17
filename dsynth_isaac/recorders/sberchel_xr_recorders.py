@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import queue
+import threading
+import traceback
+
 import torch
 
 from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
@@ -164,6 +168,76 @@ class PostStepJointTargetsRecorderCfg(RecorderTermCfg):
     """Configuration for the joint target/state recorder term."""
 
     class_type: type[RecorderTerm] = PostStepJointTargetsRecorder
+
+
+class AsyncDatasetFileHandler:
+    """Run ``write_episode``/``flush`` of a dataset file handler on a background thread.
+
+    ``RecorderManager.export_episodes`` writes the whole episode (gzip-compressed,
+    camera frames included) synchronously inside ``env.reset()``, stalling teleop
+    for seconds between demos. Export hands each episode buffer off wholesale and
+    immediately replaces it with a fresh ``EpisodeData``, so nothing mutates the
+    episode after enqueue — a single writer thread can compress and write it while
+    the next demo is already being collected. All file access (including attrs via
+    ``add_env_args``) goes through the queue so only the worker touches h5py.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self._queue: queue.Queue = queue.Queue()
+        self._closed = False
+        self._worker = threading.Thread(target=self._run, name="episode-writer", daemon=True)
+        self._worker.start()
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            try:
+                if item is None:
+                    return
+                fn_name, args, kwargs = item
+                getattr(self._inner, fn_name)(*args, **kwargs)
+                if fn_name == "write_episode":
+                    print(f"[episode-writer] episode saved (total in file: {self._inner.demo_count})", flush=True)
+            except Exception:
+                print("[episode-writer] background write failed:", flush=True)
+                traceback.print_exc()
+            finally:
+                self._queue.task_done()
+
+    def _submit(self, fn_name: str, *args, **kwargs) -> None:
+        if self._closed:
+            getattr(self._inner, fn_name)(*args, **kwargs)
+            return
+        self._queue.put((fn_name, args, kwargs))
+
+    def write_episode(self, episode, demo_id=None) -> None:
+        self._submit("write_episode", episode, demo_id)
+
+    def flush(self) -> None:
+        self._submit("flush")
+
+    def add_env_args(self, env_args: dict) -> None:
+        self._submit("add_env_args", env_args)
+
+    def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            self._queue.put(None)
+            self._worker.join()
+        self._inner.close()
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def enable_async_episode_export(env) -> None:
+    """Wrap the env recorder manager's file handlers so episode export never blocks the sim loop."""
+    recorder_manager = getattr(env, "unwrapped", env).recorder_manager
+    for attr in ("_dataset_file_handler", "_failed_episode_dataset_file_handler"):
+        handler = getattr(recorder_manager, attr, None)
+        if handler is not None and not isinstance(handler, AsyncDatasetFileHandler):
+            setattr(recorder_manager, attr, AsyncDatasetFileHandler(handler))
 
 
 @configclass

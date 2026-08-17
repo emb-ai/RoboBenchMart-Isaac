@@ -475,6 +475,7 @@ import dsynth_isaac.tasks.manager_based  # noqa: F401
 
 from dsynth_isaac.recorders import (
     SberchelXRRecorderManagerCfg,
+    enable_async_episode_export,
     stash_locomotion_command,
     stash_teleop_state,
 )
@@ -1075,6 +1076,7 @@ def main() -> None:
 
     render_mode = "rgb_array" if args_cli.video else None
     env = gym.make(args_cli.task, cfg=env_cfg, render_mode=render_mode)
+    enable_async_episode_export(env)
     if args_cli.video:
         video_folder = Path(args_cli.video_dir) if args_cli.video_dir else Path(output_dir) / "videos"
         video_folder.mkdir(parents=True, exist_ok=True)

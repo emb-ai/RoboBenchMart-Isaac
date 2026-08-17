@@ -3,8 +3,10 @@
 from dsynth_isaac.recorders.sberchel_xr_recorders import (
     LOCO_COMMAND_ATTR,
     TELEOP_STATE_ATTR,
+    AsyncDatasetFileHandler,
     LocomotionCommandRecorder,
     LocomotionCommandRecorderCfg,
+    enable_async_episode_export,
     PostStepJointTargetsRecorder,
     PostStepJointTargetsRecorderCfg,
     PreStepRgbCameraObservationsRecorder,
@@ -19,8 +21,10 @@ from dsynth_isaac.recorders.sberchel_xr_recorders import (
 __all__ = [
     "LOCO_COMMAND_ATTR",
     "TELEOP_STATE_ATTR",
+    "AsyncDatasetFileHandler",
     "LocomotionCommandRecorder",
     "LocomotionCommandRecorderCfg",
+    "enable_async_episode_export",
     "PostStepJointTargetsRecorder",
     "PostStepJointTargetsRecorderCfg",
     "PreStepRgbCameraObservationsRecorder",
