@@ -22,6 +22,7 @@ With ``--video``, also records viewport MP4s (one per replayed episode) via Gymn
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -157,6 +158,17 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Enable Pinocchio (required for Pink IK replay).",
+)
+parser.add_argument(
+    "--enhanced_determinism",
+    action="store_true",
+    default=False,
+    help=(
+        "Force PhysX enhanced determinism (PhysxCfg.enable_enhanced_determinism) on for "
+        "replay. Normally not needed: replay auto-matches the setting stored in the "
+        "dataset's provenance (sberchel_enhanced_determinism), since replaying with a "
+        "different value than the recording changes the physics and causes divergence."
+    ),
 )
 parser.add_argument(
     "--video",
@@ -775,6 +787,22 @@ def main() -> None:
 
     num_envs = args_cli.num_envs
     env_cfg = parse_env_cfg(env_name, device=args_cli.device, num_envs=num_envs)
+
+    # PhysX enhanced determinism is a plant-level setting: replaying with a
+    # different value than the recording changes the simulation itself, so
+    # auto-match the dataset provenance; --enhanced_determinism forces it on.
+    with h5py.File(args_cli.dataset_file, "r") as _f:
+        _dataset_env_args = json.loads(_f["data"].attrs.get("env_args", "{}"))
+    recorded_enhanced_determinism = bool(_dataset_env_args.get("sberchel_enhanced_determinism", False))
+    enhanced_determinism = args_cli.enhanced_determinism or recorded_enhanced_determinism
+    if recorded_enhanced_determinism and not args_cli.enhanced_determinism:
+        print("PhysX enhanced determinism: ON (auto-matched from dataset provenance)")
+    elif args_cli.enhanced_determinism and not recorded_enhanced_determinism:
+        print(
+            "Warning: --enhanced_determinism forced on, but the dataset was recorded "
+            "without it — the replayed physics will not match the recording exactly."
+        )
+    env_cfg.sim.physx.enable_enhanced_determinism = enhanced_determinism
 
     success_term = None
     if args_cli.validate_success_rate:

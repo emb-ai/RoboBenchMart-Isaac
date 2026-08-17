@@ -83,6 +83,19 @@ parser.add_argument(
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
 parser.add_argument("--seed", type=int, default=42, help="Random seed.")
 parser.add_argument(
+    "--enhanced_determinism",
+    action="store_true",
+    default=False,
+    help=(
+        "Enable PhysX enhanced determinism (PhysxCfg.enable_enhanced_determinism): "
+        "simulation results become independent of CPU worker-thread count and island "
+        "batching, at some performance cost. Improves the odds that "
+        "sberchel_replay_demos.py reproduces the recorded trajectory bit-for-bit "
+        "(replay auto-matches this setting from dataset provenance). Not a full "
+        "guarantee on the GPU pipeline. Recorded as sberchel_enhanced_determinism."
+    ),
+)
+parser.add_argument(
     "--enable_pinocchio",
     action="store_true",
     default=False,
@@ -961,6 +974,10 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
     env_cfg.terminations.time_out = None
     env_cfg.observations.policy.concatenate_terms = False
 
+    if args_cli.enhanced_determinism:
+        env_cfg.sim.physx.enable_enhanced_determinism = True
+        print(">>> PhysX enhanced determinism: ON (recorded in dataset provenance)", flush=True)
+
     if args_cli.enable_cameras:
         # Keep only the requested robot cameras: extras slow teleop rendering
         # and bloat the HDF5 via the RGB recorder term.
@@ -1176,6 +1193,9 @@ def main() -> None:
                     "sberchel_gravity_compensation": bool(
                         getattr(upper_term.cfg, "enable_gravity_compensation", False)
                     ),
+                    # Plant-level PhysX setting: replay must run with the same
+                    # value or the simulation itself differs from the recording.
+                    "sberchel_enhanced_determinism": bool(args_cli.enhanced_determinism),
                     # Demonstrator-side Pink IK shaping (not a plant difference,
                     # but affects how closely demos track the operator's hand).
                     "sberchel_pink_ik_tasks": [
