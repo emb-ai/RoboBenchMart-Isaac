@@ -818,6 +818,12 @@ def main() -> None:
     env_cfg.recorders = {}
     env_cfg.terminations = {}
 
+    # Match green_challenge rendering: it re-enables translucency on top of the
+    # "balanced" preset (which disables it) and leaves antialiasing_mode unset
+    # so the preset decides AA.
+    env_cfg.sim.render.enable_translucency = True
+    env_cfg.sim.render.antialiasing_mode = None
+
     selected_cameras = parse_camera_names(args_cli.cameras) if camera_augment else ()
     if camera_augment and not selected_cameras:
         raise ValueError("--output_dataset_file requires at least one camera in --cameras.")

@@ -974,6 +974,10 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
     env_cfg.terminations.time_out = None
     env_cfg.observations.policy.concatenate_terms = False
 
+    # green_challenge re-enables translucency on top of the "balanced" preset
+    # (which disables it); match so recorded camera frames look the same.
+    env_cfg.sim.render.enable_translucency = True
+
     if args_cli.enhanced_determinism:
         env_cfg.sim.physx.enable_enhanced_determinism = True
         print(">>> PhysX enhanced determinism: ON (recorded in dataset provenance)", flush=True)
