@@ -383,6 +383,43 @@ def build_upper_from_frozen_snapshot(
     )
 
 
+def smoothstep(alpha: float) -> float:
+    """Ease-in/ease-out ramp: 0->1 with zero slope at both ends."""
+    a = min(1.0, max(0.0, alpha))
+    return a * a * (3.0 - 2.0 * a)
+
+
+def _slerp_quat_wxyz(q0: np.ndarray, q1: np.ndarray, alpha: float) -> np.ndarray:
+    q0 = q0 / np.linalg.norm(q0)
+    q1 = q1 / np.linalg.norm(q1)
+    dot = float(np.dot(q0, q1))
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    if dot > 0.9995:
+        out = q0 + alpha * (q1 - q0)
+        return out / np.linalg.norm(out)
+    theta = math.acos(min(1.0, dot))
+    sin_theta = math.sin(theta)
+    return (
+        math.sin((1.0 - alpha) * theta) * q0 + math.sin(alpha * theta) * q1
+    ) / sin_theta
+
+
+def blend_upper_command(
+    from_upper: torch.Tensor, to_upper: torch.Tensor, alpha: float
+) -> torch.Tensor:
+    """Blend two 26D upper commands: lerp wrist positions + fingers, slerp wrist quats."""
+    f = from_upper.reshape(-1).detach().cpu().numpy().astype(np.float64)
+    t = to_upper.reshape(-1).detach().cpu().numpy().astype(np.float64)
+    out = f + alpha * (t - f)
+    for quat_slice in (slice(3, 7), slice(10, 14)):
+        out[quat_slice] = _slerp_quat_wxyz(f[quat_slice], t[quat_slice], alpha)
+    return torch.as_tensor(out, dtype=to_upper.dtype, device=to_upper.device).reshape(
+        to_upper.shape
+    )
+
+
 def update_loco_arrived(
     dist_xy: float,
     yaw_err: float,

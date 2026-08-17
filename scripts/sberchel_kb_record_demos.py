@@ -107,6 +107,17 @@ parser.add_argument(
     help="Strafe speed for Q/E (m/s).",
 )
 parser.add_argument(
+    "--static_blend_time",
+    type=float,
+    default=0.4,
+    help=(
+        "Seconds (sim time) to ramp the arm + neck commands from the held pose "
+        "into the live XR targets after every entry into static mode. Without it "
+        "the wrist/neck commands snap to wherever the hand/headset currently is "
+        "in a single step. 0 disables the ramp."
+    ),
+)
+parser.add_argument(
     "--station_lin_gain",
     type=float,
     default=1.5,
@@ -471,9 +482,11 @@ from dsynth_isaac.recorders import (
 from dsynth_isaac.teleop.sberchel_head_follow import (
     FrozenUpperSnapshot,
     UpperBodyMode,
+    blend_upper_command,
     build_idle_upper_from_robot,
     build_upper_from_frozen_snapshot,
     capture_frozen_upper,
+    smoothstep,
     create_sberchel_xr_teleop_interface,
     headset_to_neck_targets,
     pack_sberchel_xr_action,
@@ -1019,6 +1032,19 @@ def capture_hold_pose_from_robot(robot) -> tuple[float, float, float]:
     return x, y, yaw
 
 
+def measured_neck_targets(robot) -> tuple[float, float]:
+    """Neck action values that reproduce the measured neck pose (offset-corrected)."""
+    name_to_id = {name: idx for idx, name in enumerate(robot.joint_names)}
+    joint_pos = robot.data.joint_pos[0]
+    default_pos = robot.data.default_joint_pos[0]
+    yaw_id = name_to_id["neck_yaw_joint"]
+    pitch_id = name_to_id["neck_pitch_joint"]
+    return (
+        float(joint_pos[yaw_id] - default_pos[yaw_id]),
+        float(joint_pos[pitch_id] - default_pos[pitch_id]),
+    )
+
+
 def reset_teleop_state(
     *,
     env,
@@ -1192,6 +1218,12 @@ def main() -> None:
     # Auto-checkpoint taken at every loco->static switch: full scene physics
     # state + policy carry-over + episode/video frame counts for rollback.
     sim_checkpoint: dict | None = None
+    # --static_blend_time: on every static-mode entry, ramp the upper/neck
+    # commands from this held pose into the live XR targets instead of snapping.
+    static_blend_from: FrozenUpperSnapshot | None = None
+    static_blend_neck_from: tuple[float, float] = (0.0, 0.0)
+    static_blend_steps_done = 0
+    static_blend_total = 0
 
     def enter_locomotion_mode(*, capture_frozen: bool) -> None:
         nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
@@ -1212,6 +1244,8 @@ def main() -> None:
     def enter_static_mode() -> None:
         nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
         nonlocal left_hold_snapshot
+        nonlocal static_blend_from, static_blend_neck_from
+        nonlocal static_blend_steps_done, static_blend_total
         loco_mode = "static"
         hold_xy_yaw = capture_hold_pose_from_robot(robot)
         station_keeper.reset()
@@ -1219,6 +1253,20 @@ def main() -> None:
         if args_cli.disable_left_hand:
             # The left hand is never used, so the measured pose is the hold target.
             left_hold_snapshot = capture_frozen_upper(robot)
+        if args_cli.static_blend_time > 0.0:
+            # Ramp from what is being commanded right now (the loco hold pose if
+            # there is one, else the measured pose) into the live XR targets.
+            static_blend_from = (
+                frozen_snapshot
+                if frozen_snapshot is not None
+                else capture_frozen_upper(robot, last_teleop_upper)
+            )
+            static_blend_neck_from = last_neck_targets
+            static_blend_steps_done = 0
+            step_dt = float(getattr(base_env, "step_dt", 1.0 / 50.0))
+            static_blend_total = max(1, round(args_cli.static_blend_time / step_dt))
+        else:
+            static_blend_from = None
         frozen_snapshot = None
         last_neck_targets = (0.0, 0.0)
         pink_hold.disable()
@@ -1277,7 +1325,7 @@ def main() -> None:
         print("[checkpoint] captured (V / R1 rolls sim + recording back here)", flush=True)
 
     def restore_checkpoint() -> None:
-        nonlocal last_teleop_upper
+        nonlocal last_teleop_upper, last_neck_targets, frozen_snapshot
         if not teleoperation_active:
             print("[checkpoint] ignored — recording is stopped", flush=True)
             return
@@ -1300,6 +1348,10 @@ def main() -> None:
         # stale until the next stepped frame, same as after env.reset().
         pink_hold.invalidate()
         last_teleop_upper = None
+        # Blend seeds: the stale pre-restore commands no longer match the scene,
+        # so restart the static ramp from the restored measured pose.
+        frozen_snapshot = None
+        last_neck_targets = measured_neck_targets(robot)
         enter_static_mode()
         if anchor_teleporter is not None:
             anchor_teleporter.teleport_to_robot(robot)
@@ -1628,6 +1680,7 @@ def main() -> None:
                     vx = vy = wz = 0.0
                     upper_body_mode: UpperBodyMode | None = None
                     neck_yaw_cmd, neck_pitch_cmd = 0.0, 0.0
+                    blend_alpha: float | None = None
                     squeeze_cmd = shape_squeeze(controller_squeeze())
                     push_squeeze(squeeze_cmd)
 
@@ -1655,6 +1708,21 @@ def main() -> None:
                                 dim=-1,
                             )
                             upper_body = apply_left_hold(upper_body)
+                            if static_blend_from is not None:
+                                static_blend_steps_done += 1
+                                blend_alpha = smoothstep(
+                                    static_blend_steps_done / static_blend_total
+                                )
+                                from_upper = apply_left_hold(
+                                    build_upper_from_frozen_snapshot(
+                                        robot, static_blend_from, upper_body.device
+                                    )
+                                )
+                                upper_body = blend_upper_command(
+                                    from_upper, upper_body, blend_alpha
+                                )
+                                if static_blend_steps_done >= static_blend_total:
+                                    static_blend_from = None
                             last_teleop_upper = (
                                 upper_body.squeeze(0).clone()
                                 if upper_body.ndim > 1
@@ -1672,6 +1740,13 @@ def main() -> None:
                             # Missing HEAD: hold last neck targets from static mode.
 
                         neck_yaw_cmd, neck_pitch_cmd = last_neck_targets
+                        if blend_alpha is not None:
+                            neck_yaw_cmd = static_blend_neck_from[0] + blend_alpha * (
+                                neck_yaw_cmd - static_blend_neck_from[0]
+                            )
+                            neck_pitch_cmd = static_blend_neck_from[1] + blend_alpha * (
+                                neck_pitch_cmd - static_blend_neck_from[1]
+                            )
 
                         if upper_body.ndim == 1:
                             upper_body = upper_body.unsqueeze(0)
