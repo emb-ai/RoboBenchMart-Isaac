@@ -425,6 +425,7 @@ class SberchelRetargeter(GR1T2Retargeter):
                 },
             )
             self._markers = VisualizationMarkers(marker_cfg)
+            self._markers_hidden = False
 
         print(
             "[SberchelRetargeter] ready — absolute wrist tracking, "
@@ -434,6 +435,17 @@ class SberchelRetargeter(GR1T2Retargeter):
 
     def recalibrate_wrists(self) -> None:
         return
+
+    def hide_visualization(self) -> None:
+        """Hide the red hand-joint markers until the next ``retarget`` draw.
+
+        The markers are only repositioned inside ``retarget``, which runs in
+        static teleop mode — after an env reset they would otherwise float at
+        the previous episode's location until the operator re-enters static mode.
+        """
+        if self._enable_visualization and not self._markers_hidden:
+            self._markers.set_visibility(False)
+            self._markers_hidden = True
 
     def set_squeeze(self, value: float) -> None:
         """Set the grasp squeeze command (0 = follow XR hand exactly, 1 = full close)."""
@@ -482,6 +494,9 @@ class SberchelRetargeter(GR1T2Retargeter):
             joints_position[::2] = np.array([pose[:3] for pose in left_hand_poses.values()])
             joints_position[1::2] = np.array([pose[:3] for pose in right_hand_poses.values()])
             self._markers.visualize(translations=torch.tensor(joints_position, device=self._sim_device))
+            if self._markers_hidden:
+                self._markers.set_visibility(True)
+                self._markers_hidden = False
 
         left_targets, right_targets = self._compute_finger_targets(left_hand_poses, right_hand_poses)
 

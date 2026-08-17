@@ -561,11 +561,12 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
     headset_to_neck_targets,
     pack_sberchel_xr_action,
     robot_root_state,
+    yaw_from_quat_wxyz,
     StationKeeper,
     sync_retargeter_idle_from_robot,
 )
 from dsynth_isaac.teleop.gamepad import RecordGamepad
-from dsynth_isaac.teleop.xr_anchor import XrAnchorTeleporter
+from dsynth_isaac.teleop.xr_anchor import XrAnchorTeleporter, xr_display_active
 from dsynth_isaac.teleop.xr_target_hud import XrTargetHud
 from dsynth_isaac.robots.sberchel_cfg import (
     apply_sberchel_loco_upper_pd_gains,
@@ -1213,6 +1214,12 @@ def reset_teleop_state(
         apply_sberchel_loco_upper_pd_gains(robot, include_neck=not args_cli.keep_stiff_neck)
     teleop_interface.reset()
     sync_retargeter_idle_from_robot(teleop_interface, robot)
+    # The red hand-joint markers are only redrawn by retarget() in static mode;
+    # hide them so they don't float at the previous episode's location.
+    for retargeter in getattr(teleop_interface, "_retargeters", []):
+        hide = getattr(retargeter, "hide_visualization", None)
+        if callable(hide):
+            hide()
     idle_upper = build_idle_upper_from_robot(robot, env.device)
     return None, None, idle_upper
 
@@ -1699,9 +1706,27 @@ def main() -> None:
     idle_upper = build_idle_upper_from_robot(robot, base_env.device)
 
     # Anchor prim only exists once the OpenXR device has been created above.
+    # Latch the anchor offset against the robot's NOMINAL init pose (what
+    # ``xr.anchor_pos`` was tuned for), not the live pose: the spawn is
+    # randomized per episode, so the live pose would bake a random offset
+    # into every teleport.
+    nominal_init = env_cfg.scene.robot.init_state
     anchor_teleporter = (
-        XrAnchorTeleporter(env_cfg.xr, robot) if args_cli.xr else None
+        XrAnchorTeleporter(
+            env_cfg.xr,
+            robot,
+            ref_pose=(
+                tuple(float(v) for v in nominal_init.pos),
+                yaw_from_quat_wxyz(nominal_init.rot),
+            ),
+        )
+        if args_cli.xr
+        else None
     )
+    if anchor_teleporter is not None:
+        # The OpenXR device placed the anchor at the static cfg pose; move it
+        # onto the randomized spawn so the operator starts at the robot.
+        anchor_teleporter.teleport_to_robot(robot)
 
     def teleport_view_to_robot() -> None:
         """Snap the XR view back onto the robot at the episode-start offset."""
@@ -1903,10 +1928,28 @@ def main() -> None:
     elif args_cli.auto_start:
         print("Auto-start enabled: recording/WASD active immediately.", flush=True)
 
+    # Anchor rotation written before the headset session is live does not
+    # survive session start (position does), so the very first trajectory
+    # would face the static-anchor direction instead of the robot's. Re-assert
+    # the anchor on every False -> True edge of the live-session signal so the
+    # operator always starts looking where the robot looks.
+    xr_session_was_live = False
+
     while simulation_app.is_running():
         try:
             with torch.inference_mode():
                 poll_controllers()
+                if anchor_teleporter is not None:
+                    xr_session_live = xr_display_active()
+                    if xr_session_live and not xr_session_was_live:
+                        anchor_teleporter.teleport_to_robot(robot)
+                        if target_hud is not None:
+                            target_hud.refresh_soon()
+                        print(
+                            "[XR] session live — anchor re-asserted on the robot",
+                            flush=True,
+                        )
+                    xr_session_was_live = xr_session_live
                 if target_hud is not None:
                     target_hud.tick()
                 idle_paused = False

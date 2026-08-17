@@ -84,6 +84,19 @@ class SberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
 class SberDemoEventCfg:
     """Randomize the start pose on every reset so trajectories don't all begin identically."""
 
+    # Without an explicit joint reset the articulation keeps its end-of-episode
+    # joint state across env.reset() (only the root pose event below runs), so
+    # every new episode would start with the previous episode's arm/hand/neck
+    # configuration. Zero ranges = exactly the default joint state.
+    reset_robot_joints = EventTerm(
+        func=mdp.reset_joints_by_offset,
+        mode="reset",
+        params={
+            "position_range": (0.0, 0.0),
+            "velocity_range": (0.0, 0.0),
+        },
+    )
+
     randomize_robot_start_pose = EventTerm(
         func=ds_events.reset_root_pose_in_region_facing_target,
         mode="reset",

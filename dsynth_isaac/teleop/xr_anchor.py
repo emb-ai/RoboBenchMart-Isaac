@@ -39,6 +39,24 @@ def yaw_quat_wxyz(yaw: float) -> tuple[float, float, float, float]:
     return (math.cos(0.5 * yaw), 0.0, 0.0, math.sin(0.5 * yaw))
 
 
+def xr_display_active() -> bool:
+    """Whether an XR session is actually rendering to a headset right now.
+
+    Anchor rotation written before the session is live does not survive session
+    start (position does), so callers should re-assert the anchor pose on the
+    ``False -> True`` edge of this signal.
+    """
+    try:
+        from omni.kit.xr.core import XRCore
+
+        core = XRCore.get_singleton()
+        if hasattr(core, "is_xr_display_enabled"):
+            return bool(core.is_xr_display_enabled())
+        return bool(core.is_xr_enabled())
+    except Exception:
+        return False
+
+
 def anchor_prim_path_from_cfg(xr_cfg) -> str:
     """Anchor prim path ``OpenXRDevice`` creates for this XR config."""
     parent = getattr(xr_cfg, "anchor_prim_path", None)
@@ -59,6 +77,10 @@ class XrAnchorTeleporter:
             that device derives from ``xr_cfg``.
         fixed_height: Keep the anchor at its configured Z (floor level) instead of
             following the pelvis bob.
+        ref_pose: Optional ``((x, y, z), yaw)`` robot pose the configured anchor
+            pose was designed for (the nominal ``init_state`` pose). Use this when
+            the spawn pose is randomized: latching against the robot's live pose
+            would bake the random spawn offset into every later teleport.
     """
 
     def __init__(
@@ -68,22 +90,31 @@ class XrAnchorTeleporter:
         *,
         prim_path: str | None = None,
         fixed_height: bool = True,
+        ref_pose: tuple[tuple[float, float, float], float] | None = None,
     ) -> None:
         self._prim_path = prim_path or anchor_prim_path_from_cfg(xr_cfg)
         self._fixed_height = fixed_height
         self._anchor_pos = tuple(float(v) for v in xr_cfg.anchor_pos)
         self._anchor_quat = tuple(float(v) for v in xr_cfg.anchor_rot)
         self._layer_identifier = self._resolve_layer_identifier()
-        self.capture_reference(robot)
+        if ref_pose is not None:
+            self.capture_reference_pose(*ref_pose)
+        else:
+            self.capture_reference(robot)
 
     def capture_reference(self, robot) -> None:
         """Latch the robot pose that the configured anchor pose belongs to."""
-        (rx, ry, rz), ryaw = robot_root_state(robot)
-        self._ref_yaw = ryaw
+        pos, yaw = robot_root_state(robot)
+        self.capture_reference_pose(pos, yaw)
+
+    def capture_reference_pose(self, pos: tuple[float, float, float], yaw: float) -> None:
+        """Latch an explicit robot pose that the configured anchor pose belongs to."""
+        rx, ry, rz = (float(v) for v in pos)
+        self._ref_yaw = float(yaw)
         self._ref_z = rz
         dx = self._anchor_pos[0] - rx
         dy = self._anchor_pos[1] - ry
-        c, s = math.cos(ryaw), math.sin(ryaw)
+        c, s = math.cos(self._ref_yaw), math.sin(self._ref_yaw)
         # Anchor offset expressed in the robot's yaw frame.
         self._offset_x = c * dx + s * dy
         self._offset_y = -s * dx + c * dy
