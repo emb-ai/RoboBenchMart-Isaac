@@ -5,10 +5,11 @@ camera-facing XR overlay Isaac Lab's own XR teleop uses (``XRSceneView`` UI
 compositing, NOT a stage prim, so robot camera sensors and viewport render
 products can never capture it; recorded RGB stays clean by construction).
 
-The panel is anchored to the XR camera prim (``/_xr/stage/xrCamera``) at a
-view-space offset (right, up, forward), snapshotted at the moment ``refresh()``
-is called — it lands at the top-right of wherever the operator is looking and
-then stays world-fixed (comfortable in VR; a fully head-locked HUD judders).
+The panel is anchored at an offset (right, up, forward) from the operator's
+head pose, snapshotted at the moment ``refresh()`` is called with pitch/roll
+dropped — "up" is always world-up, so the panel sits above eye height even
+when the operator is looking down at the table. It then stays world-fixed
+(comfortable in VR; a fully head-locked HUD judders).
 Every headset-triggered event (recording start, reset, T-teleport, static-mode
 entry) re-snapshots it back into view.
 
@@ -32,7 +33,8 @@ class XrTargetHud:
 
     Args:
         texts: Display strings, one per selectable target.
-        offset: (right, up, forward) placement in the XR camera frame, metres.
+        offset: (right, up, forward) placement in the yaw-levelled head frame,
+            metres — up is world-up, forward is the horizontal heading.
         width: Maximum panel width in metres — text wraps to fit.
         font_size: Text height in metres.
     """
@@ -97,6 +99,68 @@ class XrTargetHud:
             self._auto_retry_countdown = 30
             self.refresh()
 
+    def _reanchor_existing(self, text: str) -> bool:
+        """Move the live widget's anchor prim to the current head pose.
+
+        Returns False when the widget does not exist yet or shows different
+        text — the caller then falls back to the full hide+show rebuild.
+        """
+        try:
+            from isaaclab.ui.xr_widgets import instruction_widget
+
+            entry = instruction_widget.camera_facing_widget_container.get(TARGET_WIDGET_PRIM_PATH)
+            if entry is None or entry[1] != text:
+                return False
+            return self._level_anchor()
+        except Exception:
+            return False
+
+    def _level_anchor(self) -> bool:
+        """Set the anchor prim to the head's yaw-only pose (pitch/roll dropped).
+
+        With the raw head frame, looking down at the table sends the offset's
+        "up + forward" into the table and the panel disappears inside it.
+        Levelling the frame keeps "up" as world-up, so the panel always sits
+        above eye height regardless of where the operator is looking.
+        """
+        try:
+            import omni.kit.commands
+            from isaacsim.core.utils.stage import get_current_stage
+            from pxr import Gf, Usd, UsdGeom
+
+            stage = get_current_stage()
+            cam = stage.GetPrimAtPath(XR_CAMERA_PRIM_PATH)
+            anchor = stage.GetPrimAtPath(TARGET_WIDGET_PRIM_PATH)
+            if not cam.IsValid() or not anchor.IsValid():
+                return False
+            cam_xf = UsdGeom.Xformable(cam).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+            pos = cam_xf.ExtractTranslation()
+            # Camera forward is -Z; flatten it onto the ground plane for yaw.
+            fwd_row = cam_xf.GetRow(2)
+            forward = Gf.Vec3d(-fwd_row[0], -fwd_row[1], 0.0)
+            if forward.GetLength() < 1e-3:
+                # Looking straight up/down — the screen-up axis (+Y) projects
+                # onto the horizontal heading instead.
+                up_row = cam_xf.GetRow(1)
+                forward = Gf.Vec3d(up_row[0], up_row[1], 0.0)
+            if forward.GetLength() < 1e-3:
+                return False
+            forward = forward.GetNormalized()
+            right_axis = Gf.Cross(forward, Gf.Vec3d(0.0, 0.0, 1.0))
+            xform = Gf.Matrix4d(1.0)
+            xform.SetRow(0, Gf.Vec4d(right_axis[0], right_axis[1], right_axis[2], 0.0))
+            xform.SetRow(1, Gf.Vec4d(0.0, 0.0, 1.0, 0.0))
+            xform.SetRow(2, Gf.Vec4d(-forward[0], -forward[1], -forward[2], 0.0))
+            xform.SetRow(3, Gf.Vec4d(pos[0], pos[1], pos[2], 1.0))
+            omni.kit.commands.execute(
+                "TransformPrim",
+                path=TARGET_WIDGET_PRIM_PATH,
+                new_transform_matrix=xform,
+            )
+            return True
+        except Exception:
+            return False
+
     def refresh(self) -> None:
         """(Re)display the panel at the current view; retries until XR is up."""
         if self._failed or self._current is None:
@@ -120,9 +184,20 @@ class XrTargetHud:
                     )
                     self._waiting_logged = True
                 return
+            # Re-anchor in place whenever the widget already shows this text.
+            # hide+show destroys and recreates the widget's render-to-texture
+            # resources; doing that on every reset trips a Kit refcount bug
+            # (gpu.foundation "Refcounting underflow while releasing
+            # AssetTextureData" -> heap corruption -> abort). Only the anchor
+            # prim (a textureless camera copy) needs to move.
+            if self._reanchor_existing(self.texts[self._current]):
+                self._shown = True
+                self._waiting_logged = False
+                return
             right, up, forward = self._offset
-            # Drop + re-show so the panel re-snapshots at the CURRENT head pose
-            # (show_instruction early-returns when the text is unchanged).
+            # Text changed (or first show): drop + re-show so the panel
+            # re-snapshots at the CURRENT head pose (show_instruction
+            # early-returns when the text is unchanged).
             hide_instruction(TARGET_WIDGET_PRIM_PATH)
             show_instruction(
                 self.texts[self._current],
@@ -134,6 +209,9 @@ class XrTargetHud:
                 font_size=self._font_size,
                 target_prim_path=TARGET_WIDGET_PRIM_PATH,
             )
+            # show_instruction snapshots the raw (possibly pitched) head pose;
+            # immediately level it so the panel starts above eye height too.
+            self._level_anchor()
             if not self._shown:
                 print(f"[target-hud] panel shown: {self.texts[self._current]}", flush=True)
             self._shown = True
