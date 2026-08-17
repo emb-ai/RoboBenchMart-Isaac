@@ -83,6 +83,12 @@ parser.add_argument(
 )
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
 parser.add_argument(
+    "--no_product_jitter",
+    action="store_true",
+    default=False,
+    help="Disable the per-reset pose jitter of first-row shelf products.",
+)
+parser.add_argument(
     "--seed",
     type=int,
     default=None,
@@ -1163,6 +1169,8 @@ def main() -> None:
         print(f"Viewport video recording enabled → {video_folder}", flush=True)
 
     base_env = env.unwrapped
+    if args_cli.no_product_jitter and hasattr(base_env.scene, "first_row_jitter"):
+        base_env.scene.first_row_jitter.enabled = False
     base_env.sim.reset()
     env.reset(seed=args_cli.seed)
 
@@ -1234,6 +1242,11 @@ def main() -> None:
                     # and the code version that produced these demos.
                     "seed": int(args_cli.seed),
                     "git_commit": repo_git_commit(),
+                    "first_row_jitter": (
+                        vars(base_env.scene.first_row_jitter)
+                        if hasattr(base_env.scene, "first_row_jitter")
+                        else None
+                    ),
                     "sberchel_joint_names": list(robot.data.joint_names),
                     "sberchel_upper_controlled_joint_names": list(
                         upper_term._controlled_joint_names
@@ -1279,9 +1292,15 @@ def main() -> None:
     should_reset = False
     should_discard_reset = False
     should_next_reset = False
-    # Start pose of the episode in progress; discard-reset (D-pad down / X) reapplies
-    # it after env.reset() so a failed attempt can be retried from the same spawn.
+    # Start state of the episode in progress; discard-reset (D-pad down / X) reapplies
+    # it after env.reset() so a failed attempt can be retried from the same spawn
+    # with the same (jittered) product placement.
     episode_start_root_pose = robot.data.root_state_w[:, :7].clone()
+    episode_start_products = (
+        base_env.scene.capture_store_rigid_body_state(base_env.sim)
+        if hasattr(base_env.scene, "capture_store_rigid_body_state")
+        else None
+    )
     teleoperation_active = (not args_cli.xr) or args_cli.auto_start
     running_recording_instance = (not args_cli.xr) or args_cli.auto_start
     step_count = 0
@@ -1931,11 +1950,28 @@ def main() -> None:
                         robot.write_root_velocity_to_sim(
                             torch.zeros_like(robot.data.root_state_w[:, 7:13])
                         )
+                        if episode_start_products is not None:
+                            # Put first-row products back to the discarded attempt's
+                            # (jittered) placement. Tolerances sit above contact
+                            # micro-jitter but below the jitter magnitudes, so
+                            # re-rolled items get restored without waking the
+                            # whole store.
+                            base_env.scene.restore_store_rigid_body_state(
+                                base_env.sim,
+                                episode_start_products,
+                                pos_tol=0.004,
+                                ang_tol=5e-4,
+                            )
                         # env.reset() already recorded initial_state with the discarded
                         # sample; recapture it so the episode replays from the true spawn.
                         base_env.recorder_manager.reset()
                         base_env.recorder_manager.record_post_reset(None)
                     episode_start_root_pose = robot.data.root_state_w[:, :7].clone()
+                    episode_start_products = (
+                        base_env.scene.capture_store_rigid_body_state(base_env.sim)
+                        if hasattr(base_env.scene, "capture_store_rigid_body_state")
+                        else None
+                    )
                     # Targets survive reset while the robot is teleported back to
                     # its init pose, so they no longer describe the robot.
                     pink_hold.invalidate()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Iterator
 from dataclasses import MISSING, dataclass, field
 from pathlib import Path
@@ -164,12 +165,42 @@ def _world_pose_wxyz(prim: Usd.Prim, xform_cache: UsdGeom.XformCache) -> tuple[n
 
 
 @dataclass
+class FirstRowJitterCfg:
+    """Per-reset pose jitter for aisle-facing first-row products.
+
+    Magnitudes are bounded by the measured packing of small_store_aij_ver2:
+    neighbor gaps along a row are 2.5cm at the 5th percentile (so +/-1cm keeps
+    worst-case approach under the gap), the second row touches the first
+    (median 1.2cm, quarter of items <=5mm — never jitter inward), and ~3cm of
+    shelf board remains in front of the first row (outward pull <=1.5cm keeps
+    items supported). Yaw beyond ~5 deg sweeps box corners into the touching
+    row behind; raise it only for stores of mostly cylindrical items.
+    """
+
+    enabled: bool = True
+    along_row_max: float = 0.01
+    """Independent per-item shift along the row (x), +/- meters."""
+    row_shift_max: float = 0.02
+    """Coherent whole-row shift along the row (x), +/- meters (gaps unchanged)."""
+    outward_max: float = 0.015
+    """Pull toward the aisle (facing y direction), 0..max meters. Never inward."""
+    yaw_max_deg: float = 5.0
+    """Yaw about the item's own center, +/- degrees."""
+
+
+@dataclass
 class StoreRigidBodySnapshot:
     """Initial world poses for unregistered store USD rigid bodies."""
 
     prim_paths: list[str] = field(default_factory=list)
     positions: np.ndarray = field(default_factory=lambda: np.zeros((0, 3), dtype=np.float32))
     orientations: np.ndarray = field(default_factory=lambda: np.zeros((0, 4), dtype=np.float32))
+    # Filled by classify_first_row_products(): indices into the arrays above for
+    # aisle-facing first-row items, their facing sign along y, and a row id per
+    # item so whole rows can be shifted coherently.
+    first_row_indices: np.ndarray | None = field(default=None, repr=False)
+    first_row_facing: np.ndarray | None = field(default=None, repr=False)
+    first_row_row_ids: np.ndarray | None = field(default=None, repr=False)
     _physx_view: object | None = field(default=None, repr=False)
 
     def _ensure_view(self, sim: SimulationContext):
@@ -249,8 +280,14 @@ class StoreRigidBodySnapshot:
         view.set_velocities(state["velocities"], indices=indices)
         return int(indices.numel())
 
-    def restore(self, sim: SimulationContext) -> int:
-        """Write snapshot poses to PhysX and zero velocities. Returns body count."""
+    def restore(self, sim: SimulationContext, jitter: FirstRowJitterCfg | None = None) -> int:
+        """Write snapshot poses to PhysX and zero velocities. Returns body count.
+
+        With ``jitter`` enabled and first-row items classified, the front row of
+        each shelf gets a bounded random offset (along-row, outward toward the
+        aisle, and yaw about its own center) on top of the snapshot pose. The
+        store layout has rows running along x and shelf fronts facing +/-y.
+        """
         if len(self.prim_paths) == 0:
             return 0
 
@@ -267,6 +304,30 @@ class StoreRigidBodySnapshot:
             ],
             dim=-1,
         )
+        if (
+            jitter is not None
+            and jitter.enabled
+            and self.first_row_indices is not None
+            and len(self.first_row_indices) > 0
+        ):
+            idx = torch.as_tensor(self.first_row_indices, device=device, dtype=torch.long)
+            face = torch.as_tensor(self.first_row_facing, device=device, dtype=torch.float32)
+            rows = torch.as_tensor(self.first_row_row_ids, device=device, dtype=torch.long)
+            num = idx.numel()
+            along = (torch.rand(num, device=device) * 2.0 - 1.0) * jitter.along_row_max
+            if jitter.row_shift_max > 0.0:
+                row_shift = (
+                    torch.rand(int(rows.max()) + 1, device=device) * 2.0 - 1.0
+                ) * jitter.row_shift_max
+                along = along + row_shift[rows]
+            poses_wxyz[idx, 0] += along
+            poses_wxyz[idx, 1] += torch.rand(num, device=device) * jitter.outward_max * face
+            if jitter.yaw_max_deg > 0.0:
+                yaw = (torch.rand(num, device=device) * 2.0 - 1.0) * math.radians(jitter.yaw_max_deg)
+                zeros = torch.zeros_like(yaw)
+                poses_wxyz[idx, 3:7] = math_utils.quat_mul(
+                    math_utils.quat_from_euler_xyz(zeros, zeros, yaw), poses_wxyz[idx, 3:7]
+                )
         poses_xyzw = poses_wxyz.clone()
         poses_xyzw[:, 3:] = math_utils.convert_quat(poses_wxyz[:, 3:], to="xyzw")
         indices = torch.arange(len(self.prim_paths), device=device, dtype=torch.int32)
@@ -311,6 +372,88 @@ def capture_store_rigid_body_snapshot(
         positions=pos_array,
         orientations=ori_array,
     )
+
+
+def classify_first_row_products(
+    stage: Usd.Stage,
+    snapshot: StoreRigidBodySnapshot,
+    *,
+    unit_cluster_gap: float = 0.4,
+    unit_depth_max: float = 0.6,
+    back_to_back_max: float = 0.7,
+    first_row_band: float = 0.05,
+) -> int:
+    """Mark aisle-facing first-row products on the snapshot; returns the count.
+
+    Assumes the small_store_aij layout: shelf units cluster along y, rows of
+    items run along x, and unit fronts face +/-y into the aisles. Per env,
+    products are clustered by bbox-center y (splitting on gaps larger than
+    ``unit_cluster_gap``). A cluster whose nearest neighbor cluster is within
+    ``back_to_back_max`` faces away from it (back-to-back pair); otherwise it
+    faces toward the nearest cluster (across the aisle). Within each (cluster,
+    shelf-level) group the first row is every item whose bbox-center y is
+    within ``first_row_band`` of the frontmost one.
+    """
+    bbox_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render"])
+    count = len(snapshot.prim_paths)
+    center_y = np.empty(count, dtype=np.float64)
+    bottom_z = np.empty(count, dtype=np.float64)
+    env_keys: list[str] = []
+    for i, path in enumerate(snapshot.prim_paths):
+        rng = bbox_cache.ComputeWorldBound(stage.GetPrimAtPath(path)).ComputeAlignedRange()
+        low, high = rng.GetMin(), rng.GetMax()
+        center_y[i] = 0.5 * (low[1] + high[1])
+        bottom_z[i] = low[2]
+        env_keys.append(path.rsplit("/dsynth_scene", 1)[0])
+
+    indices: list[int] = []
+    facing: list[float] = []
+    row_ids: list[int] = []
+    next_row = 0
+    for env_key in dict.fromkeys(env_keys):
+        env_idx = np.array([i for i, k in enumerate(env_keys) if k == env_key])
+        order = env_idx[np.argsort(center_y[env_idx])]
+        clusters: list[list[int]] = [[int(order[0])]]
+        for i in order[1:]:
+            if center_y[i] - center_y[clusters[-1][-1]] > unit_cluster_gap:
+                clusters.append([])
+            clusters[-1].append(int(i))
+        # A back-to-back unit pair has near-touching products, so it arrives as a
+        # single cluster about twice a unit's depth: split it at the midpoint.
+        split_clusters: list[list[int]] = []
+        for cluster in clusters:
+            values = center_y[np.array(cluster)]
+            if values.max() - values.min() > unit_depth_max:
+                mid = 0.5 * (values.max() + values.min())
+                split_clusters.append([i for i in cluster if center_y[i] < mid])
+                split_clusters.append([i for i in cluster if center_y[i] >= mid])
+            else:
+                split_clusters.append(cluster)
+        clusters = split_clusters
+        centers = np.array([center_y[c].mean() for c in clusters])
+        if len(clusters) < 2:
+            continue  # single unit: no aisle information
+        for k, cluster in enumerate(clusters):
+            deltas = centers - centers[k]
+            deltas[k] = np.inf
+            nearest = int(np.argmin(np.abs(deltas)))
+            toward = math.copysign(1.0, centers[nearest] - centers[k])
+            face = -toward if abs(centers[nearest] - centers[k]) < back_to_back_max else toward
+            cluster_arr = np.array(cluster)
+            levels = np.round(bottom_z[cluster_arr], 1)
+            for level in np.unique(levels):
+                group = cluster_arr[levels == level]
+                front = face * center_y[group]
+                selected = group[front >= front.max() - first_row_band]
+                indices.extend(int(i) for i in selected)
+                facing.extend([face] * len(selected))
+                row_ids.extend([next_row] * len(selected))
+                next_row += 1
+
+    snapshot.first_row_indices = np.array(indices, dtype=np.int64)
+    snapshot.first_row_facing = np.array(facing, dtype=np.float32)
+    snapshot.first_row_row_ids = np.array(row_ids, dtype=np.int64)
+    return len(indices)
 
 
 def rebind_store_rigid_bodies(
@@ -462,10 +605,17 @@ class SberDemoInteractiveScene(InteractiveScene):
         super().__init__(cfg)
         fix_store_room_material_bindings(self)
         self._store_rigid_snapshot = capture_store_rigid_body_snapshot(self, dynamic_only=True)
+        self.first_row_jitter = FirstRowJitterCfg()
+        try:
+            n_first_row = classify_first_row_products(self.stage, self._store_rigid_snapshot)
+            print(f"[INFO] SberDemo first-row jitter: {n_first_row} products classified as first-row")
+        except Exception as exc:
+            self.first_row_jitter.enabled = False
+            logger.warning("[SberDemo] First-row classification failed (%r); jitter disabled", exc)
 
     def reset_store_rigid_bodies(self, sim: SimulationContext) -> int:
-        """Restore dynamic store products to their initial USD poses."""
-        count = self._store_rigid_snapshot.restore(sim)
+        """Restore dynamic store products to their initial USD poses (first row jittered)."""
+        count = self._store_rigid_snapshot.restore(sim, jitter=self.first_row_jitter)
         if count > 0:
             logger.info("[SberDemo] Reset %d store rigid bodies to initial poses", count)
         return count
@@ -474,6 +624,6 @@ class SberDemoInteractiveScene(InteractiveScene):
         """Live poses + velocities of dynamic store products (mid-episode checkpoint)."""
         return self._store_rigid_snapshot.capture_live_state(sim)
 
-    def restore_store_rigid_body_state(self, sim: SimulationContext, state: dict | None) -> int:
+    def restore_store_rigid_body_state(self, sim: SimulationContext, state: dict | None, **kwargs) -> int:
         """Put dynamic store products back to a captured live state."""
-        return self._store_rigid_snapshot.restore_live_state(sim, state)
+        return self._store_rigid_snapshot.restore_live_state(sim, state, **kwargs)
