@@ -16,6 +16,35 @@ from isaaclab.utils import configclass
 LOCO_COMMAND_ATTR = "_sberchel_loco_command"
 TELEOP_STATE_ATTR = "_sberchel_teleop_state"
 
+# Optional dict set on an EpisodeData; each entry is written as an HDF5 attr on
+# the demo group at export (e.g. {"target_item": ..., "task_instruction": ...}).
+EPISODE_EXTRA_ATTRS_FIELD = "sberchel_extra_attrs"
+
+
+def stash_episode_extra_attrs(episode, **attrs) -> None:
+    """Attach per-demo HDF5 attrs to an in-progress episode (merged on repeat calls)."""
+    merged = dict(getattr(episode, EPISODE_EXTRA_ATTRS_FIELD, {}) or {})
+    merged.update(attrs)
+    setattr(episode, EPISODE_EXTRA_ATTRS_FIELD, merged)
+
+
+def _write_episode_with_extra_attrs(handler, episode, demo_id=None) -> None:
+    """``handler.write_episode`` plus the episode's stashed per-demo attrs.
+
+    The demo group name must be derived *before* the write increments the
+    handler's demo counter; the group is absent if the episode was empty.
+    """
+    group_name = f"demo_{demo_id if demo_id is not None else handler._demo_count}"
+    handler.write_episode(episode, demo_id)
+    extra = getattr(episode, EPISODE_EXTRA_ATTRS_FIELD, None)
+    if not extra:
+        return
+    group = getattr(handler, "_hdf5_data_group", {}).get(group_name)
+    if group is None:
+        return
+    for key, value in extra.items():
+        group.attrs[key] = value
+
 
 def stash_locomotion_command(env, vx: float, vy: float, wz: float) -> None:
     """Store per-env locomotion velocity commands for the next ``env.step`` recorder tick."""
@@ -196,7 +225,7 @@ class AsyncDatasetFileHandler:
                 if item is None:
                     return
                 fn_name, args, kwargs = item
-                getattr(self._inner, fn_name)(*args, **kwargs)
+                self._dispatch(fn_name, args, kwargs)
                 if fn_name == "write_episode":
                     print(f"[episode-writer] episode saved (total in file: {self._inner.demo_count})", flush=True)
             except Exception:
@@ -205,9 +234,15 @@ class AsyncDatasetFileHandler:
             finally:
                 self._queue.task_done()
 
+    def _dispatch(self, fn_name: str, args, kwargs) -> None:
+        if fn_name == "write_episode":
+            _write_episode_with_extra_attrs(self._inner, *args, **kwargs)
+        else:
+            getattr(self._inner, fn_name)(*args, **kwargs)
+
     def _submit(self, fn_name: str, *args, **kwargs) -> None:
         if self._closed:
-            getattr(self._inner, fn_name)(*args, **kwargs)
+            self._dispatch(fn_name, args, kwargs)
             return
         self._queue.put((fn_name, args, kwargs))
 

@@ -14,6 +14,7 @@ from dsynth_isaac.recorders.sberchel_xr_recorders import (
     SberchelXRRecorderManagerCfg,
     TeleopStateRecorder,
     TeleopStateRecorderCfg,
+    stash_episode_extra_attrs,
     stash_locomotion_command,
     stash_teleop_state,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "SberchelXRRecorderManagerCfg",
     "TeleopStateRecorder",
     "TeleopStateRecorderCfg",
+    "stash_episode_extra_attrs",
     "stash_locomotion_command",
     "stash_teleop_state",
 ]

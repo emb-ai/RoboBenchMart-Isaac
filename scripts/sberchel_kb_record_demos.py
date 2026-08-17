@@ -459,6 +459,41 @@ parser.add_argument(
         "30 Hz matches the LeRobot target rate (green_challenge's default is 15)."
     ),
 )
+parser.add_argument(
+    "--target_items",
+    type=str,
+    default="Monster Energy Drink,Juice,Tomato Pasta,Shampoo",
+    help=(
+        "Comma-separated pick-target names. One is chosen per trajectory "
+        "(derived from the episode seed, so a retried attempt keeps its target) "
+        "and shown as a small text panel at the top-right of the VR view."
+    ),
+)
+parser.add_argument(
+    "--no_target_hud",
+    action="store_true",
+    default=False,
+    help="Disable the in-headset target-item text panel.",
+)
+parser.add_argument(
+    "--target_hud_offset",
+    type=float,
+    nargs=3,
+    default=(0.9, 0.45, 1.8),
+    metavar=("RIGHT", "UP", "FWD"),
+    help=(
+        "Target panel placement relative to the headset view, in metres: right, "
+        "up, and forward. Snapshotted at every recording start / reset / "
+        "T-teleport / static-mode entry, so the panel lands at the top-right of "
+        "wherever you are looking and then stays put."
+    ),
+)
+parser.add_argument(
+    "--target_hud_width",
+    type=float,
+    default=1.6,
+    help="Maximum width of the target task panel in metres (text wraps to fit).",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -509,6 +544,7 @@ import dsynth_isaac.tasks.manager_based  # noqa: F401
 from dsynth_isaac.recorders import (
     SberchelXRRecorderManagerCfg,
     enable_async_episode_export,
+    stash_episode_extra_attrs,
     stash_locomotion_command,
     stash_teleop_state,
 )
@@ -530,6 +566,7 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
 )
 from dsynth_isaac.teleop.gamepad import RecordGamepad
 from dsynth_isaac.teleop.xr_anchor import XrAnchorTeleporter
+from dsynth_isaac.teleop.xr_target_hud import XrTargetHud
 from dsynth_isaac.robots.sberchel_cfg import (
     apply_sberchel_loco_upper_pd_gains,
     apply_sberchel_xr_teleop_pd_gains,
@@ -977,6 +1014,27 @@ def derive_episode_seed(session_seed: int, pose_index: int) -> int:
     return int.from_bytes(digest, "little") % (2**31)
 
 
+def derive_target_index(episode_seed: int, num_items: int) -> int:
+    """Pick-target index for an episode, derived from its start-pose seed.
+
+    Hash-derived (not ``episode_seed % num_items``) so it is independent of the
+    spawn randomization, and reproducible offline from the ``seed`` attr every
+    demo already carries — no extra per-demo storage needed.
+    """
+    digest = hashlib.blake2b(f"{episode_seed}:target".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "little") % num_items
+
+
+def target_task_instruction(item: str) -> str:
+    """Natural-language pick task for a target item.
+
+    Indefinite article on purpose: shelves hold several identical instances of
+    each product and any one of them satisfies the task.
+    """
+    article = "an" if item.strip()[:1].lower() in "aeiou" else "a"
+    return f"Pick {article} {item.strip()} and place it on the table."
+
+
 def exported_demo_count(env) -> int:
     """Total episodes written to HDF5."""
     base = env.unwrapped if hasattr(env, "unwrapped") else env
@@ -1213,6 +1271,49 @@ def main() -> None:
     net.reset()
     robot = base_env.scene["robot"]
 
+    # --- per-trajectory pick target -----------------------------------------
+    # Headset-only XR widget (XRSceneView UI, not a stage prim), placed
+    # top-right of the operator's view in the robot's yaw frame — robot camera
+    # sensors and viewport render products can never capture it. The item is
+    # derived from the episode seed: retries keep their target, and each demo's
+    # target is stamped into its HDF5 attrs.
+    target_items = [s.strip() for s in args_cli.target_items.split(",") if s.strip()]
+    target_hud: XrTargetHud | None = None
+    if not args_cli.no_target_hud and target_items:
+        target_hud = XrTargetHud(
+            [target_task_instruction(item) for item in target_items],
+            offset=tuple(args_cli.target_hud_offset),
+            width=args_cli.target_hud_width,
+        )
+
+    def roll_target_hud() -> None:
+        """Choose this episode's target from its seed; show it and stamp the demo.
+
+        ``target_item`` and ``task_instruction`` become HDF5 attrs on the demo
+        group at export (see ``stash_episode_extra_attrs``), alongside the
+        ``seed`` attr the episode already carries.
+        """
+        if not target_items:
+            return
+        idx = derive_target_index(episode_seed, len(target_items))
+        item = target_items[idx]
+        if target_hud is not None:
+            target_hud.show(idx)
+        rm = base_env.recorder_manager
+        episode = rm.get_episode(0)
+        stash_episode_extra_attrs(
+            episode,
+            target_item=item,
+            task_instruction=target_task_instruction(item),
+        )
+        rm._episodes[0] = episode
+        print(
+            f">>> TASK: {target_task_instruction(item)} (target '{item}', seed {episode_seed})",
+            flush=True,
+        )
+
+    roll_target_hud()
+
     def apply_native_gains() -> None:
         """green_challenge's effective PD -- the plant their VLA is evaluated on."""
         apply_sberchel_loco_upper_pd_gains(robot, include_neck=not args_cli.keep_stiff_neck)
@@ -1324,6 +1425,17 @@ def main() -> None:
                     ],
                     "sberchel_action_layout": "legs(12) + neck(2) + upper_body_ik(26)",
                     "sberchel_teleop_state_layout": "is_locomotion, squeeze, legacy_gains",
+                    # Pick target shown to the operator. Each demo group carries
+                    # 'target_item' and 'task_instruction' attrs; the scheme
+                    # below re-derives the item from the demo's 'seed' attr for
+                    # files written before those attrs existed.
+                    "sberchel_target_items": target_items,
+                    "sberchel_target_scheme": (
+                        "items[int.from_bytes(blake2b(f'{seed}:target', "
+                        "digest_size=8).digest(), 'little') % len(items)] "
+                        "with seed = demo attrs['seed']"
+                    ),
+                    "sberchel_task_template": "Pick a/an {target_item} and place it on the table.",
                 }
             )
             print(">>> dataset provenance written (joint order + gains)", flush=True)
@@ -1510,6 +1622,8 @@ def main() -> None:
         enter_static_mode()
         if anchor_teleporter is not None:
             anchor_teleporter.teleport_to_robot(robot)
+        if target_hud is not None:
+            target_hud.refresh_soon()
         print(
             "[checkpoint] restored — static teleop re-latched at the checkpoint pose "
             "(checkpoint kept; V / R1 works again)",
@@ -1522,6 +1636,9 @@ def main() -> None:
         if loco_mode == "locomotion":
             enter_static_mode()
             capture_checkpoint()
+            if target_hud is not None:
+                # Re-snapshot the panel into the operator's current view.
+                target_hud.refresh_soon()
             print(
                 f"Mode: STATIC teleop (station-keep at "
                 f"xy=({hold_xy_yaw[0]:.3f}, {hold_xy_yaw[1]:.3f}) yaw={hold_xy_yaw[2]:.3f}; "
@@ -1542,6 +1659,9 @@ def main() -> None:
         last_teleop_upper = None
         enter_locomotion_mode(capture_frozen=False)
         sync_retargeter_idle_from_robot(teleop_interface, robot)
+        if target_hud is not None:
+            # First event that is guaranteed to come from a live XR session.
+            target_hud.refresh_soon()
         print("Recording started (WASD locomotion fast-path; press C for static teleop)")
 
     def stop_recording_instance() -> None:
@@ -1592,6 +1712,8 @@ def main() -> None:
         if pose is None:
             print("[XR] Teleport failed: could not write the XR anchor prim.", flush=True)
             return
+        if target_hud is not None:
+            target_hud.refresh_soon()
         (ax, ay, az), ayaw = pose
         print(
             f"[XR] View teleported to robot: anchor xy=({ax:.3f}, {ay:.3f}) "
@@ -1785,6 +1907,8 @@ def main() -> None:
         try:
             with torch.inference_mode():
                 poll_controllers()
+                if target_hud is not None:
+                    target_hud.tick()
                 idle_paused = False
                 if (
                     args_cli.idle_pause
@@ -2016,6 +2140,7 @@ def main() -> None:
                         base_env.recorder_manager.reset()
                         base_env.recorder_manager.record_post_reset(None)
                     stamp_episode_seed()
+                    roll_target_hud()
                     episode_start_root_pose = robot.data.root_state_w[:, :7].clone()
                     episode_start_products = (
                         base_env.scene.capture_store_rigid_body_state(base_env.sim)
