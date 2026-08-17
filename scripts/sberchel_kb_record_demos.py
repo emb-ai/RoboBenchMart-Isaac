@@ -36,6 +36,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import os
 import subprocess
@@ -92,8 +93,10 @@ parser.add_argument(
     "--seed",
     type=int,
     default=None,
-    help="Random seed. Defaults to a fresh entropy-based seed each run (printed at startup); "
-    "pass an explicit value to reproduce a session's start poses.",
+    help="Session seed. Defaults to a fresh entropy-based seed each run (printed at startup). "
+    "Each start pose gets its own seed derived from (session seed, pose index); the env is "
+    "reseeded with it on every reset and it is stored per-demo as HDF5 attr 'seed', so any "
+    "trajectory's start configuration can be reproduced with env.reset(seed=<that value>).",
 )
 parser.add_argument(
     "--enhanced_determinism",
@@ -963,6 +966,17 @@ def repo_git_commit() -> str:
         return "unknown"
 
 
+def derive_episode_seed(session_seed: int, pose_index: int) -> int:
+    """Per-start-pose seed, well-mixed from (session seed, pose index).
+
+    Hash-based rather than ``session_seed + pose_index`` so that seeds from
+    different sessions never form overlapping arithmetic runs, and an eval
+    seed range can be kept disjoint from every recorded demo by construction.
+    """
+    digest = hashlib.blake2b(f"{session_seed}:{pose_index}".encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "little") % (2**31)
+
+
 def exported_demo_count(env) -> int:
     """Total episodes written to HDF5."""
     base = env.unwrapped if hasattr(env, "unwrapped") else env
@@ -1172,7 +1186,28 @@ def main() -> None:
     if args_cli.no_product_jitter and hasattr(base_env.scene, "first_row_jitter"):
         base_env.scene.first_row_jitter.enabled = False
     base_env.sim.reset()
-    env.reset(seed=args_cli.seed)
+    # Per-trajectory seeding: every new start pose reseeds the env with a seed
+    # derived from (session seed, pose index), so each demo's start
+    # configuration is reproducible on its own via env.reset(seed=...) without
+    # replaying the whole session's save/discard/retry sequence.
+    pose_index = 0
+    episode_seed = derive_episode_seed(args_cli.seed, pose_index)
+    env.reset(seed=episode_seed)
+
+    def stamp_episode_seed() -> None:
+        """Attach the current start-pose seed to the in-progress episode.
+
+        The HDF5 handler exports ``EpisodeData.seed`` as the demo group's
+        ``seed`` attribute, so every trajectory records the seed that
+        generated its spawn pose and product jitter.
+        """
+        rm = base_env.recorder_manager
+        episode = rm.get_episode(0)
+        episode.seed = int(episode_seed)
+        rm._episodes[0] = episode
+
+    stamp_episode_seed()
+    print(f">>> start-pose seed {episode_seed} (pose 0 of session seed {args_cli.seed})", flush=True)
 
     net = Network(env, type="zest", device="cpu", closed_kinematics=False)
     net.reset()
@@ -1238,9 +1273,17 @@ def main() -> None:
         try:
             handler.add_env_args(
                 {
-                    # Session provenance: the seed that drove start-pose randomization
-                    # and the code version that produced these demos.
+                    # Session provenance: the session seed and the code version that
+                    # produced these demos. Each demo additionally carries its own
+                    # start-pose seed in the demo group's "seed" attr, derived as
+                    # described below; reproducing a specific start configuration
+                    # needs only that per-demo seed (plus the same code version).
                     "seed": int(args_cli.seed),
+                    "sberchel_episode_seed_scheme": (
+                        "blake2b(f'{session_seed}:{pose_index}', digest_size=8) % 2**31; "
+                        "reseeded via env.reset(seed=...) at every new start pose; "
+                        "per-demo value in demo attrs['seed']"
+                    ),
                     "git_commit": repo_git_commit(),
                     "first_row_jitter": (
                         vars(base_env.scene.first_row_jitter)
@@ -1942,7 +1985,13 @@ def main() -> None:
                     if discard:
                         base_env.recorder_manager.cfg.export_in_record_pre_reset = False
                         discard_viewport_video_frames(env)
-                    env.reset()
+                    if not retry_same_pose:
+                        pose_index += 1
+                        episode_seed = derive_episode_seed(args_cli.seed, pose_index)
+                    # Reseed on every reset: a retry re-derives the SAME spawn and
+                    # jitter sample (the explicit pose restore below stays as
+                    # belt-and-braces), a new pose gets its own recorded seed.
+                    env.reset(seed=episode_seed)
                     if retry_same_pose:
                         # Overwrite the freshly sampled random spawn with the pose the
                         # discarded attempt started from, so it can be retried.
@@ -1966,6 +2015,7 @@ def main() -> None:
                         # sample; recapture it so the episode replays from the true spawn.
                         base_env.recorder_manager.reset()
                         base_env.recorder_manager.record_post_reset(None)
+                    stamp_episode_seed()
                     episode_start_root_pose = robot.data.root_state_w[:, :7].clone()
                     episode_start_products = (
                         base_env.scene.capture_store_rigid_body_state(base_env.sim)
@@ -2011,12 +2061,14 @@ def main() -> None:
                         )
                         print(
                             f"Discard reset complete (episode not saved, {pose_note}). "
-                            f"Recorded {demo_count} episode(s).",
+                            f"Recorded {demo_count} episode(s). "
+                            f"Start-pose seed {episode_seed} (pose {pose_index}).",
                             flush=True,
                         )
                     else:
                         print(
-                            f"Environment reset complete. Recorded {demo_count} episode(s).",
+                            f"Environment reset complete. Recorded {demo_count} episode(s). "
+                            f"Start-pose seed {episode_seed} (pose {pose_index}).",
                             flush=True,
                         )
 
