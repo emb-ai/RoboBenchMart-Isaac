@@ -215,6 +215,11 @@ class AsyncDatasetFileHandler:
         self._inner = inner
         self._queue: queue.Queue = queue.Queue()
         self._closed = False
+        # Surfaced to the recording loop: the operator is in the headset and
+        # never sees a worker-thread traceback, while RecorderManager's export
+        # counter advances at enqueue time regardless of write outcome.
+        self.failed_writes = 0
+        self.last_write_error: str | None = None
         self._worker = threading.Thread(target=self._run, name="episode-writer", daemon=True)
         self._worker.start()
 
@@ -228,11 +233,18 @@ class AsyncDatasetFileHandler:
                 self._dispatch(fn_name, args, kwargs)
                 if fn_name == "write_episode":
                     print(f"[episode-writer] episode saved (total in file: {self._inner.demo_count})", flush=True)
-            except Exception:
+            except Exception as exc:
+                if item is not None and item[0] == "write_episode":
+                    self.failed_writes += 1
+                self.last_write_error = repr(exc)
                 print("[episode-writer] background write failed:", flush=True)
                 traceback.print_exc()
             finally:
                 self._queue.task_done()
+
+    def wait_idle(self) -> None:
+        """Block until every queued write/flush has been processed."""
+        self._queue.join()
 
     def _dispatch(self, fn_name: str, args, kwargs) -> None:
         if fn_name == "write_episode":

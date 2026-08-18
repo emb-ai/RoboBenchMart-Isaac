@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import logging
 import os
 import subprocess
@@ -1309,7 +1310,15 @@ def main() -> None:
         idx = derive_target_index(episode_seed, len(target_items))
         item = target_items[idx]
         if target_hud is not None:
-            target_hud.show(idx)
+            shown = target_hud.show(idx)
+            if shown is None:
+                # Attrs below are still stamped, but the operator cannot see the
+                # task — without this warning demos get collected blind.
+                print(
+                    "[target-hud] WARNING: HUD is not displaying — the operator "
+                    "will NOT see the pick target in the headset!",
+                    flush=True,
+                )
         rm = base_env.recorder_manager
         episode = rm.get_episode(0)
         stash_episode_extra_attrs(
@@ -1382,6 +1391,12 @@ def main() -> None:
             print("[provenance] no dataset file handler; joint order NOT recorded", flush=True)
             return
         upper_term = base_env.action_manager.get_term("upper_body_ik")
+        # store_products rows are indexed by this prim order; without it,
+        # identifying which product a row belongs to requires re-instantiating
+        # the scene. The full list is too large for a 64 KB HDF5 attr, so it
+        # goes to a sidecar JSON bound to the file by the digest below.
+        _store_snapshot = getattr(base_env.scene, "_store_rigid_snapshot", None)
+        _store_prim_paths = list(_store_snapshot.prim_paths) if _store_snapshot is not None else []
         try:
             handler.add_env_args(
                 {
@@ -1447,8 +1462,16 @@ def main() -> None:
                         "with seed = demo attrs['seed']"
                     ),
                     "sberchel_task_template": "Pick a/an {target_item} and place it on the table.",
+                    "sberchel_store_prim_count": len(_store_prim_paths),
+                    "sberchel_store_prim_paths_blake2b": hashlib.blake2b(
+                        "\n".join(_store_prim_paths).encode(), digest_size=8
+                    ).hexdigest(),
                 }
             )
+            if _store_prim_paths:
+                _sidecar = Path(args_cli.dataset_file).with_suffix(".store_prims.json")
+                _sidecar.write_text(json.dumps(_store_prim_paths))
+                print(f">>> store product prim order -> {_sidecar}", flush=True)
             print(">>> dataset provenance written (joint order + gains)", flush=True)
         except Exception as exc:  # never lose a recording session over metadata
             print(f"[provenance] could not write env args: {exc!r}", flush=True)
@@ -1597,6 +1620,11 @@ def main() -> None:
                 else None
             ),
             "policy_actions": net.controller.actions.clone(),
+            # The 'actions' obs term reads action_manager.action; without this
+            # rollback the first post-restore obs row records the abandoned
+            # timeline's last action.
+            "last_action": base_env.action_manager.action.clone(),
+            "prev_action": base_env.action_manager.prev_action.clone(),
             "episode_lengths": episode_leaf_lengths(episode.data),
             "video_frames": viewport_video_frame_count(env),
         }
@@ -1617,6 +1645,14 @@ def main() -> None:
             )
             print(f"[checkpoint] store products restored: {restored}", flush=True)
         net.controller.actions.copy_(sim_checkpoint["policy_actions"])
+        base_env.action_manager._action.copy_(sim_checkpoint["last_action"])
+        base_env.action_manager._prev_action.copy_(sim_checkpoint["prev_action"])
+        # scene.reset_to only writes sim state; env.obs_buf is recomputed inside
+        # env.step/reset, so the next pre-step recorder tick would log the
+        # abandoned timeline's observation (one stale obs row per restore).
+        # Mirror env.reset_to: forward kinematics, then refresh the buffer.
+        base_env.sim.forward()
+        base_env.obs_buf = base_env.observation_manager.compute()
         truncate_episode_data(
             base_env.recorder_manager.get_episode(0).data,
             sim_checkpoint["episode_lengths"],
@@ -2175,6 +2211,26 @@ def main() -> None:
                     base_env.sim.render()
 
                 if should_reset or should_discard_reset or should_next_reset:
+                    if should_reset and not (should_discard_reset or should_next_reset):
+                        episode = base_env.recorder_manager.get_episode(0)
+                        if len(episode.data.get("actions", [])) == 0:
+                            # A double SAVE press right after a reset would export a
+                            # num_samples=0 stub and advance the --num_demos counter.
+                            print(
+                                "[save] no steps recorded since the last reset — nothing to "
+                                "save; retrying the same start pose",
+                                flush=True,
+                            )
+                            should_reset = False
+                            should_discard_reset = True
+                        else:
+                            # The operator only saves good episodes, so the SAVE press is
+                            # the ground-truth success signal. Stash it as an extra HDF5
+                            # attr rather than episode.success: record_pre_reset overwrites
+                            # .success from the (absent) success termination term right
+                            # before export, while stashed attrs are written after the
+                            # stock writer and win.
+                            stash_episode_extra_attrs(episode, success=True)
                     discard = should_discard_reset or should_next_reset
                     retry_same_pose = should_discard_reset
                     if discard:
@@ -2256,6 +2312,15 @@ def main() -> None:
                     first_active_logged = False
                     step_count = 0
                     demo_count = exported_demo_count(base_env)
+                    _writer = getattr(base_env.recorder_manager, "_dataset_file_handler", None)
+                    if getattr(_writer, "failed_writes", 0):
+                        print(
+                            f"[WARNING] {_writer.failed_writes} episode write(s) FAILED in the "
+                            f"background ({_writer.last_write_error}); the demo count below "
+                            "overstates what is on disk. Check free space — saved demos are "
+                            "being LOST until this is fixed.",
+                            flush=True,
+                        )
                     if discard:
                         pose_note = (
                             "same start pose retried" if retry_same_pose else "new start pose"
@@ -2293,6 +2358,23 @@ def main() -> None:
     end_xr_display(simulation_app if not quit_requested[0] else None)
     for controller in controllers:
         controller.close()
+    # Drain the async writer and reconcile the export counter against the file:
+    # a failed background write loses a saved demo while the counter advances.
+    _writer = getattr(base_env.recorder_manager, "_dataset_file_handler", None)
+    if hasattr(_writer, "wait_idle"):
+        _writer.wait_idle()
+        _counted = exported_demo_count(base_env)
+        _on_disk = _writer.demo_count
+        if getattr(_writer, "failed_writes", 0) or _on_disk != _counted:
+            print(
+                f"[WARNING] session reconcile: {_on_disk} demo(s) on disk vs "
+                f"{_counted} exported, {getattr(_writer, 'failed_writes', 0)} failed "
+                f"write(s) ({getattr(_writer, 'last_write_error', None)}) — some saved "
+                "demos are MISSING from the file!",
+                flush=True,
+            )
+        else:
+            print(f">>> session reconcile OK: {_on_disk} demo(s) on disk", flush=True)
     env.close()
     print(f"Recording session complete. Demonstrations saved to: {args_cli.dataset_file}")
     if args_cli.video:

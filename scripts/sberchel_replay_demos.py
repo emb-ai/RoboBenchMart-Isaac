@@ -268,6 +268,10 @@ import dsynth_isaac.tasks.manager_based  # noqa: F401
 
 from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 
+from dsynth_isaac.recorders.sberchel_xr_recorders import (
+    _write_episode_with_extra_attrs,
+    stash_episode_extra_attrs,
+)
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
     NECK_ACTION_DIM,
@@ -737,8 +741,15 @@ def write_episode_with_camera_frames(
     frames_by_key: dict[str, list[torch.Tensor]],
     demo_id: int | None = None,
     frame_stride: int = 1,
+    extra_attrs: dict | None = None,
 ) -> None:
-    """Copy ``source_episode`` and append stacked ``obs/<img_key>`` frames per camera."""
+    """Copy ``source_episode`` and append stacked ``obs/<img_key>`` frames per camera.
+
+    ``extra_attrs`` are written as HDF5 attrs on the output demo group — the
+    stock episode loader/writer only carries seed/success, so per-demo attrs
+    like target_item/task_instruction must be threaded through explicitly or
+    the camera-augmented file silently loses them.
+    """
     actions = source_episode.data.get("actions")
     if actions is None:
         raise ValueError("Source episode is missing 'actions'; cannot export augmented demo.")
@@ -754,7 +765,9 @@ def write_episode_with_camera_frames(
         episode.data["obs"] = {}
     for img_key, frames in frames_by_key.items():
         episode.data["obs"][img_key] = torch.stack(frames, dim=0)
-    output_handler.write_episode(episode, demo_id=demo_id)
+    if extra_attrs:
+        stash_episode_extra_attrs(episode, **extra_attrs)
+    _write_episode_with_extra_attrs(output_handler, episode, demo_id)
     output_handler.flush()
 
 
@@ -766,6 +779,7 @@ def _maybe_flush_incomplete_ok(
     *,
     allow_incomplete: bool,
     frame_stride: int = 1,
+    extra_attrs: dict | None = None,
 ) -> bool:
     """Write augmented episode; return True if written. Incomplete skipped when allowed."""
     if output_handler is None or source_episode is None:
@@ -787,7 +801,12 @@ def _maybe_flush_incomplete_ok(
                 f"at stride {frame_stride}."
             )
     write_episode_with_camera_frames(
-        output_handler, source_episode, frames_by_key, demo_id=demo_id, frame_stride=frame_stride
+        output_handler,
+        source_episode,
+        frames_by_key,
+        demo_id=demo_id,
+        frame_stride=frame_stride,
+        extra_attrs=extra_attrs,
     )
     return True
 
@@ -812,11 +831,14 @@ def main() -> None:
 
     if episode_count == 0:
         print("No episodes found in the dataset.")
-        return
+        return 1
 
     episode_indices_to_replay = list(args_cli.select_episodes)
     if len(episode_indices_to_replay) == 0:
         episode_indices_to_replay = list(range(episode_count))
+    # The list above is consumed during replay; keep the valid request for the
+    # end-of-run export reconcile (missing exports must fail the process).
+    requested_episode_indices = [i for i in episode_indices_to_replay if i < episode_count]
 
     if args_cli.task is not None:
         env_name = args_cli.task.split(":")[-1]
@@ -831,6 +853,19 @@ def main() -> None:
     # auto-match the dataset provenance; --enhanced_determinism forces it on.
     with h5py.File(args_cli.dataset_file, "r") as _f:
         _dataset_env_args = json.loads(_f["data"].attrs.get("env_args", "{}"))
+        # Per-demo attrs beyond the stock trio (num_samples/seed/success stay
+        # handled by the episode loader/writer): target_item, task_instruction,
+        # operator-stamped flags. The stock loader drops them, so read them here
+        # and re-stamp each output demo group on export.
+        _stock_attrs = {"num_samples", "seed", "success"}
+        source_demo_attrs = {
+            name: {
+                key: value
+                for key, value in _f[f"data/{name}"].attrs.items()
+                if key not in _stock_attrs
+            }
+            for name in _f["data"]
+        }
     recorded_enhanced_determinism = bool(_dataset_env_args.get("sberchel_enhanced_determinism", False))
     enhanced_determinism = args_cli.enhanced_determinism or recorded_enhanced_determinism
     if recorded_enhanced_determinism and not args_cli.enhanced_determinism:
@@ -956,7 +991,16 @@ def main() -> None:
             out_width, out_height = camera_size
         else:
             out_width, out_height = first_cam.width, first_cam.height
-        output_dataset_handler.add_env_args(
+        # Carry the recording's full provenance (joint order, seeds scheme, PD
+        # gains, git commit, target scheme, ...) into the output: the converter
+        # depends on sberchel_joint_names, and dropping it forces a silent
+        # hardcoded-joint-list fallback downstream.
+        merged_env_args = {
+            key: value
+            for key, value in _dataset_env_args.items()
+            if key not in ("env_name", "type")
+        }
+        merged_env_args.update(
             {
                 "camera_keys": list(augment_img_keys),
                 "camera_frame_stride": frame_stride,
@@ -964,8 +1008,14 @@ def main() -> None:
                 "camera_width": out_width,
                 "camera_height": out_height,
                 "camera_pipeline": args_cli.camera_pipeline,
+                "replay_source": args_cli.replay_source,
+                "replay_state_sync": (
+                    args_cli.replay_source == "processed_joint_targets"
+                    and not args_cli.no_state_sync
+                ),
             }
         )
+        output_dataset_handler.add_env_args(merged_env_args)
         keys_str = ", ".join(f"obs/{key}" for key in augment_img_keys)
         print(
             f"Camera augment: writing {keys_str} "
@@ -1063,6 +1113,9 @@ def main() -> None:
     first_fall_step: int | None = None
     initial_root_z: float | None = None
     episode_step_counters = [0] * num_envs
+    # Per-demo state-validation verdicts, stamped onto output demo attrs so a
+    # bad replay is visible downstream instead of only in a scrolled-away log.
+    validation_mismatches_by_demo: dict[int, int] = {}
     policy_loco_steps: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * num_envs
     export_episode_snapshots: list[EpisodeData | None] = [None] * num_envs
     camera_frame_buffers: list[dict[str, list[torch.Tensor]]] = [
@@ -1081,6 +1134,13 @@ def main() -> None:
         frames_by_key = camera_frame_buffers[env_id]
         snapshot = export_episode_snapshots[env_id]
         demo_id = current_episode_indices[env_id]
+        extra_attrs: dict = {}
+        if demo_id is not None and demo_id < len(episode_names):
+            extra_attrs.update(source_demo_attrs.get(episode_names[demo_id], {}))
+        if demo_id is not None and demo_id in validation_mismatches_by_demo:
+            extra_attrs["replay_validation_mismatches"] = int(
+                validation_mismatches_by_demo[demo_id]
+            )
         wrote = _maybe_flush_incomplete_ok(
             output_dataset_handler,
             snapshot,
@@ -1088,6 +1148,7 @@ def main() -> None:
             demo_id,
             allow_incomplete=allow_incomplete,
             frame_stride=frame_stride,
+            extra_attrs=extra_attrs or None,
         )
         if wrote:
             augmented_episode_count += 1
@@ -1100,7 +1161,9 @@ def main() -> None:
         camera_frame_buffers[env_id] = {key: [] for key in augment_img_keys}
         export_episode_snapshots[env_id] = None
 
-    with contextlib.suppress(KeyboardInterrupt) and torch.inference_mode():
+    # NB: comma, not `and` — `A and B` evaluates to B alone, which would let
+    # Ctrl+C skip the post-loop salvage flush and lose the in-progress episode.
+    with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
         while simulation_app.is_running() and not simulation_app.is_exiting():
             env_episode_data_map = {index: EpisodeData() for index in range(num_envs)}
             first_loop = True
@@ -1173,13 +1236,50 @@ def main() -> None:
                                 camera_frame_buffers[env_id] = {key: [] for key in augment_img_keys}
                             episode_step_counters[env_id] = 0
                             initial_state = episode_data.get_initial_state()
-                            env.reset_to(initial_state, torch.tensor([env_id], device=env.device), is_relative=True)
+                            # Seed reproduces the recorded first-row jitter draw
+                            # (reset_to re-rolls it otherwise; the per-step sync
+                            # tolerance of 2 cm / 10 deg would let a fresh roll
+                            # persist in every rendered frame).
+                            episode_seed = (
+                                int(episode_data.seed) if episode_data.seed is not None else None
+                            )
+                            env.reset_to(
+                                initial_state,
+                                torch.tensor([env_id], device=env.device),
+                                seed=episode_seed,
+                                is_relative=True,
+                            )
                             idle_action = prepare_sberchel_xr_episode_replay(env, env_cfg, num_envs)
+                            if num_envs == 1 and camera_augment:
+                                # Belt-and-braces on top of the seed: pin every
+                                # store product to recorded row 0 (post-step-0
+                                # poses, <1 mm from the true initial placement).
+                                store = episode_data.data.get("store_products")
+                                restore = getattr(env.scene, "restore_store_rigid_body_state", None)
+                                if store is not None and restore is not None:
+                                    restore(
+                                        env.sim,
+                                        {
+                                            "transforms": store["transforms"][0],
+                                            "velocities": store["velocities"][0],
+                                        },
+                                        only_moved=False,
+                                    )
+                                # Renders read transforms from Fabric, which only
+                                # syncs from PhysX during a physics step: without
+                                # this settle step the first capture is a stale
+                                # render of the previous episode's end scene. The
+                                # robot's PD targets hold the injected pose.
+                                env.scene.write_data_to_sim()
+                                env.sim.step(render=False)
+                                env.scene.update(dt=env.physics_dt)
                             # Refresh filler row after reset so this env does not keep a stale idle clone.
                             actions[env_id] = idle_action[env_id]
                             if policy_net is not None:
                                 policy_net.reset()
                             initial_root_z = env.scene["robot"].data.root_pos_w[env_id, 2].item()
+                            if state_validation_enabled:
+                                validation_mismatches_by_demo[next_episode_index] = 0
                             _write_validation(f"Episode {next_episode_index}: loaded (initial root_z={initial_root_z:.4f})")
                             begin_viewport_episode_record(video_env)
                             # Fetch action 0 immediately (same as Isaac Lab replay_demos.py).
@@ -1348,6 +1448,11 @@ def main() -> None:
                             line = f"step {action_index:4d}: matched (max_err={max_abs_error:.6f}, root_z={root_z:.4f})"
                         else:
                             validation_mismatched_count += 1
+                            _demo = current_episode_indices[0]
+                            if _demo is not None:
+                                validation_mismatches_by_demo[_demo] = (
+                                    validation_mismatches_by_demo.get(_demo, 0) + 1
+                                )
                             if first_mismatch_step is None:
                                 first_mismatch_step = action_index
                             line = (
@@ -1387,6 +1492,22 @@ def main() -> None:
             print(f"\nFailed demo IDs ({len(failed_demo_ids)} total):")
             print(f"  {sorted(failed_demo_ids)}")
 
+    # Fail loudly instead of exiting 0 with a quietly incomplete/diverged
+    # output — a bad batch must not flow into conversion unnoticed.
+    exit_code = 0
+    if camera_augment and augmented_episode_count < len(requested_episode_indices):
+        print(
+            f"[ERROR] exported {augmented_episode_count}/{len(requested_episode_indices)} "
+            "augmented episodes — the output is INCOMPLETE; do not convert it."
+        )
+        exit_code = 1
+    if state_validation_enabled and validation_mismatched_count:
+        print(
+            f"[ERROR] state validation found {validation_mismatched_count} mismatched step(s) "
+            f"(first at step {first_mismatch_step}) — inspect the report before using the output."
+        )
+        exit_code = 1
+
     if output_dataset_handler is not None:
         output_dataset_handler.close()
     dataset_file_handler.close()
@@ -1395,8 +1516,11 @@ def main() -> None:
         video_env.close()
     else:
         env.close()
+    return exit_code
 
 
 if __name__ == "__main__":
-    main()
+    _exit_code = main()
     simulation_app.close()
+    if _exit_code:
+        raise SystemExit(_exit_code)
