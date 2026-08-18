@@ -462,7 +462,7 @@ parser.add_argument(
 parser.add_argument(
     "--target_items",
     type=str,
-    default="Monster Energy Drink,Juice,Tomato Pasta,Shampoo",
+    default="Monster Pipeline Punch,Kagome Juice,Tomato Paste,Palmolive Shampoo",
     help=(
         "Comma-separated pick-target names. One is chosen per trajectory "
         "(derived from the episode seed, so a retried attempt keeps its target) "
@@ -566,7 +566,11 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
     sync_retargeter_idle_from_robot,
 )
 from dsynth_isaac.teleop.gamepad import RecordGamepad
-from dsynth_isaac.teleop.xr_anchor import XrAnchorTeleporter, xr_display_active
+from dsynth_isaac.teleop.xr_anchor import (
+    XrAnchorTeleporter,
+    end_xr_display,
+    xr_display_active,
+)
 from dsynth_isaac.teleop.xr_target_hud import XrTargetHud
 from dsynth_isaac.robots.sberchel_cfg import (
     apply_sberchel_loco_upper_pd_gains,
@@ -1935,7 +1939,31 @@ def main() -> None:
     # operator always starts looking where the robot looks.
     xr_session_was_live = False
 
-    while simulation_app.is_running():
+    # Window X / File->Exit posts a Kit quit request; with a live CloudXR
+    # session Kit's own shutdown wedges inside xrWaitFrame before the loop's
+    # is_running() check ever sees it. Catch the quit request ourselves, end
+    # the XR session synchronously (before Kit continues shutting down), and
+    # let the loop fall through to the normal save/close teardown.
+    quit_requested = [False]
+    _quit_sub = None
+    try:
+        import omni.kit.app
+
+        def _on_quit_request(event) -> None:
+            if not quit_requested[0]:
+                quit_requested[0] = True
+                print("[exit] quit requested — ending XR session", flush=True)
+                end_xr_display()
+
+        _quit_sub = (
+            omni.kit.app.get_app()
+            .get_shutdown_event_stream()
+            .create_subscription_to_pop(_on_quit_request, name="sberchel_record_quit")
+        )
+    except Exception as exc:
+        logger.debug("quit-request hook unavailable: %s", exc)
+
+    while simulation_app.is_running() and not quit_requested[0]:
         try:
             with torch.inference_mode():
                 poll_controllers()
@@ -2180,8 +2208,13 @@ def main() -> None:
                             )
                         # env.reset() already recorded initial_state with the discarded
                         # sample; recapture it so the episode replays from the true spawn.
+                        # Pass explicit env ids: with None the stock InitialStateRecorder
+                        # indexes value[None], which prepends a dim instead of selecting
+                        # envs and breaks scene.reset_to on replay.
                         base_env.recorder_manager.reset()
-                        base_env.recorder_manager.record_post_reset(None)
+                        base_env.recorder_manager.record_post_reset(
+                            torch.arange(base_env.num_envs, dtype=torch.int64, device=base_env.device)
+                        )
                     stamp_episode_seed()
                     roll_target_hud()
                     episode_start_root_pose = robot.data.root_state_w[:, :7].clone()
@@ -2246,10 +2279,18 @@ def main() -> None:
 
                 if rate_limiter is not None and running_recording_instance:
                     rate_limiter.sleep(base_env)
+        except KeyboardInterrupt:
+            print("[exit] Ctrl+C — closing cleanly", flush=True)
+            break
         except Exception as exc:
             logger.error("Error during simulation step: %s", exc)
             break
 
+    _quit_sub = None
+    # End the headset session before tearing anything down; closing the env or
+    # app with a live CloudXR session hangs in xrWaitFrame. Skip the update
+    # pump when Kit is already shutting down from a window-X quit.
+    end_xr_display(simulation_app if not quit_requested[0] else None)
     for controller in controllers:
         controller.close()
     env.close()

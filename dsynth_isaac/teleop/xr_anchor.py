@@ -57,6 +57,32 @@ def xr_display_active() -> bool:
         return False
 
 
+def end_xr_display(simulation_app=None, max_updates: int = 120) -> None:
+    """End the headset session (disable the active XR profile) and wait for it.
+
+    Kit's quit path wedges inside ``xrWaitFrame`` when the app shuts down while
+    a CloudXR/OpenXR session is still presenting (window X / File->Exit hangs
+    and spams ``XR_ERROR_VALIDATION_FAILURE``), so callers must end the session
+    before ``env.close()``/``SimulationApp.close()``. Disabling is only a
+    request; pass ``simulation_app`` so updates can be pumped until the session
+    actually ends (bounded by ``max_updates``).
+    """
+    try:
+        from omni.kit.xr.core import XRCore
+
+        core = XRCore.get_singleton()
+        if not core.is_xr_enabled():
+            return
+        core.request_disable_profile()
+        for _ in range(max_updates):
+            if simulation_app is not None:
+                simulation_app.update()
+            if not core.is_xr_enabled():
+                break
+    except Exception as exc:
+        logger.warning("XR session stop failed: %s", exc)
+
+
 def anchor_prim_path_from_cfg(xr_cfg) -> str:
     """Anchor prim path ``OpenXRDevice`` creates for this XR config."""
     parent = getattr(xr_cfg, "anchor_prim_path", None)

@@ -114,6 +114,28 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--fast_export",
+    action="store_true",
+    default=False,
+    help=(
+        "Camera-export fast path: skip physics stepping and per-step state sync, "
+        "injecting recorded states and rendering only at --frame_stride capture "
+        "steps. Frames are rendered from the same recorded states as the normal "
+        "path. Requires --output_dataset_file with processed_joint_targets state "
+        "sync; incompatible with --video and the validation flags."
+    ),
+)
+parser.add_argument(
+    "--per_step_render",
+    action="store_true",
+    default=False,
+    help=(
+        "Render every physics step even during headless camera export. By default "
+        "camera export skips the per-step render and relies on the explicit render "
+        "done at each --frame_stride capture, which is much faster."
+    ),
+)
+parser.add_argument(
     "--validate_states",
     action="store_true",
     default=False,
@@ -678,6 +700,22 @@ def _clone_tensor_tree(value):
     return value
 
 
+def _squeeze_extra_state_dims(value):
+    """Drop stray leading singleton dims from recorded state tensors.
+
+    Episodes whose initial_state was re-captured via record_post_reset(None)
+    carry an extra dim (e.g. root_pose (1, 1, 7) instead of (1, 7)) because the
+    stock InitialStateRecorder indexes value[None] there; scene.reset_to needs
+    (num_envs, ...).
+    """
+    if isinstance(value, dict):
+        return {key: _squeeze_extra_state_dims(item) for key, item in value.items()}
+    if isinstance(value, torch.Tensor):
+        while value.dim() > 2 and value.shape[0] == 1:
+            value = value.squeeze(0)
+    return value
+
+
 def clone_episode_data(episode: EpisodeData) -> EpisodeData:
     """Copy episode tensors for export without sharing storage with the replay cursor."""
     cloned = EpisodeData()
@@ -865,6 +903,20 @@ def main() -> None:
     env_cfg.viewer.eye = (4, 1.0, 2.5)
     env_cfg.viewer.lookat = (9.5, 6.0, 0.0)
 
+    throttle_render = (
+        camera_augment and args_cli.headless and not args_cli.video and not args_cli.per_step_render
+    )
+    if throttle_render:
+        # The capture path renders explicitly at every --frame_stride step (after
+        # state-sync injection), so per-step renders in between only burn RTX
+        # time. frame_stride (not a huge sentinel) keeps rendering_dt sane —
+        # SimulationContext derives rendering_dt = dt * render_interval.
+        env_cfg.sim.render_interval = frame_stride
+        print(
+            f"Render throttle: rendering every {frame_stride} steps instead of every step "
+            "(--per_step_render restores old behavior)"
+        )
+
     render_mode = "rgb_array" if args_cli.video else None
     gym_env = gym.make(args_cli.task, cfg=env_cfg, render_mode=render_mode)
     video_env: gym.Env | None = None
@@ -939,6 +991,23 @@ def main() -> None:
         print("Replay source: actions (raw Pink IK + leg actions; may diverge from recording)")
         print("Zest policy: inactive (Network used only to restore locomotion PD gains)")
         print("State sync: disabled")
+
+    fast_export = bool(args_cli.fast_export)
+    if fast_export:
+        if not camera_augment:
+            raise ValueError("--fast_export requires --output_dataset_file (camera export).")
+        if not state_sync_enabled:
+            raise ValueError(
+                "--fast_export requires --replay_source processed_joint_targets without --no_state_sync."
+            )
+        if args_cli.video or args_cli.validate_states or args_cli.validate_success_rate:
+            raise ValueError(
+                "--fast_export is incompatible with --video, --validate_states and --validate_success_rate."
+            )
+        print(
+            "Fast export: physics stepping skipped; recorded states injected and rendered "
+            f"only at capture steps (every {frame_stride} steps)"
+        )
 
     teleop_interface = None
     if not args_cli.headless:
@@ -1094,6 +1163,10 @@ def main() -> None:
                             episode_data = dataset_file_handler.load_episode(
                                 episode_names[next_episode_index], env.device
                             )
+                            if "initial_state" in episode_data.data:
+                                episode_data.data["initial_state"] = _squeeze_extra_state_dims(
+                                    episode_data.data["initial_state"]
+                                )
                             env_episode_data_map[env_id] = episode_data
                             if camera_augment:
                                 export_episode_snapshots[env_id] = clone_episode_data(episode_data)
@@ -1142,6 +1215,10 @@ def main() -> None:
                 if state_sync_enabled:
                     for env_id in range(num_envs):
                         step_idx = episode_step_counters[env_id]
+                        if fast_export and step_idx % frame_stride != 0:
+                            # Fast export: this step's scene state is never
+                            # rendered or exported, so skip the injection.
+                            continue
                         if step_idx > 0:
                             episode_data = env_episode_data_map[env_id]
                             prev_state = episode_data.get_state(step_idx - 1)
@@ -1151,6 +1228,13 @@ def main() -> None:
                                 )
                             sync_scene_to_recorded_state(env, prev_state, env_id)
                             sync_store_products_to_recorded(env, episode_data, step_idx - 1, num_envs)
+                            if fast_export:
+                                # Renders read transforms from Fabric, which only
+                                # syncs from PhysX during a physics step. One step
+                                # (PD targets hold the injected pose) makes the
+                                # injected state visible to the capture render.
+                                env.sim.step(render=False)
+                                env.scene.update(dt=env.physics_dt)
                 if camera_augment and envs_with_step:
                     # Pre-step capture: pair frame k with action k the way teleop
                     # and LeRobot do (the state the operator saw when issuing
@@ -1186,7 +1270,13 @@ def main() -> None:
                                 if postprocess is not None:
                                     frame = postprocess(frame)
                                 camera_frame_buffers[env_id][img_key].append(frame)
-                if args_cli.replay_source == "policy_loco":
+                if fast_export:
+                    # Physics result is overwritten by the next state-sync
+                    # injection, so skip stepping; keep env counters advancing
+                    # for anything reading episode progress.
+                    env.episode_length_buf += 1
+                    env.common_step_counter += 1
+                elif args_cli.replay_source == "policy_loco":
                     legs_dim, neck_dim, upper_dim = _processed_term_dims(env)
                     legs_batch = torch.zeros(num_envs, legs_dim, device=env.device, dtype=torch.float32)
                     neck_batch = torch.zeros(
