@@ -19,6 +19,13 @@ pipeline go into the output's ``env_args`` for the conversion.
 
 With ``--video``, also records viewport MP4s (one per replayed episode) via Gymnasium
 ``RecordVideo``, following the robot camera like ``demo_random_actions.py``.
+
+With ``--third_person``, the camera export additionally renders a static third-person
+scene camera framing the packing table, the shelf rows and the robot, stored as
+``obs/third_person_img`` in ``--output_dataset_file`` on the same ``--frame_stride``
+grid as the robot cameras. ``sberchel_hdf5_to_video.py`` then tiles it as a fourth
+panel next to head/left-wrist/right-wrist. The key is not in the LeRobot converter's
+``CAMERA_MAP``, so it never reaches the LeRobot dataset.
 """
 
 import argparse
@@ -204,6 +211,38 @@ parser.add_argument(
     default="",
     help="Directory for viewport MP4s. Default: <dataset_dir>/videos.",
 )
+parser.add_argument(
+    "--third_person",
+    action="store_true",
+    default=False,
+    help=(
+        "Also store obs/third_person_img in --output_dataset_file: a static "
+        "third-person scene camera framing the packing table, the shelf rows and "
+        "the robot, captured on the same --frame_stride grid as the robot "
+        "cameras. Visualization-only: the key is outside the LeRobot converter's "
+        "CAMERA_MAP, so it never reaches the LeRobot dataset. Requires "
+        "--output_dataset_file."
+    ),
+)
+parser.add_argument(
+    "--third_person_pose",
+    type=str,
+    default="4.0,1.0,2.5,9.5,6.0,0.0",
+    help=(
+        "Static camera pose 'eye_x,eye_y,eye_z,look_x,look_y,look_z' in env-local "
+        "meters. The default is the replay viewer vantage for the small_store_aij "
+        "layout: packing table left, shelf rows center/right, robot in between."
+    ),
+)
+parser.add_argument(
+    "--third_person_size",
+    type=str,
+    default="640x360",
+    help=(
+        "Third-person render size 'WxH' (default 640x360 — kept modest since the "
+        "frames are stored uncompressed in the output HDF5)."
+    ),
+)
 
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
@@ -212,8 +251,9 @@ if args_cli.enable_pinocchio:
     import pinocchio  # noqa: F401
 
 app_launcher_args = vars(args_cli)
-# Viewport rgb_array / RecordVideo needs camera rendering enabled.
-if args_cli.video:
+# Viewport rgb_array / RecordVideo and the third-person scene camera need camera
+# rendering enabled.
+if args_cli.video or args_cli.third_person:
     app_launcher_args["enable_cameras"] = True
 
 app_launcher = AppLauncher(app_launcher_args)
@@ -257,7 +297,9 @@ def make_step_progress(total_steps: int):
         return tqdm(total=total_steps, desc="replay", unit="step", dynamic_ncols=True)
     return _PlainProgress(total_steps)
 
+import isaaclab.sim as sim_utils
 from isaaclab.devices import Se3Keyboard, Se3KeyboardCfg
+from isaaclab.sensors import CameraCfg
 from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
 
 _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -311,6 +353,54 @@ def make_green_challenge_frame_postprocess(mask: np.ndarray, out_size: tuple[int
         return torch.from_numpy(img)
 
     return _apply
+
+
+# --third_person camera optics: ~72 deg horizontal FOV keeps the packing
+# table, the shelf rows and the walking robot in frame from the default vantage
+# without fisheye distortion.
+_THIRD_PERSON_FOCAL_LENGTH = 14.4
+_THIRD_PERSON_HORIZONTAL_APERTURE = 20.955
+# obs key for the exported frames. Deliberately NOT a SBERCHEL_CAMERA_OBS_KEYS /
+# lerobot CAMERA_MAP key: hdf5_to_video auto-detects it as an extra panel while
+# hdf5_to_lerobot ignores it.
+THIRD_PERSON_IMG_KEY = "third_person_img"
+
+
+def parse_third_person_pose(spec: str) -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Parse ``--third_person_pose`` into env-local ``(eye, lookat)`` triples."""
+    try:
+        values = [float(item) for item in spec.replace(" ", "").split(",") if item]
+    except ValueError as exc:
+        raise ValueError(f"Invalid --third_person_pose {spec!r}: {exc}") from exc
+    if len(values) != 6:
+        raise ValueError(
+            "--third_person_pose needs 6 comma-separated floats "
+            f"(eye_x,eye_y,eye_z,look_x,look_y,look_z), got {len(values)}."
+        )
+    return tuple(values[:3]), tuple(values[3:])
+
+
+def make_third_person_camera_cfg(size: tuple[int, int]) -> CameraCfg:
+    """Free-standing pinhole RGB camera (no parent body, so it never moves).
+
+    The pose is applied after env creation via ``set_world_poses_from_view``;
+    the cfg only spawns the prim and render product.
+    """
+    width, height = size
+    return CameraCfg(
+        prim_path="{ENV_REGEX_NS}/third_person_camera",
+        update_period=0.0,
+        height=height,
+        width=width,
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=_THIRD_PERSON_FOCAL_LENGTH,
+            horizontal_aperture=_THIRD_PERSON_HORIZONTAL_APERTURE,
+            clipping_range=(0.1, 1.0e6),
+        ),
+    )
+
+
 from green_challenge.policy.network import Network
 
 is_paused = False
@@ -968,6 +1058,29 @@ def main() -> None:
                     camera_masks[camera], camera_size
                 )
 
+    # Static third-person visualization camera. Added after strip_camera_configs
+    # so it survives the robot-camera stripping; render-only (no collider, no
+    # obs term), so replayed physics and the robot-camera frames are unchanged.
+    third_person = bool(args_cli.third_person)
+    tp_eye: tuple[float, ...] = ()
+    tp_lookat: tuple[float, ...] = ()
+    tp_size: tuple[int, int] = (0, 0)
+    if third_person:
+        if not camera_augment:
+            raise ValueError(
+                "--third_person stores obs/third_person_img in the camera export; "
+                "it requires --output_dataset_file."
+            )
+        tp_eye, tp_lookat = parse_third_person_pose(args_cli.third_person_pose)
+        parsed_tp_size = parse_camera_size(args_cli.third_person_size)
+        if parsed_tp_size is None:
+            raise ValueError("--third_person_size must be 'WxH' (e.g. 640x360), not 'native'.")
+        tp_size = parsed_tp_size
+        env_cfg.scene.third_person_camera = make_third_person_camera_cfg(tp_size)
+    # Keys written to the output HDF5: robot cameras plus the optional
+    # third-person view (the latter is excluded from camera_keys env_args).
+    export_img_keys = list(augment_img_keys) + ([THIRD_PERSON_IMG_KEY] if third_person else [])
+
     # if args_cli.video:
     #     env_cfg.viewer.origin_type = "asset_root"
     #     env_cfg.viewer.asset_name = "robot"
@@ -1054,12 +1167,35 @@ def main() -> None:
                 ),
             }
         )
+        if third_person:
+            # Viz-only extra view; kept out of camera_keys on purpose so nothing
+            # downstream mistakes it for a robot camera.
+            merged_env_args["third_person_camera"] = {
+                "key": THIRD_PERSON_IMG_KEY,
+                "eye": list(tp_eye),
+                "lookat": list(tp_lookat),
+                "width": tp_size[0],
+                "height": tp_size[1],
+            }
         output_dataset_handler.add_env_args(merged_env_args)
-        keys_str = ", ".join(f"obs/{key}" for key in augment_img_keys)
+        keys_str = ", ".join(f"obs/{key}" for key in export_img_keys)
         print(
             f"Camera augment: writing {keys_str} "
             f"({out_width}x{out_height} @ {camera_fps:g} fps, stride {frame_stride}, "
             f"pipeline {args_cli.camera_pipeline}) -> {args_cli.output_dataset_file}"
+        )
+
+    if third_person:
+        # One-time static pose per env (env-local coords + env origin); nothing
+        # in reset/reset_to touches this prim afterwards.
+        origins = env.scene.env_origins
+        env.scene["third_person_camera"].set_world_poses_from_view(
+            eyes=origins + torch.tensor(tp_eye, device=origins.device, dtype=origins.dtype),
+            targets=origins + torch.tensor(tp_lookat, device=origins.device, dtype=origins.dtype),
+        )
+        print(
+            f"Third-person camera: static, eye={tp_eye} lookat={tp_lookat}, "
+            f"{tp_size[0]}x{tp_size[1]} -> obs/{THIRD_PERSON_IMG_KEY}"
         )
 
     state_sync_enabled = (
@@ -1133,7 +1269,16 @@ def main() -> None:
     if teleop_interface is not None:
         teleop_interface.reset()
 
-    episode_names = list(dataset_file_handler.get_episode_names())
+    # h5py yields group names alphabetically (demo_10 sorts before demo_2), so a
+    # file with >10 demos would scramble the index<->name mapping and the output
+    # demo names would no longer match the input's. Sort numerically.
+    episode_names = sorted(
+        dataset_file_handler.get_episode_names(),
+        key=lambda name: (
+            int(name.rsplit("_", 1)[-1]) if name.rsplit("_", 1)[-1].isdigit() else float("inf"),
+            name,
+        ),
+    )
     # Overall progress across every step of every episode queued for replay.
     with h5py.File(args_cli.dataset_file, "r") as _f:
         total_steps = sum(
@@ -1159,7 +1304,7 @@ def main() -> None:
     policy_loco_steps: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * num_envs
     export_episode_snapshots: list[EpisodeData | None] = [None] * num_envs
     camera_frame_buffers: list[dict[str, list[torch.Tensor]]] = [
-        {key: [] for key in augment_img_keys} for _ in range(num_envs)
+        {key: [] for key in export_img_keys} for _ in range(num_envs)
     ]
 
     def _write_validation(line: str) -> None:
@@ -1192,13 +1337,13 @@ def main() -> None:
         )
         if wrote:
             augmented_episode_count += 1
-            frame_count = len(frames_by_key[augment_img_keys[0]]) if augment_img_keys else 0
+            frame_count = len(frames_by_key[export_img_keys[0]]) if export_img_keys else 0
             print(
                 f"Wrote augmented episode demo_{demo_id} "
-                f"({frame_count} frames x {len(augment_img_keys)} cameras) "
+                f"({frame_count} frames x {len(export_img_keys)} cameras) "
                 f"-> {args_cli.output_dataset_file}"
             )
-        camera_frame_buffers[env_id] = {key: [] for key in augment_img_keys}
+        camera_frame_buffers[env_id] = {key: [] for key in export_img_keys}
         export_episode_snapshots[env_id] = None
 
     # NB: comma, not `and` — `A and B` evaluates to B alone, which would let
@@ -1273,7 +1418,7 @@ def main() -> None:
                             env_episode_data_map[env_id] = episode_data
                             if camera_augment:
                                 export_episode_snapshots[env_id] = clone_episode_data(episode_data)
-                                camera_frame_buffers[env_id] = {key: [] for key in augment_img_keys}
+                                camera_frame_buffers[env_id] = {key: [] for key in export_img_keys}
                             episode_step_counters[env_id] = 0
                             initial_state = episode_data.get_initial_state()
                             # Seed reproduces the recorded first-row jitter draw
@@ -1423,6 +1568,15 @@ def main() -> None:
                                 if postprocess is not None:
                                     frame = postprocess(frame)
                                 camera_frame_buffers[env_id][img_key].append(frame)
+                        if third_person:
+                            # Read the sensor directly (no obs term keeps it out
+                            # of the observation pipeline entirely).
+                            tp_batch = env.scene["third_person_camera"].data.output["rgb"]
+                            for env_id in stride_envs:
+                                frame = tp_batch[env_id, ..., :3].detach().to("cpu", non_blocking=False).contiguous()
+                                if frame.is_floating_point():
+                                    frame = frame.clamp(0, 255).to(torch.uint8)
+                                camera_frame_buffers[env_id][THIRD_PERSON_IMG_KEY].append(frame)
                 if fast_export:
                     # Physics result is overwritten by the next state-sync
                     # injection, so skip stepping; keep env counters advancing
