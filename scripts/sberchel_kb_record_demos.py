@@ -139,7 +139,7 @@ parser.add_argument(
 parser.add_argument(
     "--static_blend_time",
     type=float,
-    default=0.4,
+    default=0.5,
     help=(
         "Seconds (sim time) to ramp the arm + neck commands from the held pose "
         "into the live XR targets after every entry into static mode. Without it "

@@ -652,9 +652,30 @@ def capture_viewport_frame(video_env: gym.Env | None, base_env) -> None:
         video_env.stop_recording()
 
 
-def sync_scene_to_recorded_state(env, recorded_state: dict, env_id: int) -> None:
-    """Inject a recorded post-step scene state without running env ``reset_to`` managers."""
+def _zero_state_velocities(state):
+    """Copy a scene-state tree with every ``*velocity*`` tensor zeroed."""
+    if isinstance(state, dict):
+        return {
+            key: (
+                torch.zeros_like(value)
+                if "velocity" in key and isinstance(value, torch.Tensor)
+                else _zero_state_velocities(value)
+            )
+            for key, value in state.items()
+        }
+    return state
+
+
+def sync_scene_to_recorded_state(env, recorded_state: dict, env_id: int, zero_velocities: bool = False) -> None:
+    """Inject a recorded post-step scene state without running env ``reset_to`` managers.
+
+    ``zero_velocities`` injects the recorded poses with zeroed root/joint
+    velocities (and zero velocity targets), so a following settle ``sim.step``
+    holds the pose still instead of integrating it one physics dt forward.
+    """
     env_ids = torch.tensor([env_id], device=env.device)
+    if zero_velocities:
+        recorded_state = _zero_state_velocities(recorded_state)
     env.scene.reset_to(recorded_state, env_ids=env_ids, is_relative=True)
     apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
     env.scene.write_data_to_sim()
@@ -664,13 +685,27 @@ def sync_scene_to_recorded_state(env, recorded_state: dict, env_id: int) -> None
 _warned_no_store_products = False
 
 
-def sync_store_products_to_recorded(env, episode_data: EpisodeData, step_idx: int, num_envs: int) -> None:
+def sync_store_products_to_recorded(
+    env,
+    episode_data: EpisodeData,
+    step_idx: int,
+    num_envs: int,
+    only_moved: bool = True,
+    zero_velocities: bool = False,
+) -> None:
     """Pin unregistered store product bodies to their recorded step state.
 
     Store products are plain USD rigid bodies, not scene assets, so the robot
     state sync alone leaves them on open-loop physics and a grasped item drifts
     out of the hand. No-op with a one-time warning for demos recorded before
     ``PostStepStoreProductsRecorder`` existed.
+
+    ``only_moved=True`` (interactive replay) restores only bodies drifted beyond
+    the restore tolerances (2 cm / ~10 deg / 0.25 m/s), preserving PhysX contact
+    warm-start on undisturbed shelves. Camera export must pass ``False``: a
+    carried item moves right at those tolerances per frame, so tolerance-gated
+    pinning renders it lagging/snapping around the hand. ``zero_velocities``
+    pins poses with zero velocity so a settle step does not advance them.
     """
     global _warned_no_store_products
     store = episode_data.data.get("store_products")
@@ -686,12 +721,16 @@ def sync_store_products_to_recorded(env, episode_data: EpisodeData, step_idx: in
                 reason = "store product sync is single-env only"
             print(f"Warning: store products not synced — {reason}; grasped objects may drift.")
         return
+    velocities = store["velocities"][step_idx]
+    if zero_velocities:
+        velocities = torch.zeros_like(velocities)
     restore(
         env.sim,
         {
             "transforms": store["transforms"][step_idx],
-            "velocities": store["velocities"][step_idx],
+            "velocities": velocities,
         },
+        only_moved=only_moved,
     )
 
 
@@ -1055,7 +1094,8 @@ def main() -> None:
                 "--fast_export is incompatible with --video, --validate_states and --validate_success_rate."
             )
         print(
-            "Fast export: physics stepping skipped; recorded states injected and rendered "
+            "Fast export: physics stepping skipped; recorded states injected exactly "
+            "(all products pinned, velocities zeroed for the settle step) and rendered "
             f"only at capture steps (every {frame_stride} steps)"
         )
 
@@ -1326,8 +1366,21 @@ def main() -> None:
                                 raise ValueError(
                                     f"Episode is missing recorded states required for state sync at step {step_idx}."
                                 )
-                            sync_scene_to_recorded_state(env, prev_state, env_id)
-                            sync_store_products_to_recorded(env, episode_data, step_idx - 1, num_envs)
+                            # Camera export needs exact frames: pin every product
+                            # to the recorded pose (no drift tolerance), and in
+                            # fast export zero all velocities so the settle step
+                            # holds the injected pose instead of integrating it.
+                            sync_scene_to_recorded_state(
+                                env, prev_state, env_id, zero_velocities=fast_export
+                            )
+                            sync_store_products_to_recorded(
+                                env,
+                                episode_data,
+                                step_idx - 1,
+                                num_envs,
+                                only_moved=not camera_augment,
+                                zero_velocities=fast_export,
+                            )
                             if fast_export:
                                 # Renders read transforms from Fabric, which only
                                 # syncs from PhysX during a physics step. One step
