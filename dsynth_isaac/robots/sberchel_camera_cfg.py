@@ -11,7 +11,6 @@ Params match ``camera_parameters.json`` presets for robot ``v3_0a`` and the
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -22,6 +21,8 @@ import isaaclab.sim as sim_utils
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import CameraCfg
+
+from dsynth_isaac.green_challenge_path import green_challenge_root
 
 _HORIZONTAL_APERTURE = 5.784
 _UPDATE_PERIOD = 0.067
@@ -131,15 +132,10 @@ _CAMERA_MASK_FILES: dict[str, str] = {
 def load_sberchel_camera_masks(cameras: str | Iterable[str]) -> dict[str, np.ndarray]:
     """Load green_challenge's native-resolution camera masks, keyed by camera name.
 
-    The green_challenge checkout is resolved from ``GREEN_CHALLENGE_PATH`` or
-    the in-repo ``green_challenge`` folder.
+    The green_challenge checkout is resolved by ``dsynth_isaac.green_challenge_path``
+    (``GREEN_CHALLENGE_PATH`` or the default checkout location).
     """
-    gc_root = Path(
-        os.environ.get(
-            "GREEN_CHALLENGE_PATH",
-            Path(__file__).resolve().parents[2] / "green_challenge",
-        )
-    )
+    gc_root = Path(green_challenge_root())
     mask_dir = gc_root / "assets" / "robot_v3_0a" / "dependencies" / "settings" / "camera_mask"
     masks: dict[str, np.ndarray] = {}
     for camera in parse_camera_names(cameras):

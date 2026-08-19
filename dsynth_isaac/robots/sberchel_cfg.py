@@ -12,19 +12,13 @@ kinematics with policy leg actuators and XR arm PD.
 group for headset look control.
 """
 
-import os
 import re
-import sys
 from pathlib import Path
 
-# --- Make the sibling ``green_challenge`` package importable -----------------
-_DEFAULT_GC = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-    "..", "green_challenge"))
-_GREEN_CHALLENGE_ROOT = os.environ.get("GREEN_CHALLENGE_PATH", _DEFAULT_GC)
-_parent = os.path.dirname(os.path.abspath(_GREEN_CHALLENGE_ROOT))
-if _parent not in sys.path:
-    sys.path.insert(0, _parent)
+from dsynth_isaac.green_challenge_path import ensure_green_challenge_importable
+
+# --- Make the ``green_challenge`` checkout importable ------------------------
+_GREEN_CHALLENGE_ROOT = ensure_green_challenge_importable()
 
 # NOTE: importing ConfigManager enables the MJCF extension after AppLauncher.
 from green_challenge.assets.robot_v3_0a.utils.config_manager import ConfigManager

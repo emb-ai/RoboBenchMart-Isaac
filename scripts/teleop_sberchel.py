@@ -20,12 +20,13 @@ from collections.abc import Callable
 
 from isaaclab.app import AppLauncher
 
-_DEFAULT_GC = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "green_challenge"))
-_GC = os.environ.get("GREEN_CHALLENGE_PATH", _DEFAULT_GC)
-_gc_parent = os.path.dirname(os.path.abspath(_GC))
-if _gc_parent not in sys.path:
-    sys.path.insert(0, _gc_parent)
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from dsynth_isaac.green_challenge_path import ensure_green_challenge_importable  # noqa: E402
+
+ensure_green_challenge_importable()
 
 parser = argparse.ArgumentParser(description="Sberchel XR teleop with policy-balanced legs.")
 parser.add_argument("--config_dir_path", type=str, required=True, help="Path to generated scene config directory.")

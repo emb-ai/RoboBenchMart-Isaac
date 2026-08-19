@@ -22,12 +22,13 @@ from collections.abc import Callable
 
 from isaaclab.app import AppLauncher
 
-_DEFAULT_GC = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "..", "green_challenge"))
-_GC = os.environ.get("GREEN_CHALLENGE_PATH", _DEFAULT_GC)
-_gc_parent = os.path.dirname(os.path.abspath(_GC))
-if _gc_parent not in sys.path:
-    sys.path.insert(0, _gc_parent)
+_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
+from dsynth_isaac.green_challenge_path import ensure_green_challenge_importable  # noqa: E402
+
+ensure_green_challenge_importable()
 
 parser = argparse.ArgumentParser(description="Sberchel XR teleop with headset-follow locomotion.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
@@ -45,10 +46,6 @@ parser.add_argument(
     default=False,
     help="Enable Pinocchio (required for Pink IK / hand tracking).",
 )
-
-_repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _repo_root not in sys.path:
-    sys.path.insert(0, _repo_root)
 
 from dsynth_isaac.teleop.sberchel_head_follow import add_head_follow_cli_args  # noqa: E402
 

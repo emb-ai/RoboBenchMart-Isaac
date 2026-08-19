@@ -74,7 +74,7 @@ Optional: clear Pink / dex caches after URDF export logic changes:
 
 ```bash
 rm -rf \
-  /home/soshin/repo/green_challenge/assets/robot_v3_0a/dependencies/robots/v3_0_alpha_locomanipulator/usd_cache/pink_ik_cache
+  /home/krapukhin/projects/green-challenge/assets/robot_v3_0a/dependencies/robots/v3_0_alpha_locomanipulator/usd_cache/pink_ik_cache
 ```
 
 Press **START** in XR to begin teleop; **R** / reset gesture to reset.

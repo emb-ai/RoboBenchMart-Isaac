@@ -76,7 +76,7 @@ Robot articulation configs used by the environments:
 - **`WORKER_CONFIG`** (`dsynth_isaac/robots/worker_cfg.py`): dual-arm worker from local USD `assets/robots/worker/worker.usd`. Env cfg exists; not registered in `__init__.py`.
 - **`FRANKA_PANDA_CFG` / `FRANKA_PANDA_HIGH_PD_CFG`**: Franka Panda from `isaaclab_assets` (Isaac Lab / Omniverse stock).
 - **`GR1T2_HIGH_PD_CFG`**: Fourier GR1T2 from `isaaclab_assets.robots.fourier` (Isaac Lab stock).
-- **Sberchel** (`dsynth_isaac/robots/sberchel_cfg.py`): ConfigManager JSON + meshes from sibling **`green_challenge`** (`GREEN_CHALLENGE_PATH` or `../green_challenge`); hybrid MJCF is local under `dsynth_isaac/robots/mjcf/`:
+- **Sberchel** (`dsynth_isaac/robots/sberchel_cfg.py`): ConfigManager JSON + meshes from the **`green_challenge`** checkout at `/home/krapukhin/projects/green-challenge` (override with `GREEN_CHALLENGE_PATH`; resolved in `dsynth_isaac/green_challenge_path.py`); hybrid MJCF is local under `dsynth_isaac/robots/mjcf/`:
   - `SBERCHEL_CONFIG` — closed kinematics (`robot_v3_0a`)
   - `SBERCHEL_CONFIG_OPEN_KINEMATICS` — hybrid open MJCF (serial upper body + policy crank legs)
   - `SBERCHEL_UPPERBODY_XR_ROBOT` — fixed pelvis, XR upper-body PD

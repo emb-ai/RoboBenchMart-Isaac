@@ -35,11 +35,10 @@ from isaaclab.app import AppLauncher
 _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
-_DEFAULT_GC = os.path.normpath(os.path.join(_repo_root, "..", "green_challenge"))
-_GC = os.environ.get("GREEN_CHALLENGE_PATH", _DEFAULT_GC)
-_gc_parent = os.path.dirname(os.path.abspath(_GC))
-if _gc_parent not in sys.path:
-    sys.path.insert(0, _gc_parent)
+
+from dsynth_isaac.green_challenge_path import ensure_green_challenge_importable  # noqa: E402
+
+ensure_green_challenge_importable()
 
 parser = argparse.ArgumentParser(description=__doc__)
 AppLauncher.add_app_launcher_args(parser)

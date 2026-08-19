@@ -30,7 +30,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sys
 from pathlib import Path
@@ -39,9 +38,13 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 REPO = Path(__file__).resolve().parents[1]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
 ASSETS = REPO / "dsynth_isaac" / "assets" / "sberchel_xr"
-_DEFAULT_GC = REPO.parent / "green_challenge"
-GC = Path(os.environ.get("GREEN_CHALLENGE_PATH", _DEFAULT_GC))
+
+from dsynth_isaac.green_challenge_path import green_challenge_root  # noqa: E402
+
+GC = Path(green_challenge_root())
 MJCF = (
     GC
     / "assets/robot_v3_0a/dependencies/robots/v3_0_alpha_locomanipulator"
