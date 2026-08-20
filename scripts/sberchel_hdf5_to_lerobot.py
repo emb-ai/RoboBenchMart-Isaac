@@ -57,41 +57,14 @@ import pandas as pd
 # Joint naming
 # ---------------------------------------------------------------------------
 
-# Isaac articulation joint order (breadth-first). Used as fallback when the input
-# file's env_args lacks "sberchel_joint_names" (replay outputs drop it).
-FALLBACK_SIM_JOINT_NAMES = [
-    "left_hip_pitch_joint", "right_hip_pitch_joint", "torso_yaw_joint",
-    "left_hip_roll_joint", "right_hip_roll_joint", "left_shoulder_pitch_joint",
-    "right_shoulder_pitch_joint", "neck_yaw_joint", "left_hip_yaw_joint",
-    "right_hip_yaw_joint", "left_shoulder_roll_joint", "right_shoulder_roll_joint",
-    "neck_pitch_joint", "left_knee_crank_joint", "right_knee_crank_joint",
-    "left_shoulder_yaw_joint", "right_shoulder_yaw_joint", "left_ankle_u_crank_joint",
-    "right_ankle_u_crank_joint", "left_elbow_pitch_joint", "right_elbow_pitch_joint",
-    "left_ankle_b_crank_joint", "right_ankle_b_crank_joint", "left_elbow_yaw_joint",
-    "right_elbow_yaw_joint", "left_wrist_pitch_joint", "right_wrist_pitch_joint",
-    "left_wrist_roll_joint", "right_wrist_roll_joint", "left_thumb_proximal_yaw_joint",
-    "left_index_proximal_joint", "left_middle_proximal_joint", "left_ring_proximal_joint",
-    "left_pinky_proximal_joint", "right_thumb_proximal_yaw_joint",
-    "right_index_proximal_joint", "right_middle_proximal_joint",
-    "right_ring_proximal_joint", "right_pinky_proximal_joint",
-    "left_thumb_proximal_pitch_joint", "left_index_intermediate_joint",
-    "left_middle_intermediate_joint", "left_ring_intermediate_joint",
-    "left_pinky_intermediate_joint", "right_thumb_proximal_pitch_joint",
-    "right_index_intermediate_joint", "right_middle_intermediate_joint",
-    "right_ring_intermediate_joint", "right_pinky_intermediate_joint",
-    "left_thumb_intermediate_joint", "right_thumb_intermediate_joint",
-    "left_thumb_distal_joint", "right_thumb_distal_joint",
-]
-
-# The sim URDF uses crank joints where the real robot names pitch/roll joints.
-SIM_JOINT_ALIASES = {
-    "left_knee_pitch_joint": "left_knee_crank_joint",
-    "right_knee_pitch_joint": "right_knee_crank_joint",
-    "left_ankle_pitch_joint": "left_ankle_u_crank_joint",
-    "right_ankle_pitch_joint": "right_ankle_u_crank_joint",
-    "left_ankle_roll_joint": "left_ankle_b_crank_joint",
-    "right_ankle_roll_joint": "right_ankle_b_crank_joint",
-}
+# No hardcoded joint-order fallback: sim joint order is read from each file's
+# "sberchel_joint_names" provenance. A baked-in list survives a robot-model
+# change silently -- the previous one described the retired open/hybrid model,
+# where the serial knee/ankle joints wore the crank names and there were no
+# passive linkage dofs at all -- and a wrong order maps real joints onto the
+# wrong sim columns without any error. On the closed-kinematics robot_v3_0a
+# model the real-robot names below (knee_pitch, ankle_pitch/roll, wrist_pitch)
+# resolve directly to the linkage output joints, so no aliasing is needed.
 
 # 44 real joints of observation.state, in the sample dataset's order.
 STATE_JOINT_NAMES = [
@@ -230,10 +203,14 @@ def joint_index_map(sim_names: list, wanted: list) -> np.ndarray:
     name_to_id = {n: i for i, n in enumerate(sim_names)}
     idx = []
     for name in wanted:
-        sim_name = name if name in name_to_id else SIM_JOINT_ALIASES.get(name)
-        if sim_name is None or sim_name not in name_to_id:
-            raise KeyError(f"Joint '{name}' not found in sim joint names (or aliases).")
-        idx.append(name_to_id[sim_name])
+        if name not in name_to_id:
+            raise KeyError(
+                f"Joint '{name}' not found in the recording's sim joint names. "
+                "Datasets recorded on the retired open/hybrid model name the serial "
+                "leg joints after the cranks and have no passive dofs; they cannot be "
+                "converted with this version."
+            )
+        idx.append(name_to_id[name])
     return np.asarray(idx, dtype=np.int64)
 
 
@@ -388,10 +365,6 @@ def main() -> None:
                              "these names (selection is seed-index based, so the positional "
                              "old->new mapping is exact; for recordings made with outdated "
                              "product names).")
-    parser.add_argument("--allow_fallback_joint_names", action="store_true",
-                        help="Permit the hardcoded sim joint list when env_args lacks "
-                             "'sberchel_joint_names'. Off by default: a silent fallback would "
-                             "reorder every joint in state/action if the robot cfg changes.")
     parser.add_argument("--skill", default=None,
                         help="Skill label for subtasks.jsonl. Default: first word of the "
                              "episode's task instruction.")
@@ -437,15 +410,13 @@ def main() -> None:
                 "sberchel_joint_names"
             )
             if sim_names is None:
-                if not args.allow_fallback_joint_names:
-                    sys.exit(
-                        f"{path}: env_args lacks 'sberchel_joint_names' (older replay "
-                        "output dropped the recording provenance). Pass --raw_file with "
-                        "the original teleop HDF5, or --allow_fallback_joint_names to "
-                        "accept the hardcoded list at your own risk."
-                    )
-                print(f"[warn] {path}: no joint-name provenance; using the hardcoded fallback list")
-                sim_names = FALLBACK_SIM_JOINT_NAMES
+                sys.exit(
+                    f"{path}: env_args lacks 'sberchel_joint_names' (older replay "
+                    "output dropped the recording provenance). Pass --raw_file with "
+                    "the original teleop HDF5. There is no hardcoded fallback: a baked-in "
+                    "order silently survives a robot-model change and would map every "
+                    "joint of state/action onto the wrong column."
+                )
             # slots 41..43 (torso roll/pitch/z) come from base pose, not sim joints
             state_idx = joint_index_map(sim_names, STATE_JOINT_NAMES[:41])
             arm_idx = joint_index_map(sim_names, ARM_JOINT_NAMES)

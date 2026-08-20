@@ -16,7 +16,8 @@ click the Isaac window once so it captures your key presses.
 
     python scripts/demo_sberchel_kb.py --config_dir_path generated_envs/isaac_sample
 
-The default open-kinematics task uses native zest policy I/O (no joint remapping).
+The default task uses native zest policy I/O (no joint remapping): the closed
+v3_0a model's actuated leg dofs are the crank joints the policy already names.
 XR tasks still need Pinocchio for Pink IK idle upper-body targets.
 """
 
@@ -31,6 +32,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from dsynth_isaac.green_challenge_path import ensure_green_challenge_importable  # noqa: E402
+from dsynth_isaac.sim_defaults import apply_sberchel_cli_defaults  # noqa: E402
 
 ensure_green_challenge_importable()
 
@@ -39,7 +41,7 @@ parser.add_argument("--config_dir_path", type=str, help="Path to the config dire
 parser.add_argument(
     "--task",
     type=str,
-    default="Dsynth-Fetch-Any-Item-Sberchel-Open-v0",
+    default="Dsynth-Fetch-Any-Item-Sberchel-v0",
     help="Name of the task.",
 )
 parser.add_argument("--seed", type=int, default=42, help="Seed to use.")
@@ -53,6 +55,8 @@ parser.add_argument("--turn", type=float, default=1.5, help="Turn rate for A/D (
 parser.add_argument("--strafe", type=float, default=0.6, help="Strafe speed for Q/E (m/s).")
 parser.add_argument("--disable_fabric", action="store_true", default=False, help="Disable fabric and use USD I/O operations.")
 AppLauncher.add_app_launcher_args(parser)
+# Sberchel runs on green_challenge's CPU physics by default; --device overrides.
+apply_sberchel_cli_defaults(parser)
 args_cli = parser.parse_args()
 
 args_cli.enable_cameras = True
@@ -156,7 +160,7 @@ def main():
     env.reset(seed=args_cli.seed)
 
 
-    net = Network(env, type="zest", device="cpu", closed_kinematics=False)
+    net = Network(env, type="zest", device="cpu", closed_kinematics=True)
     net.reset()
 
     kb = WasdKeyboard(args_cli.speed, args_cli.turn, args_cli.strafe)

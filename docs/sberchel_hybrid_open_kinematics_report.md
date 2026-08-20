@@ -1,5 +1,17 @@
 # Sberchel Hybrid Open-Kinematics Unification — Implementation Report
 
+> **SUPERSEDED — historical record only. Do not follow this document.**
+>
+> The hybrid open-kinematics stack described below has been removed. green-challenge
+> requires demos on **v3_0a with closed kinematics**, so the repo now spawns their
+> `assets/robot_v3_0a/dependencies/robots/v3_0_alpha_locomanipulator/v3_0_alpha_locomanipulator.xml`
+> with the knee/ankle/wrist four-bar linkages intact, and drives the zest policy with
+> `closed_kinematics=True`. `SBERCHEL_CONFIG_OPEN_KINEMATICS`, the local hybrid MJCF and the
+> `*-Open-*` task ids no longer exist. The actuated leg and wrist dofs are the crank joints;
+> Pink IK solves on `*_wrist_pitch_joint` and its target is written to `*_wrist_crank_joint`
+> (see `dsynth_isaac/tasks/manager_based/sberchel_pink_actions.py`). Datasets recorded on the
+> hybrid cannot be replayed on the current model.
+
 This report documents the **hybrid open-kinematics Sberchel** stack: one primary robot config (`SBERCHEL_CONFIG_OPEN_KINEMATICS`) that keeps **policy-native crank leg joints** while preserving a **Pink-friendly serial upper body** (`wrist_pitch`, `hand_base_link`, `pelvis_link`). It supersedes the interim approach that used `v3_0_alpha_locomanipulator_open.xml` with crank→serial remapping in `sberchel_policy.py`.
 
 **Primary robot config:** `SBERCHEL_CONFIG_OPEN_KINEMATICS` in `dsynth_isaac/robots/sberchel_cfg.py`  

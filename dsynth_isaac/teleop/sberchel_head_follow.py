@@ -507,7 +507,7 @@ def headset_to_neck_targets(
 ) -> tuple[float, float]:
     """Map headset look to neck joint targets relative to robot root yaw.
 
-    Returns ``(neck_yaw, neck_pitch)`` clipped to hybrid MJCF joint ranges.
+    Returns ``(neck_yaw, neck_pitch)`` clipped to MJCF joint ranges.
     Neck pitch joint sign is opposite headset elevation (look up -> negative pitch).
     """
     head_yaw = head_yaw_from_pose(head_pose_7d, offset_rad=yaw_offset_rad)

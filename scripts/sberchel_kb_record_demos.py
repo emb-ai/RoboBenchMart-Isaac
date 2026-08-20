@@ -54,6 +54,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from dsynth_isaac.green_challenge_path import ensure_green_challenge_importable  # noqa: E402
+from dsynth_isaac.sim_defaults import apply_sberchel_cli_defaults  # noqa: E402
 
 ensure_green_challenge_importable()
 
@@ -107,6 +108,19 @@ parser.add_argument(
         "sberchel_replay_demos.py reproduces the recorded trajectory bit-for-bit "
         "(replay auto-matches this setting from dataset provenance). Not a full "
         "guarantee on the GPU pipeline. Recorded as sberchel_enhanced_determinism."
+    ),
+)
+parser.add_argument(
+    "--solver_iters",
+    type=str,
+    default=None,
+    metavar="POS,VEL",
+    help=(
+        "Override the robot articulation's PhysX solver iteration counts, e.g. '32,16'. "
+        "Default is green_challenge's serialized 4/4, which is adequate under the PGS "
+        "solver they select (and that we mirror). Raising them only matters if you also "
+        "switch to TGS, where 4/4 leaves the eight loop closures compliant and the zest "
+        "policy limit-cycles. Recorded in the dataset provenance either way."
     ),
 )
 parser.add_argument(
@@ -493,6 +507,8 @@ parser.add_argument(
     help="Maximum width of the target task panel in metres (text wraps to fit).",
 )
 AppLauncher.add_app_launcher_args(parser)
+# Sberchel runs on green_challenge's CPU physics by default; --device overrides.
+apply_sberchel_cli_defaults(parser)
 args_cli = parser.parse_args()
 
 if args_cli.seed is None:
@@ -1113,6 +1129,18 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
         env_cfg.sim.physx.enable_enhanced_determinism = True
         print(">>> PhysX enhanced determinism: ON (recorded in dataset provenance)", flush=True)
 
+    if args_cli.solver_iters:
+        pos, vel = (int(v) for v in args_cli.solver_iters.split(","))
+        env_cfg.scene.robot.spawn.articulation_props.solver_position_iteration_count = pos
+        env_cfg.scene.robot.spawn.articulation_props.solver_velocity_iteration_count = vel
+    _props = env_cfg.scene.robot.spawn.articulation_props
+    print(
+        f">>> loop-closure solver: {_props.solver_position_iteration_count} position / "
+        f"{_props.solver_velocity_iteration_count} velocity iterations "
+        f"(green_challenge ships 4/4; recorded in dataset provenance)",
+        flush=True,
+    )
+
     if args_cli.enable_cameras:
         # Keep only the requested robot cameras: extras slow teleop rendering
         # and bloat the HDF5 via the RGB recorder term.
@@ -1276,7 +1304,7 @@ def main() -> None:
     stamp_episode_seed()
     print(f">>> start-pose seed {episode_seed} (pose 0 of session seed {args_cli.seed})", flush=True)
 
-    net = Network(env, type="zest", device="cpu", closed_kinematics=False)
+    net = Network(env, type="zest", device="cpu", closed_kinematics=True)
     net.reset()
     robot = base_env.scene["robot"]
 
@@ -1434,6 +1462,22 @@ def main() -> None:
                     # Plant-level PhysX setting: replay must run with the same
                     # value or the simulation itself differs from the recording.
                     "sberchel_enhanced_determinism": bool(args_cli.enhanced_determinism),
+                    # Also plant-level, and together they decide how rigid the
+                    # eight knee/ankle/wrist loop closures are: they are solved
+                    # as maximal-coordinate constraints, so the solver type and
+                    # its iteration budget change the leg dynamics. PGS (0) at
+                    # 4/4 is what green_challenge evaluates on and what we
+                    # mirror; TGS (1) at 4/4 makes the zest policy limit-cycle.
+                    "sberchel_solver_position_iterations": int(
+                        base_env.scene.cfg.robot.spawn.articulation_props.solver_position_iteration_count
+                    ),
+                    "sberchel_solver_velocity_iterations": int(
+                        base_env.scene.cfg.robot.spawn.articulation_props.solver_velocity_iteration_count
+                    ),
+                    "sberchel_physx_solver_type": int(base_env.cfg.sim.physx.solver_type),
+                    # CPU vs GPU PhysX are different implementations, so this is
+                    # part of the plant too. green_challenge evaluates on "cpu".
+                    "sberchel_sim_device": str(base_env.cfg.sim.device),
                     # Demonstrator-side Pink IK shaping (not a plant difference,
                     # but affects how closely demos track the operator's hand).
                     "sberchel_pink_ik_tasks": [

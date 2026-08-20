@@ -11,7 +11,6 @@ from pink.tasks import DampingTask, FrameTask
 from isaaclab.controllers.pink_ik import NullSpacePostureTask, PinkIKControllerCfg
 from isaaclab.devices.device_base import DevicesCfg
 from isaaclab.devices.openxr import ManusViveCfg, OpenXRDeviceCfg, XrCfg
-from isaaclab.envs.mdp.actions.pink_actions_cfg import PinkInverseKinematicsActionCfg
 from isaaclab.utils import configclass
 
 from dsynth_isaac.devices.sberchel_retargeter import (
@@ -20,9 +19,13 @@ from dsynth_isaac.devices.sberchel_retargeter import (
 )
 from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_UPPERBODY_XR_ROBOT
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg
+from dsynth_isaac.tasks.manager_based.sberchel_pink_actions import (
+    SberchelPinkInverseKinematicsActionCfg,
+)
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     SberchelEventCfg,
     SberchelObservationsCfg,
+    apply_green_challenge_physx,
 )
 
 
@@ -84,7 +87,9 @@ def build_sberchel_teleop_devices(cfg, retargeter: str = "vrd") -> None:
     )
 
 # Pink ``find_joints`` applies hand targets in articulation DOF order (not MJCF
-# name order). On open MJCF/USD, thumb pitch comes after digit proximals per hand.
+# name order): thumb pitch comes after the digit proximals of both hands.
+# ``SberchelPinkIKAction`` asserts this list still matches the articulation at
+# startup and prints the correct order if the model changes it.
 SBERCHEL_HAND_JOINT_NAMES = [
     "left_thumb_proximal_yaw_joint",
     "left_index_proximal_joint",
@@ -103,12 +108,21 @@ SBERCHEL_HAND_JOINT_NAMES = [
 _LEFT_HAND_BASE_FRAME = "left_hand_base_link"
 _RIGHT_HAND_BASE_FRAME = "right_hand_base_link"
 
+# The wrist pitch is the passive output of a four-bar; the crank behind it is
+# the dof with a drive. Pink solves the pitch (it is on the chain to the hand)
+# and the target is written to the crank -- see ``sberchel_pink_actions``.
+_WRIST_WRITE_REMAP = {
+    "left_wrist_pitch_joint": "left_wrist_crank_joint",
+    "right_wrist_pitch_joint": "right_wrist_crank_joint",
+}
+
 
 @configclass
 class UpperbodySberchelXRActionsCfg:
     """Pink IK only: ``[left_wrist(7), right_wrist(7), fingers(12)]``."""
 
-    upper_body_ik = PinkInverseKinematicsActionCfg(
+    upper_body_ik = SberchelPinkInverseKinematicsActionCfg(
+        write_joint_remap=_WRIST_WRITE_REMAP,
         pink_controlled_joint_names=[
             "left_shoulder_pitch_joint",
             "left_shoulder_roll_joint",
@@ -185,7 +199,7 @@ class UpperbodySberchelXRActionsCfg:
 
 @configclass
 class UpperbodySberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
-    """Fixed-pelvis open-kinematics Sberchel + XR upper-body teleop."""
+    """Fixed-pelvis closed-kinematics Sberchel (v3_0a) + XR upper-body teleop."""
 
     actions = UpperbodySberchelXRActionsCfg()
     events = SberchelEventCfg()
@@ -248,4 +262,5 @@ class UpperbodySberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
         self.sim.dt = 1.0 / 120.0
         self.sim.render_interval = 2
 
+        apply_green_challenge_physx(self)
         setup_sberchel_xr_pink_and_teleop(self)

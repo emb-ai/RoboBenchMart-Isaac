@@ -34,6 +34,14 @@ _STORE_PKG_VER2 = Path(__file__).resolve().parents[2] / "small_store_aij_ver2"
 # ver2 sim cost (note: shrinkWrap is a cooking no-op in Isaac Sim 5.x).
 _STORE_PKG_VER3 = Path(__file__).resolve().parents[2] / "small_store_aij_ver3"
 _STORE_PKG_VER4 = Path(__file__).resolve().parents[2] / "small_store_aij_ver4"
+# ver5 = ver2 de-branded: identical layout, poses, masses and 2228 item prims,
+# with synthetic packaging art (see the package's DEBRAND_AUDIT.md). Built by
+# scripts/debrand_store/. Product prim/asset ids differ from ver2
+# (energy_can_02, not redbull_1_rotated).
+# NOTE: these constants resolve against the REPO root, so each package needs a
+# symlink here pointing at ../<package> - as ver2/ver3/ver4 have.
+_STORE_PKG_VER5 = Path(__file__).resolve().parents[2] / "small_store_aij_ver5_debranded"
+_STORE_PKG_VER6 = Path(__file__).resolve().parents[2] / "small_store_aij_ver6_blurred"
 STORE_USD = (_STORE_PKG_VER2 / "store.usd").resolve()
 
 # Exported store layout (see small_store_aij/store.usd).

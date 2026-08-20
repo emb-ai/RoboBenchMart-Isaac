@@ -40,6 +40,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from dsynth_isaac.green_challenge_path import ensure_green_challenge_importable  # noqa: E402
+from dsynth_isaac.sim_defaults import apply_sberchel_cli_defaults  # noqa: E402
 
 ensure_green_challenge_importable()
 
@@ -246,6 +247,8 @@ parser.add_argument(
 )
 
 AppLauncher.add_app_launcher_args(parser)
+# Sberchel runs on green_challenge's CPU physics by default; --device overrides.
+apply_sberchel_cli_defaults(parser)
 args_cli = parser.parse_args()
 
 if args_cli.enable_pinocchio:
@@ -576,7 +579,49 @@ def _split_processed_joint_targets(
     return legs, neck, upper
 
 
-def step_hybrid_joint_targets(
+def assert_dataset_matches_robot(dataset_env_args: dict, robot) -> None:
+    """Abort unless the dataset was recorded on the robot now being spawned.
+
+    Demos collected before the switch to green_challenge's closed-kinematics
+    ``robot_v3_0a`` MJCF were recorded on the retired hybrid/open model: 53 dofs
+    with ``*_wrist_pitch_joint`` actuated, and serial leg joints wearing crank
+    names. The closed model has 73 dofs and drives ``*_wrist_crank_joint``.
+    Recorded joint targets therefore land on different joints, which is silent
+    -- the replay runs, on a plant that did not produce the demo.
+    """
+    recorded = list(dataset_env_args.get("sberchel_joint_names") or [])
+    if not recorded:
+        print(
+            "Warning: dataset carries no 'sberchel_joint_names'; cannot verify it was "
+            "recorded on this robot model. Replay outputs drop the key, so this is "
+            "expected when re-replaying an augmented file.",
+            flush=True,
+        )
+        return
+    live = list(robot.data.joint_names)
+    if recorded == live:
+        return
+    only_recorded = sorted(set(recorded) - set(live))
+    only_live = sorted(set(live) - set(recorded))
+    detail = "joint order differs (same names)"
+    if only_recorded or only_live:
+        detail = (
+            f"joints only in dataset: {only_recorded or '[]'}; "
+            f"joints only in sim: {only_live or '[]'}"
+        )
+    raise SystemExit(
+        "Refusing to replay: this dataset was recorded on a different robot model.\n"
+        f"  dataset joints: {len(recorded)}\n"
+        f"  sim joints    : {len(live)}\n"
+        f"  {detail}\n"
+        "Datasets recorded before the switch to green_challenge's closed-kinematics "
+        "robot_v3_0a MJCF cannot be replayed on it: their joint targets would be "
+        "applied to different dofs. Re-record them, or replay them with the commit "
+        "they were recorded on."
+    )
+
+
+def step_recorded_joint_targets(
     env,
     legs: torch.Tensor,
     upper: torch.Tensor,
@@ -629,7 +674,7 @@ def step_processed_joint_targets(env, processed_actions: torch.Tensor) -> None:
         legs_list.append(legs)
         neck_list.append(neck)
         upper_list.append(upper)
-    step_hybrid_joint_targets(
+    step_recorded_joint_targets(
         env,
         torch.stack(legs_list, dim=0),
         torch.stack(upper_list, dim=0),
@@ -992,6 +1037,19 @@ def main() -> None:
             }
             for name in _f["data"]
         }
+    # CPU and GPU PhysX are different implementations, so replaying on the other
+    # one is a plant change. Unlike enhanced_determinism this cannot be
+    # auto-matched here: the app has already launched with --device, so say what
+    # to pass instead of switching underneath the user.
+    _recorded_device = _dataset_env_args.get("sberchel_sim_device")
+    if _recorded_device and _recorded_device != args_cli.device:
+        print(
+            f"Warning: this demo was recorded with sim.device={_recorded_device!r} but replay is "
+            f"running on {args_cli.device!r}. CPU and GPU PhysX do not step identically, so the "
+            f"replayed trajectory may diverge. Re-run with --device {_recorded_device} to match.",
+            flush=True,
+        )
+
     recorded_enhanced_determinism = bool(_dataset_env_args.get("sberchel_enhanced_determinism", False))
     enhanced_determinism = args_cli.enhanced_determinism or recorded_enhanced_determinism
     if recorded_enhanced_determinism and not args_cli.enhanced_determinism:
@@ -1121,11 +1179,12 @@ def main() -> None:
         print(f"Viewport video recording enabled -> {video_folder}")
 
     env = gym_env.unwrapped
+    assert_dataset_matches_robot(_dataset_env_args, env.scene["robot"])
     # FrictionalActuator zeros stiffness wherever force_control=true (all loco
     # joints). Network.__init__ restores the policy PD gains required for
     # joint-position tracking. Recording always constructs Network; replay must
     # too even when not stepping the policy each frame.
-    policy_net = Network(env, type="zest", device="cpu", closed_kinematics=False)
+    policy_net = Network(env, type="zest", device="cpu", closed_kinematics=True)
     policy_net.reset()
 
     output_dataset_handler = None
@@ -1613,7 +1672,7 @@ def main() -> None:
                             upper_batch[env_id] = padded
                         else:
                             upper_batch[env_id] = upper_t
-                    step_hybrid_joint_targets(
+                    step_recorded_joint_targets(
                         env,
                         legs_batch,
                         upper_batch,

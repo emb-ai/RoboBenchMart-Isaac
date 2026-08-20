@@ -60,8 +60,8 @@ Registered gym environments from `dsynth_isaac/tasks/manager_based/__init__.py`:
 | `Dsynth-Fetch-Any-Item-Franka-IK-Rel-v0` | `FrankaIKRelFetchAnyItemEnvCfg` | Fetch target item (grasp + pull-out) | `FRANKA_PANDA_HIGH_PD_CFG` | 7D: Diff-IK arm (6) + gripper (1) | `DarkstoreSceneCfg` |
 | `Dsynth-Fetch-Any-Item-GR1T2-Abs-v0` | `GR1T2FetchAnyItemEnvCfg` | none | `GR1T2_HIGH_PD_CFG` | 36D: `upper_body_ik` (wrists 7+7 + hands 22) | `DarkstoreSceneCfg` (`GR1T2SceneCfg`) |
 | `Isaac-Dsynth-Sberchel-Base-v0` | `SberchelBaseEnvCfg` | none | `SBERCHEL_CONFIG` | 41D: `legs_joint_pos`(12), `torso_joint_pos`(13), `wrist_joint_pos`(4), `finger_joint_pos`(12) | `DarkstoreSceneCfg` |
-| `Dsynth-Fetch-Any-Item-Sberchel-Open-v0` | `SberchelOpenKinematicsFetchAnyItemEnvCfg` | none | `SBERCHEL_CONFIG_OPEN_KINEMATICS` | 41D: same groups (serial wrist pitch) | `DarkstoreSceneCfg` |
-| `Isaac-Sberchel-Open-Kinematics-Demo-v0` | `SberchelOpenKinematicsDemoEnvCfg` | none | `SBERCHEL_CONFIG_OPEN_KINEMATICS` | 41D (same) | `SberDemoSceneCfg` |
+| `Dsynth-Fetch-Any-Item-Sberchel-v0` | `SberchelFetchAnyItemEnvCfg` | none | `SBERCHEL_CONFIG` | 41D: same groups | `DarkstoreSceneCfg` |
+| `Isaac-Sberchel-Demo-v0` | `SberchelDemoEnvCfg` | none | `SBERCHEL_CONFIG` | 41D (same) | `SberDemoSceneCfg` |
 | `Dsynth-Fetch-Any-Item-Sberchel-Upperbody-XR-v0` | `UpperbodySberchelXRFetchAnyItemEnvCfg` | none | `SBERCHEL_UPPERBODY_XR_ROBOT` | 26D: `upper_body_ik` (wrists 7+7 + fingers 12) | `DarkstoreSceneCfg` |
 | `Dsynth-Fetch-Any-Item-Sberchel-XR-v0` | `SberchelXRFetchAnyItemEnvCfg` | none | `SBERCHEL_XR_LOCOMOTION_NECK_ROBOT` | 40D: `legs_joint_pos`(12), `neck_joint_pos`(2), `upper_body_ik`(26) | `DarkstoreSceneCfg` |
 | `Isaac-Demo-Sberchel-XR-v0` | `SberchelXRDemoEnvCfg` | none | `SBERCHEL_XR_LOCOMOTION_NECK_ROBOT` | 40D (same) | `SberDemoSceneCfg` |
@@ -76,19 +76,29 @@ Robot articulation configs used by the environments:
 - **`WORKER_CONFIG`** (`dsynth_isaac/robots/worker_cfg.py`): dual-arm worker from local USD `assets/robots/worker/worker.usd`. Env cfg exists; not registered in `__init__.py`.
 - **`FRANKA_PANDA_CFG` / `FRANKA_PANDA_HIGH_PD_CFG`**: Franka Panda from `isaaclab_assets` (Isaac Lab / Omniverse stock).
 - **`GR1T2_HIGH_PD_CFG`**: Fourier GR1T2 from `isaaclab_assets.robots.fourier` (Isaac Lab stock).
-- **Sberchel** (`dsynth_isaac/robots/sberchel_cfg.py`): ConfigManager JSON + meshes from the **`green_challenge`** checkout at `/home/krapukhin/projects/green-challenge` (override with `GREEN_CHALLENGE_PATH`; resolved in `dsynth_isaac/green_challenge_path.py`); hybrid MJCF is local under `dsynth_isaac/robots/mjcf/`:
-  - `SBERCHEL_CONFIG` — closed kinematics (`robot_v3_0a`)
-  - `SBERCHEL_CONFIG_OPEN_KINEMATICS` — hybrid open MJCF (serial upper body + policy crank legs)
+- **Sberchel** (`dsynth_isaac/robots/sberchel_cfg.py`): ConfigManager JSON, MJCF and meshes all from the **`green_challenge`** checkout at `/home/krapukhin/projects/green-challenge` (override with `GREEN_CHALLENGE_PATH`; resolved in `dsynth_isaac/green_challenge_path.py`). One robot only: `robot_v3_0a` with **closed kinematics**, spawned from their `v3_0_alpha_locomanipulator.xml` with the knee/ankle/wrist four-bar linkages intact. Actuated leg and wrist dofs are therefore the crank joints, matching their `joint_groups.json` action space.
+  - `SBERCHEL_CONFIG` — the base articulation (`robot_v3_0a`, closed kinematics)
   - `SBERCHEL_UPPERBODY_XR_ROBOT` — fixed pelvis, XR upper-body PD
-  - `SBERCHEL_XR_LOCOMOTION_ROBOT` / `SBERCHEL_XR_LOCOMOTION_NECK_ROBOT` — free-floating locomotion + XR arm PD (neck PD on the `_NECK_` variant)
+  - `SBERCHEL_XR_LOCOMOTION_NECK_ROBOT` — free-floating locomotion + XR arm PD + neck PD
+
+  Pink IK solves on `*_wrist_pitch_joint` (the dof on the chain to the hand) and its target is written to `*_wrist_crank_joint` (the dof with a drive) by `SberchelPinkIKAction`; the linkage is a parallelogram, so the mapping is 1:1.
+
+### Sberchel simulation settings must match green_challenge
+
+The robot's eight loop closures are spawned as spherical joints *excluded from the articulation*, so PhysX solves them as maximal-coordinate constraints and their rigidity depends on the solver — which makes two simulation settings part of the plant rather than mere performance knobs:
+
+- **PGS solver.** `apply_green_challenge_physx()` (`sberchel_base_env_cfg.py`), called from every Sberchel env cfg, sets `sim.physx.solver_type = 0` as green_challenge does in `envs/env_registration.make_env`. Under IsaacLab's default TGS the loops stay compliant at the robot's serialized 4/4 iteration counts and the zest policy drops into a ~1–2 Hz limit cycle: the robot shuffles instead of standing and the gait limps. Measured base path standing at zero velocity command for 15 s — **PGS 4/4: 0.044 m, TGS 4/4: 1.66 m**. Raise iteration counts only to experiment (`--solver_iters`); the solver is the fix.
+- **CPU physics.** The Sberchel entry-point scripts default `--device cpu` via `dsynth_isaac/sim_defaults.py`, matching green_challenge. It is also faster here (≈40 vs ≈18 steps/s at `num_envs=1`) and walks better; rendering stays on the GPU. Pass `--device cuda:0` to override.
+
+Both, plus the solver iteration counts, are written into each dataset's HDF5 provenance (`sberchel_physx_solver_type`, `sberchel_sim_device`, `sberchel_solver_*_iterations`), and replay warns if the device differs from the recording.
 
 ## Sberchel keyboard control
 
-Drive open-kinematics Sberchel with WASD/QE via the zest locomotion policy (hold-to-move). Requires the Isaac Sim GUI (do not use `--headless`); click the Isaac window so it receives keyboard focus.
+Drive Sberchel with WASD/QE via the zest locomotion policy (hold-to-move). Requires the Isaac Sim GUI (do not use `--headless`); click the Isaac window so it receives keyboard focus.
 
 ```bash
 python scripts/demo_sberchel_kb.py \
-  --task Dsynth-Fetch-Any-Item-Sberchel-Open-v0 \
+  --task Dsynth-Fetch-Any-Item-Sberchel-v0 \
   --config_dir_path generated_envs/isaac_sample
 ```
 

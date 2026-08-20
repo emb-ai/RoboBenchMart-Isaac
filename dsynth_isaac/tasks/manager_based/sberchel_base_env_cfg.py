@@ -20,7 +20,7 @@ from isaaclab_tasks.manager_based.manipulation.stack.mdp import franka_stack_eve
 from isaaclab.envs import ManagerBasedRLEnvCfg
 
 from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import DarkstoreBaseEnvCfg, DsEventCfg
-from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_CONFIG, SBERCHEL_CONFIG_OPEN_KINEMATICS
+from dsynth_isaac.robots.sberchel_cfg import SBERCHEL_CONFIG
 from dsynth_isaac.robots.sberchel_camera_cfg import make_sberchel_left_head_camera_cfg
 import dsynth_isaac.tasks.manager_based.mdp.ds_events as ds_events
 from dsynth_isaac.scene.sberdemo_scene import SberDemoSceneCfg
@@ -28,6 +28,33 @@ from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import TerminationsCfg
 
 # Root (pelvis) height the robot is placed at so its feet start on the floor.
 SBERCHEL_STAND_HEIGHT = 0.9
+
+
+def apply_green_challenge_physx(cfg) -> None:
+    """Mirror the PhysX scene settings green_challenge evaluates on.
+
+    From their ``envs/env_registration.make_env``. Only the settings that are
+    real IsaacLab fields are copied -- their ``num_position_iterations``,
+    ``num_velocity_iterations``, ``sleep_threshold``, ``stabilization_threshold``,
+    ``num_threads``, ``contact_collection_mode``, ``use_gpu`` and ``use_flatcache``
+    assignments name attributes that do not exist on IsaacLab 2.3's cfg classes,
+    so they are silently inert on their side too.
+
+    ``solver_type`` is the one that matters and is easy to miss. The robot's
+    eight loop closures are solved as maximal-coordinate constraints, and PGS
+    holds them at the 4/4 iteration counts the robot config ships with, while
+    IsaacLab's default TGS does not: on TGS the loops stay compliant and the zest
+    policy drops into a ~1-2 Hz limit cycle, so the robot shuffles instead of
+    standing. Measured base path standing at zero command for 15 s: 0.044 m on
+    PGS 4/4, 1.66 m on TGS 4/4.
+
+    Not mirrored: ``sim.device = "cpu"``. green_challenge runs physics on CPU;
+    we run on GPU, which is a real remaining difference in the plant.
+    """
+    cfg.sim.physx.solver_type = 0  # PGS, as green_challenge selects
+    cfg.sim.physx.enable_stabilization = True
+    cfg.sim.physx.bounce_threshold_velocity = 0.5
+    cfg.sim.render.enable_translucency = True
 
 
 @configclass
@@ -180,11 +207,13 @@ class SberchelBaseEnvCfg(DarkstoreBaseEnvCfg):
         self.sim.dt = 1.0 / 150.0
         self.decimation = 1
         self.sim.render_interval = 1
+        apply_green_challenge_physx(self)
 
         self.actions = SberchelActionsCfg()
         self.events = SberchelEventCfg()
 
-# Policy-native leg joint order (matches green_challenge ``model.joint_order`` legs slice).
+# Policy-native leg joint order (matches green_challenge ``model.joint_order``
+# legs slice). These are the crank motor dofs of the closed leg linkages.
 POLICY_LEG_JOINT_NAMES = [
     "left_hip_pitch_joint",
     "left_hip_roll_joint",
@@ -201,36 +230,9 @@ POLICY_LEG_JOINT_NAMES = [
 ]
 
 
-@configclass
-class SberchelOpenKinematicsActionsCfg:
-    """41D actions for hybrid open MJCF: policy crank legs + serial upper body."""
-
-    legs_joint_pos = mdp.JointPositionActionCfg(
-        asset_name="robot",
-        joint_names=POLICY_LEG_JOINT_NAMES,
-        scale=1.0,
-        preserve_order=True,
-    )
-
-    torso_joint_pos = SberchelActionsCfg().torso_joint_pos
-    wrist_joint_pos = mdp.JointPositionActionCfg(
-        asset_name="robot",
-        joint_names=[
-            "left_wrist_pitch_joint",
-            "left_wrist_roll_joint",
-            "right_wrist_pitch_joint",
-            "right_wrist_roll_joint",
-        ],
-        scale=1.0,
-        use_default_offset=True,
-        preserve_order=True,
-    )
-    finger_joint_pos = SberchelActionsCfg().finger_joint_pos
-
-
 LEGS_ACTION_DIM = len(POLICY_LEG_JOINT_NAMES)
 
-# Neck joints for XR headset look (hybrid MJCF ranges: yaw ±0.785, pitch ±0.524).
+# Neck joints for XR headset look (MJCF ranges: yaw ±0.785, pitch ±0.524).
 NECK_JOINT_NAMES = [
     "neck_yaw_joint",
     "neck_pitch_joint",
@@ -252,8 +254,8 @@ def policy_leg_targets(net, vx: float, vy: float, wz: float) -> list[float]:
     return list(loco["joint_pos"][:LEGS_ACTION_DIM])
 
 @configclass
-class SberchelOpenKinematicsFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
-    actions = SberchelOpenKinematicsActionsCfg()
+class SberchelFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
+    actions = SberchelActionsCfg()
     events = SberchelEventCfg()
     observations: SberchelObservationsCfg = SberchelObservationsCfg()
 
@@ -263,7 +265,7 @@ class SberchelOpenKinematicsFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        self.scene.robot = SBERCHEL_CONFIG_OPEN_KINEMATICS.replace(
+        self.scene.robot = SBERCHEL_CONFIG.replace(
             prim_path="{ENV_REGEX_NS}/Robot",
         )
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
@@ -273,11 +275,12 @@ class SberchelOpenKinematicsFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
         self.sim.dt = 1.0 / 150.0
         self.decimation = 1
         self.sim.render_interval = 1
+        apply_green_challenge_physx(self)
 
 @configclass
-class SberchelOpenKinematicsDemoEnvCfg(ManagerBasedRLEnvCfg):
+class SberchelDemoEnvCfg(ManagerBasedRLEnvCfg):
     scene: SberDemoSceneCfg = SberDemoSceneCfg(replicate_physics=False, env_spacing=20.5, filter_collisions=False)
-    actions = SberchelOpenKinematicsActionsCfg()
+    actions = SberchelActionsCfg()
     observations: SberchelObservationsCfg = SberchelObservationsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
 
@@ -290,7 +293,7 @@ class SberchelOpenKinematicsDemoEnvCfg(ManagerBasedRLEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
-        self.scene.robot = SBERCHEL_CONFIG_OPEN_KINEMATICS.replace(
+        self.scene.robot = SBERCHEL_CONFIG.replace(
             prim_path="{ENV_REGEX_NS}/Robot",
         )
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
@@ -312,3 +315,4 @@ class SberchelOpenKinematicsDemoEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 0.01  # 100Hz
         self.sim.render_interval = 2
+        apply_green_challenge_physx(self)

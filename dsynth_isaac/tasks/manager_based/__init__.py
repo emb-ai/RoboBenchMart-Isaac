@@ -64,19 +64,19 @@ gym.register(
 )
 
 gym.register(
-    id="Dsynth-Fetch-Any-Item-Sberchel-Open-v0",
+    id="Dsynth-Fetch-Any-Item-Sberchel-v0",
     entry_point="dsynth_isaac.tasks.manager_based.fetching.fetching_env:FetchItemEnv",
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.sberchel_base_env_cfg:SberchelOpenKinematicsFetchAnyItemEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.sberchel_base_env_cfg:SberchelFetchAnyItemEnvCfg",
     },
     disable_env_checker=True,
 )
 
 gym.register(
-    id="Isaac-Sberchel-Open-Kinematics-Demo-v0",
+    id="Isaac-Sberchel-Demo-v0",
     entry_point="dsynth_isaac.tasks.manager_based.sberdemo_manager_env:SberDemoManagerBasedRLEnv",
     kwargs={
-        "env_cfg_entry_point": f"{__name__}.sberchel_base_env_cfg:SberchelOpenKinematicsDemoEnvCfg",
+        "env_cfg_entry_point": f"{__name__}.sberchel_base_env_cfg:SberchelDemoEnvCfg",
     },
     disable_env_checker=True,
 )

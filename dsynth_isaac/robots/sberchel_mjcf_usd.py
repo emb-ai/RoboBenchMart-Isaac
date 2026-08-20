@@ -6,7 +6,11 @@ this module applies the articulation fixes needed for URDF export.
 
 Equality ``connect`` constraints are intentionally **not** added here: they
 close kinematic loops and make ``UsdToUrdf`` fail. Runtime spawn still adds
-them inside ``spawn_from_mjcf``.
+them inside ``spawn_from_mjcf``, so the sim keeps the closed linkages while
+Pink gets a tree. The rod/crank joints they closed survive in the URDF as
+named revolute entries, which matters: ``PinkIKController`` maps joint names
+between the articulation and the Pinocchio model in both directions and
+requires the two sets to match exactly.
 """
 
 from __future__ import annotations
@@ -22,9 +26,9 @@ from isaaclab.sim.converters import MjcfConverter
 logger = logging.getLogger(__name__)
 
 # Bump when Pink IK URDF export logic changes so cached files are regenerated.
-PINK_URDF_CACHE_VERSION = "v9_hybrid"
+PINK_URDF_CACHE_VERSION = "v10_v3_0a_closed"
 # Bump when sim spawn settings change and the MJCF USD cache must be regenerated.
-MJCF_USD_CACHE_VERSION = "hybrid_v1"
+MJCF_USD_CACHE_VERSION = "v3_0a_closed_v1"
 
 
 def _find_link_prim_path(stage, link_name: str) -> str:
@@ -286,7 +290,6 @@ def convert_sberchel_usd_to_urdf(usd_path: str | Path, cache_dir: str | Path) ->
 def _normalize_sberchel_urdf_names(urdf_path: Path) -> None:
     """Strip USD export prefixes so Pink IK frame names match the sim articulation."""
     prefixes = (
-        "tmp_v3_0_alpha_locomanipulator_hybrid_root_",
         "tmp_v3_0_alpha_locomanipulator_root_",
         "joints_",
     )

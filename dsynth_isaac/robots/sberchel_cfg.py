@@ -1,18 +1,22 @@
-"""Sberchel v3.0a locomanipulator robot configuration.
+"""Sberchel v3.0a locomanipulator robot configuration (closed kinematics).
 
-Reuses robot definitions from ``green_challenge`` (serialized interface JSON +
-``ConfigManager``). ``SBERCHEL_CONFIG`` is closed kinematics (``robot_v3_0a``).
-``SBERCHEL_CONFIG_OPEN_KINEMATICS`` uses the ``robot_green_open_source`` package
-with spawn pointed at the local hybrid MJCF under ``mjcf/`` (serial upper body +
-policy-native crank leg joints; meshes still resolved from green_challenge).
-``SBERCHEL_UPPERBODY_XR_ROBOT`` adds fixed pelvis + ImplicitActuator PD for
-upper-body XR teleop. ``SBERCHEL_XR_LOCOMOTION_ROBOT`` is free-floating open
-kinematics with policy leg actuators and XR arm PD.
-``SBERCHEL_XR_LOCOMOTION_NECK_ROBOT`` adds a separate ImplicitActuator neck
-group for headset look control.
+Reuses the robot definition from ``green_challenge`` (serialized interface JSON +
+``ConfigManager``) for the ``robot_v3_0a`` package -- the robot green_challenge
+evaluates on. ``SBERCHEL_CONFIG`` spawns their closed-kinematics MJCF
+(``v3_0_alpha_locomanipulator.xml``): the knee, ankle and wrist four-bar
+linkages are present, and their ``connect`` equalities become USD spherical
+joints inside green_challenge's own ``spawn_from_mjcf``. The actuated leg /
+wrist dofs are therefore the *crank* joints, exactly as in their
+``joint_groups.json`` action space; ``*_knee_pitch``, ``*_ankle_pitch``,
+``*_ankle_roll`` and ``*_wrist_pitch`` are passive outputs driven through the
+linkage.
+
+``SBERCHEL_UPPERBODY_XR_ROBOT`` adds a fixed pelvis + ImplicitActuator PD for
+upper-body XR teleop. ``SBERCHEL_XR_LOCOMOTION_NECK_ROBOT`` is free-floating
+with policy leg actuators, XR arm PD and a separate ImplicitActuator neck group
+for headset look control.
 """
 
-import re
 from pathlib import Path
 
 from dsynth_isaac.green_challenge_path import ensure_green_challenge_importable
@@ -22,108 +26,59 @@ _GREEN_CHALLENGE_ROOT = ensure_green_challenge_importable()
 
 # NOTE: importing ConfigManager enables the MJCF extension after AppLauncher.
 from green_challenge.assets.robot_v3_0a.utils.config_manager import ConfigManager
-from green_challenge.assets.robot_green_open_source.utils.config_manager import (
-    ConfigManager as ConfigManagerGreenOpenSource,
-)
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
-_cm = ConfigManager.instance()
-SBERCHEL_CONFIG = _cm.load_config("sberchel_v3_0_alpha_locomanipulation_full")
-
-_cm_open = ConfigManagerGreenOpenSource.instance()
-_base_open = _cm_open.load_config("sberchel_v3_0_alpha_locomanipulation_full")
-
-# Hybrid MJCF lives in this repo; meshes stay in green_challenge.
-_HYBRID_MJCF_DIR = Path(__file__).resolve().parent / "mjcf"
-_HYBRID_MJCF_SRC = _HYBRID_MJCF_DIR / "v3_0_alpha_locomanipulator_hybrid.xml"
-_GC_MESH_DIR = (
+_GC_ROBOT_DIR = (
     Path(_GREEN_CHALLENGE_ROOT)
     / "assets/robot_v3_0a/dependencies/robots/v3_0_alpha_locomanipulator"
-    / "meshes"
 )
-
-
-def _resolve_hybrid_mjcf(src: Path, mesh_dir: Path) -> Path:
-    """Write a sibling MJCF with ``meshdir`` pointing at green_challenge meshes.
-
-    Isaac Sim's native MJCF importer mirrors ``meshdir`` under its own cache
-    directory (e.g. ``~/.cache/dirol/mjcf/<meshdir>/<mesh>_tmp/``) without
-    recursively creating missing parents, so it silently fails to write the
-    per-mesh tmp USD when ``meshdir`` is a long absolute path. Keep it a
-    shallow relative path instead, via a local symlink to the real mesh dir.
-    """
-    # IsaacLab's MjcfConverter does a naive `basename.split(".")` expecting
-    # exactly one dot, so the resolved filename must not add another one.
-    resolved = src.with_name(f"{src.stem}_resolved{src.suffix}")
-    mesh_link = src.parent / "meshes"
-    abs_mesh = mesh_dir.resolve()
-    if mesh_link.is_symlink():
-        if mesh_link.resolve() != abs_mesh:
-            mesh_link.unlink()
-            mesh_link.symlink_to(abs_mesh)
-    elif mesh_link.exists():
-        raise FileExistsError(f"{mesh_link} exists and is not the expected meshes symlink")
-    else:
-        mesh_link.symlink_to(abs_mesh)
-
-    text = src.read_text()
-    patched = re.sub(
-        r'(<compiler\b[^>]*\bmeshdir=")[^"]*(")',
-        r"\g<1>meshes/\g<2>",
-        text,
-        count=1,
+# green_challenge's own closed-kinematics MJCF. Not the ``_open`` sibling: that
+# one deletes the crank/rod linkages, renames the actuated leg dofs and flips
+# ``right_wrist_roll_joint``'s axis, so demos recorded on it are demos of a
+# plant their evaluation stack does not have.
+_CLOSED_MJCF_PATH = _GC_ROBOT_DIR / "v3_0_alpha_locomanipulator.xml"
+if not _CLOSED_MJCF_PATH.is_file():
+    raise FileNotFoundError(
+        f"green_challenge closed-kinematics MJCF not found: {_CLOSED_MJCF_PATH} "
+        "(set GREEN_CHALLENGE_PATH to the checkout directory)."
     )
-    if patched == text and 'meshdir="' not in text:
-        raise ValueError(f"No meshdir attribute found in {src}")
-    if not resolved.exists() or resolved.read_text() != patched:
-        resolved.write_text(patched)
-    return resolved
 
+# MjcfConverter writes the converted USD here. It must not default into the
+# green_challenge checkout, which is another user's read-only directory.
+_USD_CACHE_DIR = Path(__file__).resolve().parent / "mjcf" / "usd_cache"
 
-_HYBRID_MJCF_PATH = _resolve_hybrid_mjcf(_HYBRID_MJCF_SRC, _GC_MESH_DIR)
+_cm = ConfigManager.instance()
+_base = _cm.load_config("sberchel_v3_0_alpha_locomanipulation_full")
 
-# green_open_source JSON uses wrist_crank; hybrid MJCF keeps serial wrist_pitch.
-_HYBRID_JOINT_KEY_REMAP = {
-    ".*_wrist_crank_joint": ".*_wrist_pitch_joint",
-}
+# The eight knee/ankle/wrist four-bars become USD spherical joints EXCLUDED from
+# the articulation, so PhysX solves them as maximal-coordinate constraints and
+# their rigidity depends on the solver. The serialized 4/4 iteration counts are
+# kept as green_challenge ships them -- they are only adequate under the PGS
+# solver, which green_challenge selects in ``envs/env_registration.make_env``
+# and which ``apply_green_challenge_physx`` mirrors here. Under IsaacLab's
+# default TGS solver the same 4/4 leaves the loops compliant and the zest policy
+# limit-cycles: measured base path while standing at zero command over 15 s is
+# 1.66 m on TGS 4/4 vs 0.044 m on PGS 4/4 (0.049 m on the retired open model).
+# So do not raise these to paper over a solver mismatch -- set the solver.
 
-
-def _remap_hybrid_joint_keys(value):
-    """Remap crank wrist keys to serial wrist_pitch for hybrid MJCF."""
-    if isinstance(value, dict):
-        return {_HYBRID_JOINT_KEY_REMAP.get(k, k): v for k, v in value.items()}
-    if isinstance(value, list):
-        return [_HYBRID_JOINT_KEY_REMAP.get(v, v) for v in value]
-    return value
-
-
-def _hybrid_motors_actuators():
-    """Motors actuator group with wrist_pitch names for hybrid MJCF."""
-    from dataclasses import fields
-
-    motors = _base_open.actuators["motors"]
-    overrides: dict = {}
-    for field in fields(motors):
-        if field.name in ("class_type",):
-            continue
-        attr = getattr(motors, field.name)
-        if isinstance(attr, (dict, list)):
-            overrides[field.name] = _remap_hybrid_joint_keys(attr)
-    return {"motors": motors.replace(**overrides)}
-
-
-_hybrid_init_joint_pos = _remap_hybrid_joint_keys(dict(_base_open.init_state.joint_pos))
-
-SBERCHEL_CONFIG_OPEN_KINEMATICS = _base_open.replace(
-    spawn=_base_open.spawn.replace(
-        asset_path=str(_HYBRID_MJCF_PATH),
-        usd_dir=str(_HYBRID_MJCF_DIR / "usd_cache"),
-        usd_file_name="v3_0_alpha_locomanipulator_hybrid.usd",
+# The serialized ``asset_path`` is a stale absolute path from the machine the
+# config was captured on, and ``usd_dir`` is null; point both at this checkout.
+SBERCHEL_CONFIG = _base.replace(
+    spawn=_base.spawn.replace(
+        asset_path=str(_CLOSED_MJCF_PATH),
+        usd_dir=str(_USD_CACHE_DIR),
+        usd_file_name="v3_0_alpha_locomanipulator.usd",
     ),
-    init_state=_base_open.init_state.replace(joint_pos=_hybrid_init_joint_pos),
-    actuators=_hybrid_motors_actuators(),
 )
+
+# Actuated wrist dof. The crank drives ``*_wrist_pitch_joint`` through a
+# parallelogram four-bar (crank arm 0.02101 == output arm 0.02100, coupler
+# 0.071251 == ground link 0.071251), so pitch angle == crank angle, 1:1 and
+# same sign. Pink IK solves on the pitch joint and the target is written to the
+# crank -- see ``sberchel_pink_actions.SberchelPinkIKAction``.
+WRIST_MOTOR_JOINT_EXPR = ".*_wrist_crank_joint"
+WRIST_OUTPUT_JOINT_EXPR = ".*_wrist_pitch_joint"
 
 _XR_ARM_STIFFNESS = 3000.0
 _XR_ARM_DAMPING = 100.0
@@ -134,30 +89,40 @@ _XR_NECK_DAMPING = 20.0
 _XR_LOCK_STIFFNESS = 10000.0
 _XR_LOCK_DAMPING = 1000.0
 
-_upperbody_joint_pos = dict(SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.joint_pos)
-#_upperbody_joint_pos[".*_elbow_pitch_joint"] = -1.0
 
-_upperbody_spawn = SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn.replace(
-    rigid_props=SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn.rigid_props.replace(disable_gravity=True)
-    if SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn.rigid_props is not None
+def _passive_actuators() -> dict:
+    """green_challenge's ``passive`` group for the linkage output joints.
+
+    Covers ``.*_ankle_pitch``, ``.*_ankle_roll``, ``.*_knee_pitch`` and
+    ``.*_wrist_pitch`` -- the dofs the four-bars drive. It carries no gains; it
+    exists so Isaac Lab accounts for those joints instead of leaving them
+    unclaimed. The remaining rod/inter dofs stay unclaimed, as on their side.
+    """
+    passive = SBERCHEL_CONFIG.actuators.get("passive")
+    return {"passive": passive} if passive is not None else {}
+
+
+_upperbody_joint_pos = dict(SBERCHEL_CONFIG.init_state.joint_pos)
+
+_upperbody_spawn = SBERCHEL_CONFIG.spawn.replace(
+    rigid_props=SBERCHEL_CONFIG.spawn.rigid_props.replace(disable_gravity=True)
+    if SBERCHEL_CONFIG.spawn.rigid_props is not None
     else None,
-    articulation_props=SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn.articulation_props.replace(
+    articulation_props=SBERCHEL_CONFIG.spawn.articulation_props.replace(
         fix_root_link=True,
         enabled_self_collisions=False,
-        solver_position_iteration_count=8,
-        solver_velocity_iteration_count=4,
     )
-    if SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn.articulation_props is not None
+    if SBERCHEL_CONFIG.spawn.articulation_props is not None
     else None,
 )
 
 SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
     spawn=_upperbody_spawn,
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.pos,
-        rot=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.rot,
+        pos=SBERCHEL_CONFIG.init_state.pos,
+        rot=SBERCHEL_CONFIG.init_state.rot,
         joint_pos=_upperbody_joint_pos,
-        joint_vel=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.joint_vel,
+        joint_vel=SBERCHEL_CONFIG.init_state.joint_vel,
     ),
     actuators={
         "body": ImplicitActuatorCfg(
@@ -176,7 +141,7 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
                 ".*_shoulder_yaw_joint",
                 ".*_elbow_pitch_joint",
                 ".*_elbow_yaw_joint",
-                ".*_wrist_pitch_joint",
+                WRIST_MOTOR_JOINT_EXPR,
                 ".*_wrist_roll_joint",
                 ".*_thumb_proximal_yaw_joint",
                 ".*_thumb_proximal_pitch_joint",
@@ -235,8 +200,9 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
                 ".*_pinky_proximal_joint": 8.5,
             },
         ),
+        **_passive_actuators(),
     },
-    soft_joint_pos_limit_factor=SBERCHEL_CONFIG_OPEN_KINEMATICS.soft_joint_pos_limit_factor,
+    soft_joint_pos_limit_factor=SBERCHEL_CONFIG.soft_joint_pos_limit_factor,
 )
 
 # Upper-body / finger keys in motors cfg — not on the locomotion actuator group.
@@ -267,7 +233,11 @@ def _locomotion_gain_dict(mapping: dict | None, *, include_neck: bool = True) ->
 
 
 def _xr_upper_actuator() -> ImplicitActuatorCfg:
-    """ImplicitActuator PD for XR arm/finger teleop."""
+    """ImplicitActuator PD for XR arm/finger teleop.
+
+    Drives ``*_wrist_crank_joint`` -- the motor dof of the wrist four-bar --
+    not the passive ``*_wrist_pitch_joint`` output.
+    """
     return ImplicitActuatorCfg(
         joint_names_expr=[
             ".*_shoulder_pitch_joint",
@@ -275,7 +245,7 @@ def _xr_upper_actuator() -> ImplicitActuatorCfg:
             ".*_shoulder_yaw_joint",
             ".*_elbow_pitch_joint",
             ".*_elbow_yaw_joint",
-            ".*_wrist_pitch_joint",
+            WRIST_MOTOR_JOINT_EXPR,
             ".*_wrist_roll_joint",
             ".*_thumb_proximal_yaw_joint",
             ".*_thumb_proximal_pitch_joint",
@@ -319,7 +289,7 @@ def _xr_upper_actuator() -> ImplicitActuatorCfg:
     )
 
 
-def _open_locomotion_actuators(*, neck_on_locomotion: bool = True):
+def _locomotion_actuators(*, neck_on_locomotion: bool = True):
     """Frictional leg/torso actuators + ImplicitActuator arms for XR teleop.
 
     When ``neck_on_locomotion`` is False, neck joints are omitted from the
@@ -327,7 +297,7 @@ def _open_locomotion_actuators(*, neck_on_locomotion: bool = True):
     """
     from dataclasses import fields
 
-    motors = _hybrid_motors_actuators()["motors"]
+    motors = SBERCHEL_CONFIG.actuators["motors"]
     leg_torso_expr = [
         ".*_hip_pitch_joint",
         ".*_hip_roll_joint",
@@ -349,12 +319,16 @@ def _open_locomotion_actuators(*, neck_on_locomotion: bool = True):
                 value, include_neck=neck_on_locomotion
             )
     locomotion = motors.replace(**locomotion_overrides)
-    return {"locomotion": locomotion, "xr_upper": _xr_upper_actuator()}
+    return {
+        "locomotion": locomotion,
+        "xr_upper": _xr_upper_actuator(),
+        **_passive_actuators(),
+    }
 
 
-def _open_locomotion_actuators_with_neck_pd():
+def _locomotion_actuators_with_neck_pd():
     """Legs/torso frictional + neck ImplicitActuator PD + XR arm PD."""
-    actuators = _open_locomotion_actuators(neck_on_locomotion=False)
+    actuators = _locomotion_actuators(neck_on_locomotion=False)
     actuators["neck"] = ImplicitActuatorCfg(
         joint_names_expr=["neck_yaw_joint", "neck_pitch_joint"],
         stiffness={"neck_.*": _XR_NECK_STIFFNESS},
@@ -365,31 +339,18 @@ def _open_locomotion_actuators_with_neck_pd():
 
 
 _xr_locomotion_joint_pos = dict(_upperbody_joint_pos)
-#_xr_locomotion_joint_pos[".*_elbow_pitch_joint"] = -1.0
-
-SBERCHEL_XR_LOCOMOTION_ROBOT = ArticulationCfg(
-    spawn=SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn,
-    init_state=ArticulationCfg.InitialStateCfg(
-        pos=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.pos,
-        rot=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.rot,
-        joint_pos=_xr_locomotion_joint_pos,
-        joint_vel=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.joint_vel,
-    ),
-    actuators=_open_locomotion_actuators(),
-    soft_joint_pos_limit_factor=SBERCHEL_CONFIG_OPEN_KINEMATICS.soft_joint_pos_limit_factor,
-)
 
 # Free-floating XR loco robot with neck on ImplicitActuator for headset look control.
 SBERCHEL_XR_LOCOMOTION_NECK_ROBOT = ArticulationCfg(
-    spawn=SBERCHEL_CONFIG_OPEN_KINEMATICS.spawn,
+    spawn=SBERCHEL_CONFIG.spawn,
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.pos,
-        rot=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.rot,
+        pos=SBERCHEL_CONFIG.init_state.pos,
+        rot=SBERCHEL_CONFIG.init_state.rot,
         joint_pos=_xr_locomotion_joint_pos,
-        joint_vel=SBERCHEL_CONFIG_OPEN_KINEMATICS.init_state.joint_vel,
+        joint_vel=SBERCHEL_CONFIG.init_state.joint_vel,
     ),
-    actuators=_open_locomotion_actuators_with_neck_pd(),
-    soft_joint_pos_limit_factor=SBERCHEL_CONFIG_OPEN_KINEMATICS.soft_joint_pos_limit_factor,
+    actuators=_locomotion_actuators_with_neck_pd(),
+    soft_joint_pos_limit_factor=SBERCHEL_CONFIG.soft_joint_pos_limit_factor,
 )
 
 
@@ -439,7 +400,8 @@ def _gc_upper_gains_for_joint(j_name: str) -> tuple[float, float] | None:
     """Return ``(stiffness, damping)`` for an ``xr_upper`` joint, or None.
 
     Order matters: thumb must be tested before the generic ``proximal`` branch,
-    and shoulder yaw before the generic shoulder branch.
+    and shoulder yaw before the generic shoulder branch. The ``wrist`` branch
+    covers both ``wrist_crank`` (pitch motor) and ``wrist_roll``.
     """
     if "shoulder" in j_name:
         if "yaw" in j_name:

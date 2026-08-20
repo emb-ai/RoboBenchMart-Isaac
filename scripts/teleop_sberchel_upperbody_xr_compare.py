@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers.
 # SPDX-License-Identifier: BSD-3-Clause
-"""XR teleop debug dumps for MJCF open-kinematics Sberchel upperbody.
+"""XR teleop debug dumps for Sberchel upperbody MJCF.
 
 Same loop as ``scripts/teleop_se3_agent.py``, plus periodic tables for OpenXR
 landmarks, robot link poses, proximal q vs q_des, and Pink hand order checks.

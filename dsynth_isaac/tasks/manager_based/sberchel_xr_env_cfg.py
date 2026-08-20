@@ -1,4 +1,4 @@
-"""Free-floating open-kinematics Sberchel: zest legs + XR Pink IK upper body."""
+"""Free-floating closed-kinematics Sberchel (v3_0a): zest legs + XR Pink IK upper body."""
 
 import torch
 import isaaclab.envs.mdp as mdp
@@ -17,6 +17,7 @@ from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     POLICY_LEG_JOINT_NAMES,
     SberchelEventCfg,
     SberchelObservationsCfg,
+    apply_green_challenge_physx,
 )
 from dsynth_isaac.tasks.manager_based.sberchel_upperbody_xr_env_cfg import (
     UpperbodySberchelXRActionsCfg,
@@ -78,6 +79,7 @@ class SberchelXRFetchAnyItemEnvCfg(DarkstoreBaseEnvCfg):
         self.decimation = 1
         self.sim.render_interval = 1
 
+        apply_green_challenge_physx(self)
         setup_sberchel_xr_pink_and_teleop(self)
 
 @configclass
@@ -181,4 +183,5 @@ class SberchelXRDemoEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = 1
         self.episode_length_s = 100000
 
+        apply_green_challenge_physx(self)
         setup_sberchel_xr_pink_and_teleop(self)

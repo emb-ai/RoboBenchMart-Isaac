@@ -30,6 +30,7 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from dsynth_isaac.green_challenge_path import ensure_green_challenge_importable  # noqa: E402
+from dsynth_isaac.sim_defaults import apply_sberchel_cli_defaults  # noqa: E402
 
 ensure_green_challenge_importable()
 
@@ -151,6 +152,8 @@ parser.add_argument(
     help="Print debug block every N simulation steps (0 to disable periodic prints).",
 )
 AppLauncher.add_app_launcher_args(parser)
+# Sberchel runs on green_challenge's CPU physics by default; --device overrides.
+apply_sberchel_cli_defaults(parser)
 args_cli = parser.parse_args()
 
 app_launcher_args = vars(args_cli)
@@ -648,7 +651,7 @@ def main() -> None:
     env = gym.make(args_cli.task, cfg=env_cfg).unwrapped
     env.reset(seed=args_cli.seed)
 
-    net = Network(env, type="zest", device="cpu", closed_kinematics=False)
+    net = Network(env, type="zest", device="cpu", closed_kinematics=True)
     net.reset()
     apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
     robot = env.scene["robot"]
