@@ -275,7 +275,22 @@ parser.add_argument(
     help=(
         "Physics steps per render while in locomotion mode (1 = every step). "
         "Higher skips Pink-free frames' XR/GUI presents and raises wall-clock Hz. "
-        "Static teleop always renders every step."
+        "Static teleop renders every step by default (--static_render_interval)."
+    ),
+)
+parser.add_argument(
+    "--static_render_interval",
+    type=int,
+    default=1,
+    help=(
+        "Physics steps per render while in static teleop (1 = every step). "
+        "Unlike the loco interval this is not free: sim.render() is the only Kit "
+        "app tick in the loop, and the OpenXR input snapshot _get_raw_data() "
+        "reads refreshes on that tick, so raising this makes hand tracking "
+        "staler in the same proportion. Raise it either to stop submitting "
+        "frames the headset cannot show (printed hz above ~90 refresh -- free), "
+        "or to buy wall-clock back for physics when hz is low (costs hand-pose "
+        "freshness)."
     ),
 )
 parser.add_argument(
@@ -1384,7 +1399,8 @@ def main() -> None:
         flush=True,
     )
     print(
-        f">>> loco fast-path: Pink IK hold-on + render_interval={args_cli.loco_render_interval}",
+        f">>> loco fast-path: Pink IK hold-on + render_interval={args_cli.loco_render_interval} "
+        f"(static render_interval={args_cli.static_render_interval})",
         flush=True,
     )
     if args_cli.legacy_stiff_teleop:
@@ -1605,7 +1621,7 @@ def main() -> None:
         pink_hold.disable()
         if args_cli.legacy_stiff_teleop:
             apply_sberchel_xr_teleop_pd_gains(robot)
-        set_render_interval(base_env, 1)
+        set_render_interval(base_env, args_cli.static_render_interval)
 
     def apply_left_hold(upper_body: torch.Tensor) -> torch.Tensor:
         """Overwrite left wrist/finger slots with the --disable_left_hand hold."""
@@ -2237,7 +2253,9 @@ def main() -> None:
                         elif effective_hz > 0.0 and effective_hz < 60.0 and loco_mode == "static":
                             print(
                                 f"[warn] static wall-clock {effective_hz:.1f} Hz "
-                                f"(Pink IK + XR); expected slower than loco.",
+                                f"(Pink IK + XR); expected slower than loco. "
+                                f"--static_render_interval 2 trades hand-pose "
+                                f"freshness for rate.",
                                 flush=True,
                             )
                     if (
