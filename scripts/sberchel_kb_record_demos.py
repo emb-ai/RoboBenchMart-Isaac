@@ -45,7 +45,6 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
 
 from isaaclab.app import AppLauncher
 
@@ -351,15 +350,62 @@ parser.add_argument(
     help="Print every gamepad button/axis event (to verify the button mapping).",
 )
 parser.add_argument(
-    "--legacy_stiff_teleop",
-    action="store_true",
-    default=False,
+    "--loco_policy",
+    type=str,
+    default="zest",
+    choices=["zest", "walk"],
     help=(
-        "Restore the old two-regime behaviour: stiff XR PD (arms 3000, fingers 400) "
-        "in static teleop, green_challenge gains while walking. Easier to teleop but "
-        "the demos are recorded on a plant green_challenge does not have (its arms run "
-        "at 42/28), so they are NOT valid training data for their VLA. Use only to A/B "
-        "the feel against the default single-regime run."
+        "green_challenge policy driving the legs in LOCOMOTION mode; static teleop "
+        "always uses zest. 'walk' (policy_4k_tuni) is their dedicated locomotion "
+        "policy -- trained on real velocity ranges with its own arm swing, where "
+        "zest is a manipulation-first whole-body residual controller. The 25 body "
+        "joints take their PD from whichever policy is loaded -- that is how "
+        "green_challenge works too -- so 'walk' also changes the leg/arm gains "
+        "while walking. Default 'zest' reproduces the previous behaviour exactly."
+    ),
+)
+parser.add_argument(
+    "--walk_arm_drive",
+    type=str,
+    default="when_free",
+    choices=["when_free", "always", "never"],
+    help=(
+        "Who moves the arms during --loco_policy walk locomotion. 'when_free' "
+        "(default) hands them to the policy only while nothing is grasped and holds "
+        "them frozen once the operator squeezes -- swinging the shoulders while "
+        "carrying a product drags the hand through space and can break the grasp. "
+        "'always' is unconditional (closest to how walk was trained: it observes all "
+        "25 dofs and learned balance while executing its own arm swing). 'never' "
+        "keeps today's frozen hold. The gate reads the squeeze channel already "
+        "recorded as teleop_state[:,1], so replay reproduces it from the dataset."
+    ),
+)
+parser.add_argument(
+    "--walk_policy_decimation",
+    type=int,
+    default=1,
+    help=(
+        "Env steps per walk-policy inference (its output is held in between). The env "
+        "runs sim.dt=1/150 with decimation=1 while both policies were trained at 50 Hz. "
+        "zest absorbs that -- it is a residual on a time-independent commander reference "
+        "-- but walk is absolute with a 15-frame observation history, so its only clock "
+        "IS that history: at 150 Hz the window spans 0.1 s instead of 0.3 s. 3 restores "
+        "the trained 50 Hz. Default is 1 because a headless bench showed 1/3/5 give "
+        "identical forward progress (0.355/0.358/0.363 m in 10 s at vx=0.5) while the "
+        "held, piecewise-constant target measurably increased base sway (path length "
+        "0.80/1.22/1.53 m). Try 3 if the gait looks slow-motion in the real rig."
+    ),
+)
+parser.add_argument(
+    "--loco_blend_time",
+    type=float,
+    default=0.5,
+    help=(
+        "Seconds to ramp the arms from the held pose into the walk policy's targets "
+        "on every locomotion entry (mirror of --static_blend_time). walk's nominal "
+        "arm pose is arms-at-sides while the operator enters locomotion from a reach, "
+        "often radians away; without the ramp that whole delta is commanded in one "
+        "step. 0 snaps."
     ),
 )
 parser.add_argument(
@@ -428,17 +474,6 @@ parser.add_argument(
         "Print a per-hand grip readout (commanded vs achieved finger angle, error, "
         "estimated torque vs the 8.5 Nm effort limit) every N steps. 0 disables. "
         "Use this to confirm grasps actually generate force instead of assuming it."
-    ),
-)
-parser.add_argument(
-    "--keep_stiff_neck",
-    action="store_true",
-    default=False,
-    help=(
-        "Keep the stiff XR neck PD (200/20) instead of green_challenge's 28/1.4. "
-        "Headset look feels snappier but diverges from their config -- the neck sits "
-        "in their torso_joint_pos group and aims the head camera, so it changes the "
-        "recorded images."
     ),
 )
 parser.add_argument(
@@ -602,8 +637,6 @@ from dsynth_isaac.teleop.xr_anchor import (
 )
 from dsynth_isaac.teleop.xr_target_hud import XrTargetHud
 from dsynth_isaac.robots.sberchel_cfg import (
-    apply_sberchel_loco_upper_pd_gains,
-    apply_sberchel_xr_teleop_pd_gains,
     sberchel_upper_pd_gain_table,
 )
 from dsynth_isaac.tasks.manager_based.sberchel_upperbody_xr_env_cfg import (
@@ -615,13 +648,18 @@ from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     NECK_ACTION_DIM,
     NECK_PITCH_LIMIT,
     NECK_YAW_LIMIT,
-    policy_leg_targets,
+    POLICY_ARM_JOINT_NAMES,
+    POLICY_MODEL_ARM_SLICE,
+    LocoMode,
+    LocoPolicySet,
 )
-from green_challenge.policy.network import Network
 
 logger = logging.getLogger(__name__)
 
-LocoMode = Literal["locomotion", "static"]
+# --walk_arm_drive when_free: below this squeeze the hands count as empty and the
+# walk policy is allowed to swing the arms. Anything above is treated as "holding
+# something", where an arm swing would drag the grasped product around.
+_ARM_DRIVE_SQUEEZE_EPS = 1e-3
 
 # Left-hand slots in the 26D upper command (--disable_left_hand): wrist pose7 at
 # [0:7], plus the left entries of the 12D finger block at [14:26].
@@ -697,6 +735,64 @@ class PinkJointHold:
         self._targets: torch.Tensor | None = None
         self._active = False
         self._targets_valid = False
+        self._arm_slots, self._arm_joint_ids = self._resolve_arm_slots()
+
+    def _resolve_arm_slots(self) -> tuple[list[int], list[int]]:
+        """Locate the 10 policy arm joints among the term's controlled joints.
+
+        ``_controlled_joint_names`` is post-remap (wrist pitch/roll are written
+        to the wrist crank dofs), but the arm joints are never remapped, so they
+        match the policy's names directly. Resolved once and checked loudly:
+        both vectors are length 10, so a reordered articulation would silently
+        land shoulder commands on elbows.
+        """
+        names = list(self._term._controlled_joint_names)
+        ids = [int(i) for i in self._term._controlled_joint_ids]
+        slot_by_name = {name: slot for slot, name in enumerate(names)}
+        missing = [n for n in POLICY_ARM_JOINT_NAMES if n not in slot_by_name]
+        if missing:
+            raise RuntimeError(
+                f"[PinkJointHold] upper_body_ik does not control {missing}; the "
+                "walk policy's arm targets have nowhere to go. Did the action "
+                "layout or the robot model change?"
+            )
+        slots = [slot_by_name[n] for n in POLICY_ARM_JOINT_NAMES]
+        return slots, [ids[s] for s in slots]
+
+    def set_arm_targets(
+        self,
+        raw_arm: torch.Tensor,
+        *,
+        blend_from: torch.Tensor | None = None,
+        alpha: float = 1.0,
+    ) -> None:
+        """Drive the 10 arm slots from the policy; wrists and fingers keep their hold.
+
+        ``raw_arm`` is ``Network.__call__`` output, which already has the USD
+        default subtracted for the offset-based ``JointPositionActionCfg`` terms.
+        This writes *absolute* joint targets, so the default goes back on.
+
+        Leaving the wrist and finger slots alone is what preserves grasp force:
+        the hold captured them as *commanded* targets, which sit deeper than the
+        measured pose by exactly the PD error holding the object.
+        """
+        if self._targets is None:
+            return
+        # default_joint_pos is a live articulation buffer; read it rather than
+        # caching, even though the arm defaults happen to be zero today.
+        default = self._term._asset.data.default_joint_pos[:, self._arm_joint_ids]
+        target = raw_arm.to(self._targets) + default
+        if blend_from is not None and alpha < 1.0:
+            # Ramp in absolute joint space, so the caller never has to know about
+            # the default offset.
+            target = blend_from.to(target) + alpha * (target - blend_from.to(target))
+        self._targets[:, self._arm_slots] = target
+
+    def arm_targets(self) -> torch.Tensor | None:
+        """Current absolute hold targets for the 10 arm slots (blend source)."""
+        if self._targets is None:
+            return None
+        return self._targets[:, self._arm_slots].clone()
 
     def invalidate(self) -> None:
         """Mark commanded targets as stale — call right after ``env.reset()``.
@@ -1244,19 +1340,22 @@ def measured_neck_targets(robot) -> tuple[float, float]:
 def reset_teleop_state(
     *,
     env,
-    net,
+    policies: "LocoPolicySet",
     robot,
     teleop_interface,
     loco_mode: LocoMode = "locomotion",
 ) -> tuple[FrozenUpperSnapshot | None, torch.Tensor | None, torch.Tensor]:
     """Reset policy and teleop state after env.reset()."""
-    net.reset()
-    # Single regime by default: the plant must not depend on the mode, or the
+    # Every net, not just the live one: the idle policy would otherwise resume the
+    # previous episode's action history on the next mode toggle.
+    policies.reset_all()
+    # One regime, always: the upper-body plant must not depend on the mode, or the
     # dataset becomes non-Markovian (same observation, different dynamics).
-    if args_cli.legacy_stiff_teleop and loco_mode == "static":
-        apply_sberchel_xr_teleop_pd_gains(robot)
-    else:
-        apply_sberchel_loco_upper_pd_gains(robot, include_neck=not args_cli.keep_stiff_neck)
+    # --loco_policy walk deliberately breaks that for the leg group only, which is
+    # why the active policy is re-asserted below and recorded in provenance.
+    # The caller enters its mode *before* this runs, so the gain write above may
+    # have just landed on top of the policy's leg table; put it back.
+    policies.reassert(loco_mode)
     teleop_interface.reset()
     sync_retargeter_idle_from_robot(teleop_interface, robot)
     # The red hand-joint markers are only redrawn by retarget() in static mode;
@@ -1319,9 +1418,20 @@ def main() -> None:
     stamp_episode_seed()
     print(f">>> start-pose seed {episode_seed} (pose 0 of session seed {args_cli.seed})", flush=True)
 
-    net = Network(env, type="zest", device="cpu", closed_kinematics=True)
-    net.reset()
     robot = base_env.scene["robot"]
+
+    policies = LocoPolicySet(
+        env,
+        {"locomotion": args_cli.loco_policy, "static": "zest"},
+        decimation={"walk": args_cli.walk_policy_decimation},
+        device="cpu",
+    )
+    policies.reset_all()
+    walk_arm_drive = (
+        args_cli.walk_arm_drive
+        if policies.type_for("locomotion") == "walk"
+        else "never"
+    )
 
     # --- per-trajectory pick target -----------------------------------------
     # Headset-only XR widget (XRSceneView UI, not a stage prim), placed
@@ -1376,9 +1486,37 @@ def main() -> None:
 
     def apply_native_gains() -> None:
         """green_challenge's effective PD -- the plant their VLA is evaluated on."""
-        apply_sberchel_loco_upper_pd_gains(robot, include_neck=not args_cli.keep_stiff_neck)
 
     apply_native_gains()
+    # Land on the starting mode's policy before anything reads the gain table, so
+    # the provenance dump below describes the plant step 0 actually runs on.
+    policies.reassert("locomotion")
+    if policies.multi_policy:
+        loco_ranges = policies.command_ranges("locomotion")
+        print(
+            f">>> loco policy: locomotion={policies.type_for('locomotion')} "
+            f"static={policies.type_for('static')} "
+            f"(body PD follows the active policy; decimation="
+            f"{args_cli.walk_policy_decimation}, arms={walk_arm_drive})",
+            flush=True,
+        )
+        print(f">>> {policies.type_for('locomotion')} command clip: {loco_ranges}", flush=True)
+        for axis, flag, requested in (
+            ("lin_vel_x", "speed", args_cli.speed),
+            ("lin_vel_y", "strafe", args_cli.strafe),
+            ("ang_vel_z", "turn", args_cli.turn),
+        ):
+            bounds = loco_ranges.get(axis)
+            if bounds is None:
+                continue
+            low, high = bounds
+            if requested > high or -requested < low:
+                print(
+                    f"[loco policy] --{flag} +/-{requested} exceeds {axis} "
+                    f"[{low}, {high}]; the commander clips silently, so stick "
+                    "travel is asymmetric and recorded loco_commands stay pre-clip.",
+                    flush=True,
+                )
     station_keeper = StationKeeper(
         lin_gain=args_cli.station_lin_gain,
         ang_gain=args_cli.station_ang_gain,
@@ -1403,17 +1541,17 @@ def main() -> None:
         f"(static render_interval={args_cli.static_render_interval})",
         flush=True,
     )
-    if args_cli.legacy_stiff_teleop:
-        print(
-            ">>> GAINS: LEGACY two-regime (stiff XR PD in static teleop). "
-            "Demos are NOT valid green_challenge training data -- A/B use only.",
-            flush=True,
-        )
-    else:
-        print(">>> GAINS: single regime, green_challenge-native (arms 42/28)", flush=True)
+    print(
+        f">>> GAINS: leg/torso PD comes from the loaded policy ({policies.active_type}); "
+        "arm/hand/neck PD comes from the robot cfg. NOTE the table below is the "
+        "python-side actuator tensor -- for ImplicitActuator groups that is the "
+        "cfg value pushed to PhysX at spawn, and runtime writes to it do NOT reach "
+        "the simulation. Check the actuator class before trusting these as the plant.",
+        flush=True,
+    )
     _gain_table = sberchel_upper_pd_gain_table(robot)
     print(
-        ">>> upper-body PD: "
+        ">>> PD gains (green_challenge-native, whole robot): "
         + ", ".join(f"{n}={k:g}/{d:g}" for n, (k, d) in sorted(_gain_table.items())),
         flush=True,
     )
@@ -1464,7 +1602,8 @@ def main() -> None:
                     ),
                     "sberchel_hand_joint_names": list(upper_term._hand_joint_names),
                     "sberchel_upper_pd_gains": {n: list(v) for n, v in _gain_table.items()},
-                    "sberchel_legacy_stiff_teleop": bool(args_cli.legacy_stiff_teleop),
+                    # Retired: the stiff two-regime XR plant no longer exists.
+                    "sberchel_legacy_stiff_teleop": False,
                     "sberchel_squeeze_scale": float(args_cli.squeeze_scale),
                     "sberchel_squeeze_binary": bool(args_cli.squeeze_binary),
                     "sberchel_squeeze_on_value": float(args_cli.squeeze_on_value),
@@ -1507,7 +1646,46 @@ def main() -> None:
                         for t in upper_term.cfg.controller.variable_input_tasks
                     ],
                     "sberchel_action_layout": "legs(12) + neck(2) + upper_body_ik(26)",
-                    "sberchel_teleop_state_layout": "is_locomotion, squeeze, legacy_gains",
+                    "sberchel_teleop_state_layout": (
+                        "is_locomotion, squeeze, legacy_gains (always 0 since the "
+                        "stiff two-regime plant was retired)"
+                    ),
+                    # Which policy produced each segment. teleop_state[:,0] is the
+                    # per-step selector into this map, so no extra channel is needed.
+                    "sberchel_loco_policy_by_mode": {
+                        "locomotion": policies.type_for("locomotion"),
+                        "static": policies.type_for("static"),
+                    },
+                    "sberchel_loco_policy_weights": policies.weights_by_type(),
+                    # The body-joint PD arrives with the policy, so a per-mode
+                    # policy also means a per-mode leg/arm plant; teleop_state[:,0]
+                    # is what segments a dataset back apart.
+                    "sberchel_loco_policy_gain_switch": policies.multi_policy,
+                    # Entering policy is reset at every swap; replay applies the same
+                    # rule at the same indices, derived from teleop_state[:,0].
+                    "sberchel_loco_policy_reset_on_switch": True,
+                    "sberchel_walk_arm_drive": walk_arm_drive,
+                    "sberchel_walk_policy_decimation": int(args_cli.walk_policy_decimation),
+                    # loco_commands are recorded PRE-clip: the commander clamps to
+                    # these ranges without warning, so a consumer reading the recorded
+                    # command as executed truth is wrong wherever it saturates.
+                    "sberchel_loco_command_clip": policies.command_ranges("locomotion"),
+                    # walk drives 25 joints, but torso_yaw has no action term in this
+                    # env and the neck is commanded to 0 during locomotion, so those
+                    # outputs are discarded -- the gait is not the policy's full behaviour.
+                    "sberchel_loco_policy_unmapped_outputs": [
+                        "torso_yaw_joint",
+                        "neck_yaw_joint",
+                        "neck_pitch_joint",
+                    ],
+                    # Raw 'actions' still encode the frozen-snapshot IK targets while
+                    # the arms were actually driven by the policy; only
+                    # processed_actions describe what ran.
+                    "sberchel_actions_valid_replay_sources": (
+                        ["policy_loco", "processed_joint_targets"]
+                        if walk_arm_drive != "never"
+                        else ["policy_loco", "processed_joint_targets", "actions"]
+                    ),
                     # Pick target shown to the operator. Each demo group carries
                     # 'target_item' and 'task_instruction' attrs; the scheme
                     # below re-derives the item from the demo's 'seed' attr for
@@ -1573,21 +1751,49 @@ def main() -> None:
     static_blend_neck_from: tuple[float, float] = (0.0, 0.0)
     static_blend_steps_done = 0
     static_blend_total = 0
+    # --loco_blend_time: mirror of the above for the arms when the walk policy
+    # drives them. Its nominal pose is arms-at-sides while the operator enters
+    # locomotion from a reach, so the raw delta can be radians.
+    loco_arm_blend_from: torch.Tensor | None = None
+    loco_arm_blend_steps_done = 0
+    loco_arm_blend_total = 0
+    # Whether the policy currently owns the arms (--walk_arm_drive when_free
+    # hands them back the moment the operator squeezes).
+    arm_drive_engaged = False
+    # True once the walk policy has moved the arms this locomotion segment, so
+    # the static ramp knows the frozen snapshot no longer describes them.
+    arms_moved_by_policy = False
+
+    def seed_loco_arm_blend() -> None:
+        """Start the arm ramp from whatever the hold is commanding right now."""
+        nonlocal loco_arm_blend_from, loco_arm_blend_steps_done, loco_arm_blend_total
+        if walk_arm_drive == "never" or args_cli.loco_blend_time <= 0.0:
+            loco_arm_blend_from = None
+            return
+        loco_arm_blend_from = pink_hold.arm_targets()
+        loco_arm_blend_steps_done = 0
+        step_dt = float(getattr(base_env, "step_dt", 1.0 / 50.0))
+        loco_arm_blend_total = max(1, round(args_cli.loco_blend_time / step_dt))
 
     def enter_locomotion_mode(*, capture_frozen: bool) -> None:
         nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
-        nonlocal last_loco_cmd_t
+        nonlocal last_loco_cmd_t, arm_drive_engaged, arms_moved_by_policy
+        # First: the leg PD that follows the active policy has to be resident
+        # before the policy it belongs to produces a target.
+        policies.activate("locomotion")
         loco_mode = "locomotion"
         hold_xy_yaw = None
         last_neck_targets = (0.0, 0.0)
         last_loco_cmd_t = None
+        arm_drive_engaged = False
+        arms_moved_by_policy = False
         if capture_frozen:
             frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
-        # Only the legacy path switches plants; by default the gains never move,
-        # so C changes what is being commanded, not what the robot physically is.
-        if args_cli.legacy_stiff_teleop:
-            apply_native_gains()
+        # The upper plant never moves with the mode, so C changes what is being
+        # commanded, not what the robot physically is. --loco_policy walk breaks
+        # that for the leg group alone.
         pink_hold.enable(robot)
+        seed_loco_arm_blend()
         set_render_interval(base_env, args_cli.loco_render_interval)
 
     def enter_static_mode() -> None:
@@ -1595,7 +1801,11 @@ def main() -> None:
         nonlocal left_hold_snapshot
         nonlocal static_blend_from, static_blend_neck_from
         nonlocal static_blend_steps_done, static_blend_total
+        nonlocal loco_arm_blend_from, arm_drive_engaged
+        policies.activate("static")
         loco_mode = "static"
+        loco_arm_blend_from = None
+        arm_drive_engaged = False
         hold_xy_yaw = capture_hold_pose_from_robot(robot)
         station_keeper.reset()
         sync_retargeter_idle_from_robot(teleop_interface, robot)
@@ -1606,7 +1816,13 @@ def main() -> None:
             # Ramp from what is being commanded right now (the loco hold pose if
             # there is one, else the measured pose) into the live XR targets.
             static_blend_from = (
-                frozen_snapshot
+                # The walk policy has been moving the arms, so frozen_snapshot
+                # describes where they were at locomotion *entry*, not where they
+                # are now -- ramping from it would snap, which is the one thing
+                # the ramp exists to prevent. Measured pose is the truth here.
+                capture_frozen_upper(robot)
+                if arms_moved_by_policy
+                else frozen_snapshot
                 if frozen_snapshot is not None
                 else capture_frozen_upper(robot, last_teleop_upper)
             )
@@ -1619,8 +1835,6 @@ def main() -> None:
         frozen_snapshot = None
         last_neck_targets = (0.0, 0.0)
         pink_hold.disable()
-        if args_cli.legacy_stiff_teleop:
-            apply_sberchel_xr_teleop_pd_gains(robot)
         set_render_interval(base_env, args_cli.static_render_interval)
 
     def apply_left_hold(upper_body: torch.Tensor) -> torch.Tensor:
@@ -1658,9 +1872,11 @@ def main() -> None:
         """Snapshot everything needed to roll the episode back to this instant.
 
         The scene state covers the robot (root + joints + velocities) and every
-        rigid object, so a dropped item is teleported back too. The zest policy's
-        only cross-step state is ``controller.actions`` (last action, fed back
-        into its observation); the commander is rewritten every tick. Episode
+        rigid object, so a dropped item is teleported back too. Policy carry-over
+        is delegated to ``LocoPolicySet.capture`` -- for zest that is just
+        ``controller.actions``, but the walk policy also keeps a 15-frame
+        observation history, and rolling back one without the other leaves it on
+        a timeline the restored scene does not match. Episode
         and video buffers are rolled back by frame count, which is exact because
         restore reproduces the checkpoint state bit-for-bit — the stitched
         recording stays continuous.
@@ -1676,7 +1892,7 @@ def main() -> None:
                 if hasattr(base_env.scene, "capture_store_rigid_body_state")
                 else None
             ),
-            "policy_actions": net.controller.actions.clone(),
+            "policy_state": policies.capture(),
             # The 'actions' obs term reads action_manager.action; without this
             # rollback the first post-restore obs row records the abandoned
             # timeline's last action.
@@ -1701,7 +1917,6 @@ def main() -> None:
                 base_env.sim, sim_checkpoint["store_state"]
             )
             print(f"[checkpoint] store products restored: {restored}", flush=True)
-        net.controller.actions.copy_(sim_checkpoint["policy_actions"])
         base_env.action_manager._action.copy_(sim_checkpoint["last_action"])
         base_env.action_manager._prev_action.copy_(sim_checkpoint["prev_action"])
         # scene.reset_to only writes sim state; env.obs_buf is recomputed inside
@@ -1724,6 +1939,11 @@ def main() -> None:
         frozen_snapshot = None
         last_neck_targets = measured_neck_targets(robot)
         enter_static_mode()
+        # After the mode entry, never before: entering static activates its policy,
+        # and a policy swap resets the net -- which would wipe the state we are
+        # restoring. Rollback has to stay bit-exact or the frame-count truncation
+        # above stops lining up with the scene.
+        policies.restore(sim_checkpoint["policy_state"])
         if anchor_teleporter is not None:
             anchor_teleporter.teleport_to_robot(robot)
         if target_hud is not None:
@@ -2202,7 +2422,38 @@ def main() -> None:
                         last_neck_targets = (0.0, 0.0)
                         neck_yaw_cmd, neck_pitch_cmd = last_neck_targets
 
-                    legs = policy_leg_targets(net, vx, vy, wz)
+                    body_targets = policies.step(loco_mode, vx, vy, wz)
+                    legs = body_targets[:LEGS_ACTION_DIM]
+                    if loco_mode == "locomotion" and walk_arm_drive != "never":
+                        # when_free hands the arms back the instant the operator
+                        # squeezes: swinging the shoulders while carrying a product
+                        # drags the hand through space and can break the grasp. The
+                        # gate reads the squeeze already recorded as teleop_state[:,1],
+                        # so replay reproduces it from the dataset.
+                        engage = walk_arm_drive == "always" or squeeze_cmd <= _ARM_DRIVE_SQUEEZE_EPS
+                        if engage and not arm_drive_engaged:
+                            # Re-seed on every re-engage, not just mode entry: the
+                            # arms have been frozen wherever the grasp left them.
+                            seed_loco_arm_blend()
+                        arm_drive_engaged = engage
+                        if engage:
+                            arm_raw = torch.as_tensor(
+                                body_targets[POLICY_MODEL_ARM_SLICE],
+                                dtype=torch.float32,
+                                device=base_env.device,
+                            ).unsqueeze(0).repeat(base_env.num_envs, 1)
+                            arm_alpha = 1.0
+                            if loco_arm_blend_from is not None:
+                                loco_arm_blend_steps_done += 1
+                                arm_alpha = smoothstep(
+                                    loco_arm_blend_steps_done / loco_arm_blend_total
+                                )
+                                if loco_arm_blend_steps_done >= loco_arm_blend_total:
+                                    loco_arm_blend_from = None
+                            pink_hold.set_arm_targets(
+                                arm_raw, blend_from=loco_arm_blend_from, alpha=arm_alpha
+                            )
+                            arms_moved_by_policy = True
                     legs_tensor = torch.as_tensor(legs, dtype=torch.float32, device=base_env.device)
                     legs_tensor = legs_tensor.unsqueeze(0).repeat(base_env.num_envs, 1)
                     neck_tensor = torch.tensor(
@@ -2216,7 +2467,7 @@ def main() -> None:
                         base_env,
                         loco_mode=loco_mode,
                         squeeze=squeeze_cmd,
-                        legacy_gains=args_cli.legacy_stiff_teleop,
+                        legacy_gains=False,
                     )
                     env.step(actions)
                     # From here on joint_pos_target holds a real command, so the
@@ -2237,7 +2488,9 @@ def main() -> None:
                             else ""
                         )
                         print(
-                            f"[step {step_count}] mode={loco_mode} upper={upper_body_mode} "
+                            f"[step {step_count}] mode={loco_mode}"
+                            f"{'/' + policies.active_type if policies.multi_policy else ''} "
+                            f"upper={upper_body_mode} "
                             f"pos=({robot_pos[0]:.2f},{robot_pos[1]:.2f}) yaw={robot_yaw:.2f} "
                             f"cmd=({vx:.2f},{vy:.2f},{wz:.2f}) keys={controller_pressed()} "
                             f"hz={effective_hz:.1f} "
@@ -2356,7 +2609,7 @@ def main() -> None:
                         idle_upper,
                     ) = reset_teleop_state(
                         env=base_env,
-                        net=net,
+                        policies=policies,
                         robot=robot,
                         teleop_interface=teleop_interface,
                         loco_mode="locomotion",

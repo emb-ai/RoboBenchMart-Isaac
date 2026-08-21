@@ -106,7 +106,6 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
     update_loco_arrived,
     wrap_angle,
 )
-from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
     policy_leg_targets,
@@ -134,7 +133,6 @@ def main() -> None:
 
     net = Network(env, type="zest", device="cpu", closed_kinematics=True)
     net.reset()
-    apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
     robot = env.scene["robot"]
     upper_body_dim = env.action_manager.total_action_dim - LEGS_ACTION_DIM
     print(
@@ -373,7 +371,6 @@ def main() -> None:
                 if should_reset:
                     env.reset()
                     net.reset()
-                    apply_sberchel_xr_teleop_pd_gains(robot)
                     teleop_interface.reset()
                     yaw_mode = "bearing"
                     bearing_yaw_active = False

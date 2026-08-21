@@ -157,7 +157,6 @@ from isaaclab_tasks.utils import parse_env_cfg
 sys.path.append(".")
 import dsynth_isaac.tasks.manager_based  # noqa: F401
 
-from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
     policy_leg_targets,
@@ -412,7 +411,6 @@ def main() -> None:
 
     net = Network(env, type="zest", device="cpu", closed_kinematics=True)
     net.reset()
-    apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
     robot = env.scene["robot"]
     hold_xy = _capture_hold_xy(robot)
     upper_body_dim = env.action_manager.total_action_dim - LEGS_ACTION_DIM
@@ -664,7 +662,6 @@ def main() -> None:
                     env.reset()
                     net.reset()
                     hold_xy = _capture_hold_xy(robot)
-                    apply_sberchel_xr_teleop_pd_gains(robot)
                     teleop_interface.reset()
                     ref_plane_yaw = None
                     ref_head_yaw = None

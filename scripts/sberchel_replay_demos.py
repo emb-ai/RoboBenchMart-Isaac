@@ -34,6 +34,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _repo_root not in sys.path:
@@ -168,10 +169,26 @@ parser.add_argument(
     choices=("policy_loco", "processed_joint_targets", "actions"),
     default="policy_loco",
     help=(
-        "Replay command source. 'policy_loco' (default) runs the zest leg policy from recorded "
-        "loco_commands and applies recorded upper-body joint targets. "
-        "'processed_joint_targets' applies recorded post-IK joint targets directly. "
-        "'actions' feeds raw 40D Pink+leg+neck actions through the env (re-solves IK)."
+        "Replay command source. 'policy_loco' (default) re-runs the recorded leg "
+        "policy from recorded loco_commands and applies recorded upper-body joint "
+        "targets. 'processed_joint_targets' applies recorded post-IK joint targets "
+        "directly. 'actions' feeds raw 40D Pink+leg+neck actions through the env "
+        "(re-solves IK); it is rejected for datasets whose arms were driven by the "
+        "walk policy, because the raw upper action still holds the frozen-snapshot "
+        "IK targets rather than what actually ran."
+    ),
+)
+parser.add_argument(
+    "--loco_policy",
+    type=str,
+    choices=("auto", "zest", "walk"),
+    default="auto",
+    help=(
+        "Which policy drives the legs during LOCOMOTION segments. 'auto' (default) "
+        "reads sberchel_loco_policy_by_mode from the dataset's env_args, so a replay "
+        "reproduces whatever the recording used; datasets written before that key "
+        "existed are single-policy zest. Override only to A/B a policy against a "
+        "recording it did not produce."
     ),
 )
 parser.add_argument(
@@ -317,9 +334,8 @@ from dsynth_isaac.recorders.sberchel_xr_recorders import (
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
     NECK_ACTION_DIM,
-    policy_leg_targets,
+    LocoPolicySet,
 )
-from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
 from dsynth_isaac.robots.sberchel_camera_cfg import (
     SBERCHEL_CAMERA_OBS_KEYS,
     apply_sberchel_camera_size,
@@ -400,8 +416,6 @@ def make_third_person_camera_cfg(size: tuple[int, int]) -> CameraCfg:
         ),
     )
 
-
-from green_challenge.policy.network import Network
 
 is_paused = False
 
@@ -484,7 +498,6 @@ def build_replay_idle_action(env, env_cfg, num_envs: int) -> torch.Tensor:
 
 def prepare_sberchel_xr_episode_replay(env, env_cfg, num_envs: int) -> torch.Tensor:
     """Re-apply teleop PD gains and rebuild idle actions after ``reset`` / ``reset_to``."""
-    apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
     return build_replay_idle_action(env, env_cfg, num_envs)
 
 
@@ -508,12 +521,26 @@ def get_next_replay_command(episode_data: EpisodeData, replay_source: str) -> to
     return episode_data.get_next_action()
 
 
-def get_next_policy_loco_step(episode_data: EpisodeData) -> tuple[torch.Tensor, torch.Tensor] | None:
-    """Return recorded ``(loco_commands, processed_actions)`` for the next step."""
+class PolicyLocoStep(NamedTuple):
+    """One recorded step's inputs for ``policy_loco`` replay.
+
+    A named tuple rather than a bare one: this is unpacked and stored at four
+    sites, and a silent arity change is exactly how a per-step misalignment gets
+    introduced.
+    """
+
+    loco_command: torch.Tensor
+    processed_actions: torch.Tensor
+    is_locomotion: bool
+
+
+def get_next_policy_loco_step(episode_data: EpisodeData) -> PolicyLocoStep | None:
+    """Return the recorded command, joint targets and mode for the next step."""
     if episode_data.is_empty():
         return None
     loco_commands = episode_data.data.get("loco_commands")
     processed_actions = episode_data.data.get("processed_actions")
+    teleop_state = episode_data.data.get("teleop_state")
     if loco_commands is None:
         raise ValueError(
             "Dataset episode is missing 'loco_commands' required for policy_loco replay. "
@@ -527,7 +554,13 @@ def get_next_policy_loco_step(episode_data: EpisodeData) -> tuple[torch.Tensor, 
     if index >= len(loco_commands):
         return None
     episode_data.next_action_index = index + 1
-    return loco_commands[index], processed_actions[index]
+    # teleop_state[:, 0] is the recorder's locomotion flag, i.e. the per-step
+    # selector between the two policies. Datasets written before it existed are
+    # single-policy anyway, so the default never picks the wrong net.
+    is_locomotion = True
+    if teleop_state is not None and index < len(teleop_state):
+        is_locomotion = bool(float(teleop_state[index].reshape(-1)[0]) > 0.5)
+    return PolicyLocoStep(loco_commands[index], processed_actions[index], is_locomotion)
 
 
 def _processed_term_dims(env) -> tuple[int, int, int]:
@@ -809,7 +842,6 @@ def sync_scene_to_recorded_state(env, recorded_state: dict, env_id: int, zero_ve
     if zero_velocities:
         recorded_state = _zero_state_velocities(recorded_state)
     env.scene.reset_to(recorded_state, env_ids=env_ids, is_relative=True)
-    apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
     env.scene.write_data_to_sim()
     env.sim.forward()
 
@@ -1050,6 +1082,38 @@ def main() -> None:
             flush=True,
         )
 
+    # Which policy drove each half of the recording. Datasets written before
+    # per-mode policies existed carry no key and were single-policy zest.
+    _replay_loco_by_mode = dict(
+        _dataset_env_args.get("sberchel_loco_policy_by_mode")
+        or {"locomotion": "zest", "static": "zest"}
+    )
+    if args_cli.loco_policy != "auto":
+        _replay_loco_by_mode["locomotion"] = args_cli.loco_policy
+        print(
+            f"Warning: --loco_policy {args_cli.loco_policy} overrides the dataset's "
+            f"recorded locomotion policy; the replay is an A/B, not a reproduction.",
+            flush=True,
+        )
+    _replay_walk_decimation = int(_dataset_env_args.get("sberchel_walk_policy_decimation", 1))
+    _replay_multi_policy = len(set(_replay_loco_by_mode.values())) > 1
+    if _replay_multi_policy and args_cli.replay_source == "policy_loco" and num_envs > 1:
+        raise ValueError(
+            "policy_loco replay of a multi-policy dataset requires --num_envs 1: the "
+            "per-env modes diverge, but the leg PD swap writes every env row and one "
+            "Network reads env 0 only, so the other envs would run the wrong policy "
+            "on the wrong gains."
+        )
+    if args_cli.replay_source == "actions" and (
+        _dataset_env_args.get("sberchel_walk_arm_drive", "never") != "never"
+    ):
+        raise ValueError(
+            "This dataset's arms were driven by the walk policy during locomotion, so "
+            "the raw 'actions' rows still hold the frozen-snapshot IK targets rather "
+            "than what was applied. Use --replay_source policy_loco (default) or "
+            "processed_joint_targets, both of which carry the executed arm targets."
+        )
+
     recorded_enhanced_determinism = bool(_dataset_env_args.get("sberchel_enhanced_determinism", False))
     enhanced_determinism = args_cli.enhanced_determinism or recorded_enhanced_determinism
     if recorded_enhanced_determinism and not args_cli.enhanced_determinism:
@@ -1181,11 +1245,25 @@ def main() -> None:
     env = gym_env.unwrapped
     assert_dataset_matches_robot(_dataset_env_args, env.scene["robot"])
     # FrictionalActuator zeros stiffness wherever force_control=true (all loco
-    # joints). Network.__init__ restores the policy PD gains required for
-    # joint-position tracking. Recording always constructs Network; replay must
-    # too even when not stepping the policy each frame.
-    policy_net = Network(env, type="zest", device="cpu", closed_kinematics=True)
-    policy_net.reset()
+    # joints). The policy PD gains required for joint-position tracking are
+    # restored by Network.__init__ and re-asserted on every activate. Recording
+    # always constructs these; replay must too even when not stepping the policy
+    # each frame.
+    policies = LocoPolicySet(
+        env,
+        _replay_loco_by_mode,
+        decimation={"walk": _replay_walk_decimation},
+        device="cpu",
+    )
+    policies.reset_all()
+    policies.reassert("locomotion")
+    if policies.multi_policy:
+        print(
+            f">>> loco policy: locomotion={policies.type_for('locomotion')} "
+            f"static={policies.type_for('static')} "
+            f"(one fixed green_challenge plant; decimation={_replay_walk_decimation})",
+            flush=True,
+        )
 
     output_dataset_handler = None
     if camera_augment:
@@ -1257,20 +1335,24 @@ def main() -> None:
     state_sync_enabled = (
         args_cli.replay_source == "processed_joint_targets" and not args_cli.no_state_sync
     )
+    _policy_desc = (
+        f"locomotion={_replay_loco_by_mode.get('locomotion', 'zest')} "
+        f"static={_replay_loco_by_mode.get('static', 'zest')}"
+    )
     if args_cli.replay_source == "policy_loco":
-        print("Replay source: policy_loco (zest leg policy + recorded upper-body joint targets)")
-        print("Zest policy: active (device=cpu); locomotion PD restored via Network")
+        print(f"Replay source: policy_loco ({_policy_desc} + recorded upper-body joint targets)")
+        print(f"Leg policy: active (device=cpu; {_policy_desc}); PD restored per policy")
         print("State sync: disabled (closed-loop leg policy)")
     elif args_cli.replay_source == "processed_joint_targets":
         print("Replay source: processed_joint_targets (direct joint PD targets from recording)")
-        print("Zest policy: inactive (Network used only to restore locomotion PD gains)")
+        print("Leg policy: inactive (constructed only to restore locomotion PD gains)")
         if state_sync_enabled:
             print("State sync: enabled (inject previous recorded scene state before each step)")
         else:
             print("State sync: disabled (open-loop replay)")
     else:
         print("Replay source: actions (raw Pink IK + leg actions; may diverge from recording)")
-        print("Zest policy: inactive (Network used only to restore locomotion PD gains)")
+        print("Leg policy: inactive (constructed only to restore locomotion PD gains)")
         print("State sync: disabled")
 
     fast_export = bool(args_cli.fast_export)
@@ -1357,7 +1439,7 @@ def main() -> None:
     # Per-demo state-validation verdicts, stamped onto output demo attrs so a
     # bad replay is visible downstream instead of only in a scrolled-away log.
     validation_mismatches_by_demo: dict[int, int] = {}
-    policy_loco_steps: list[tuple[torch.Tensor, torch.Tensor] | None] = [None] * num_envs
+    policy_loco_steps: list[PolicyLocoStep | None] = [None] * num_envs
     export_episode_snapshots: list[EpisodeData | None] = [None] * num_envs
     camera_frame_buffers: list[dict[str, list[torch.Tensor]]] = [
         {key: [] for key in export_img_keys} for _ in range(num_envs)
@@ -1516,8 +1598,11 @@ def main() -> None:
                                 env.scene.update(dt=env.physics_dt)
                             # Refresh filler row after reset so this env does not keep a stale idle clone.
                             actions[env_id] = idle_action[env_id]
-                            if policy_net is not None:
-                                policy_net.reset()
+                            # Every net, and clear the active latch, so the first
+                            # step of the episode re-runs the full activate
+                            # sequence the recorder ran at its episode start.
+                            policies.reset_all()
+                            policies.reassert("locomotion")
                             initial_root_z = env.scene["robot"].data.root_pos_w[env_id, 2].item()
                             if state_validation_enabled:
                                 validation_mismatches_by_demo[next_episode_index] = 0
@@ -1652,13 +1737,18 @@ def main() -> None:
                         step_data = policy_loco_steps[env_id]
                         if step_data is None:
                             continue
-                        loco_cmd, processed = step_data
+                        loco_cmd = step_data.loco_command
+                        processed = step_data.processed_actions
                         if loco_cmd.ndim == 0:
                             loco_values = loco_cmd.reshape(-1)
                         else:
                             loco_values = loco_cmd.reshape(-1)[:3]
                         vx, vy, wz = (float(v) for v in loco_values.tolist())
-                        legs = policy_leg_targets(policy_net, vx, vy, wz)
+                        # Same selector, decimation and reset-on-swap rule the
+                        # recorder used, driven off the recorded mode flag: row k
+                        # of loco_commands and teleop_state describe the same step.
+                        mode = "locomotion" if step_data.is_locomotion else "static"
+                        legs = policies.step(mode, vx, vy, wz)[:LEGS_ACTION_DIM]
                         legs_batch[env_id] = torch.as_tensor(legs, dtype=torch.float32, device=env.device)
                         _legs_t, neck_t, upper_t = _split_processed_joint_targets(
                             processed.to(device=env.device, dtype=torch.float32), env

@@ -125,7 +125,6 @@ from dsynth_isaac.teleop.sberchel_head_follow import (
     update_loco_arrived,
     wrap_angle,
 )
-from dsynth_isaac.robots.sberchel_cfg import apply_sberchel_xr_teleop_pd_gains
 from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     LEGS_ACTION_DIM,
     policy_leg_targets,
@@ -203,7 +202,6 @@ def reset_teleop_state(
 ) -> tuple[YawMode, bool, bool, bool, FrozenUpperSnapshot | None, torch.Tensor | None, torch.Tensor]:
     """Reset policy, teleop, and head-follow state after env.reset()."""
     net.reset()
-    apply_sberchel_xr_teleop_pd_gains(robot)
     teleop_interface.reset()
     sync_retargeter_idle_from_robot(teleop_interface, robot)
     idle_upper = build_idle_upper_from_robot(robot, env.device)
@@ -222,7 +220,6 @@ def main() -> None:
 
     net = Network(env, type="zest", device="cpu", closed_kinematics=True)
     net.reset()
-    apply_sberchel_xr_teleop_pd_gains(env.scene["robot"])
     robot = env.scene["robot"]
     upper_body_dim = env.action_manager.total_action_dim - LEGS_ACTION_DIM
     print(

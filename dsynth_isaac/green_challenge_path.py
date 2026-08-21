@@ -15,7 +15,7 @@ import importlib.util
 import os
 import sys
 
-DEFAULT_GREEN_CHALLENGE_PATH = "/home/krapukhin/projects/green-challenge"
+DEFAULT_GREEN_CHALLENGE_PATH = "/home/krapukhin/projects/green_challenge"
 
 _PACKAGE = "green_challenge"
 

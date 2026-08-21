@@ -11,10 +11,13 @@ wrist dofs are therefore the *crank* joints, exactly as in their
 ``*_ankle_roll`` and ``*_wrist_pitch`` are passive outputs driven through the
 linkage.
 
-``SBERCHEL_UPPERBODY_XR_ROBOT`` adds a fixed pelvis + ImplicitActuator PD for
-upper-body XR teleop. ``SBERCHEL_XR_LOCOMOTION_NECK_ROBOT`` is free-floating
-with policy leg actuators, XR arm PD and a separate ImplicitActuator neck group
-for headset look control.
+``SBERCHEL_UPPERBODY_XR_ROBOT`` adds a fixed pelvis for upper-body XR teleop.
+``SBERCHEL_XR_LOCOMOTION_NECK_ROBOT`` is free-floating and is the robot demos are
+recorded on: it splits green_challenge's single ``motors`` group into a
+``locomotion`` half (legs + torso, driven by the RL policy) and an ``xr_upper``
+half (arms, wrists, fingers, neck, driven by Pink IK and the headset). Both
+halves keep their actuator class, gains, friction model, armature and limits --
+the split is about who commands each joint, not about what the joint is.
 """
 
 from pathlib import Path
@@ -28,6 +31,8 @@ _GREEN_CHALLENGE_ROOT = ensure_green_challenge_importable()
 from green_challenge.assets.robot_v3_0a.utils.config_manager import ConfigManager
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
+
+from dsynth_isaac.robots.sberchel_self_collision import with_mjcf_self_collision_filters
 
 _GC_ROBOT_DIR = (
     Path(_GREEN_CHALLENGE_ROOT)
@@ -64,11 +69,22 @@ _base = _cm.load_config("sberchel_v3_0_alpha_locomanipulation_full")
 
 # The serialized ``asset_path`` is a stale absolute path from the machine the
 # config was captured on, and ``usd_dir`` is null; point both at this checkout.
+#
+# ``func`` is green_challenge's ``spawn_from_mjcf`` with one post-spawn pass
+# added: the importer drops every ``contype``/``conaffinity`` mask, so PhysX
+# collides link pairs MuJoCo never does. Inside the hand that jams the thumb
+# against the palm at the open-hand pose and makes both thumbs chatter at half
+# the sim rate; see ``sberchel_self_collision``.
+# green_challenge's unwrapped spawner, kept so a check script can spawn the
+# masks-lost plant side by side with ours (scripts/sberchel_check_thumb_yaw.py).
+GREEN_CHALLENGE_SPAWN_FUNC = _base.spawn.func
+
 SBERCHEL_CONFIG = _base.replace(
     spawn=_base.spawn.replace(
         asset_path=str(_CLOSED_MJCF_PATH),
         usd_dir=str(_USD_CACHE_DIR),
         usd_file_name="v3_0_alpha_locomanipulator.usd",
+        func=with_mjcf_self_collision_filters(GREEN_CHALLENGE_SPAWN_FUNC, _CLOSED_MJCF_PATH),
     ),
 )
 
@@ -80,15 +96,55 @@ SBERCHEL_CONFIG = _base.replace(
 WRIST_MOTOR_JOINT_EXPR = ".*_wrist_crank_joint"
 WRIST_OUTPUT_JOINT_EXPR = ".*_wrist_pitch_joint"
 
-_XR_ARM_STIFFNESS = 3000.0
-_XR_ARM_DAMPING = 100.0
-_XR_FINGER_STIFFNESS = 400.0
-_XR_FINGER_DAMPING = 40.0
-_XR_NECK_STIFFNESS = 200.0
-_XR_NECK_DAMPING = 20.0
 _XR_LOCK_STIFFNESS = 10000.0
 _XR_LOCK_DAMPING = 1000.0
 
+# --- green_challenge-native PD -----------------------------------------------
+#
+# Their live entry point (``run.sh``) passes ``--deactivate_torque``, so
+# ``ENABLE_JOINT_MANAGER_TORQUE_CONTROL`` is False: ``jm_step`` never runs, the
+# 1.4x position->torque path is off, and ``cfg.actions`` falls back to
+# ``ExampleActionsPosCfg`` -- plain ``JointPositionAction`` on every group, the
+# same way we drive the robot.
+#
+# So the plant is whatever sits in ``actuator.stiffness`` at run time, and that
+# is set in two steps:
+#
+#   1. ``FrictionalActuator.__init__`` zeroes stiffness/damping wherever
+#      ``force_control`` is true -- all 25 body joints. Wrists and fingers are
+#      force_control False and keep the cfg values (40/40/10).
+#   2. ``Network.__init__`` -> ``_restore_pd_gains_from_policy_cfg`` writes the
+#      *policy* config's ``control.stiffness``/``damping`` for exactly those 25
+#      body joints. That is the plant, and it follows whichever controller is
+#      loaded (zest: 61.1/3.2 shoulders, 221.7 knee; walk: 30/1.5 and 350).
+#
+# Nothing here should therefore hardcode body-joint gains. Both groups below are
+# green_challenge's ``motors`` group restricted to a joint subset, unchanged in
+# every other respect, and the gains arrive with the policy.
+#
+# The fixed-base rig further down never loads a policy, so it needs literal
+# numbers; those are zest's, spelled out at its definition.
+
+# Joint patterns the ``xr_upper`` group owns: arms, wrists, fingers, neck. The
+# legs and torso are the complement, in ``_locomotion_actuators`` below.
+_UPPER_JOINT_EXPRS: list[str] = [
+    ".*_shoulder_pitch_joint",
+    ".*_shoulder_roll_joint",
+    ".*_shoulder_yaw_joint",
+    ".*_elbow_pitch_joint",
+    ".*_elbow_yaw_joint",
+    WRIST_MOTOR_JOINT_EXPR,
+    ".*_wrist_roll_joint",
+    ".*_thumb_proximal_yaw_joint",
+    ".*_thumb_proximal_pitch_joint",
+    ".*_index_proximal_joint",
+    ".*_middle_proximal_joint",
+    ".*_ring_proximal_joint",
+    ".*_pinky_proximal_joint",
+    "neck_yaw_joint",
+    "neck_pitch_joint",
+]
+_UPPER_JOINT_EXPR_SET = frozenset(_UPPER_JOINT_EXPRS)
 
 def _passive_actuators() -> dict:
     """green_challenge's ``passive`` group for the linkage output joints.
@@ -156,14 +212,19 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
                 ".*_ankle_.*": _XR_LOCK_STIFFNESS,
                 "torso_yaw_joint": _XR_LOCK_STIFFNESS,
                 "neck_.*": _XR_LOCK_STIFFNESS,
-                ".*_shoulder_.*": _XR_ARM_STIFFNESS,
-                ".*_elbow_.*": _XR_ARM_STIFFNESS,
-                ".*_wrist_.*": _XR_ARM_STIFFNESS,
-                ".*_thumb_proximal_.*": _XR_FINGER_STIFFNESS,
-                ".*_index_proximal_joint": _XR_FINGER_STIFFNESS,
-                ".*_middle_proximal_joint": _XR_FINGER_STIFFNESS,
-                ".*_ring_proximal_joint": _XR_FINGER_STIFFNESS,
-                ".*_pinky_proximal_joint": _XR_FINGER_STIFFNESS,
+                # Legs/torso/neck stay locked above. This rig never constructs a
+                # Network, so the arm gains cannot arrive with a policy: these are
+                # zest's control.stiffness values written out literally.
+                ".*_shoulder_pitch_joint": 61.1,
+                ".*_shoulder_roll_joint": 61.1,
+                ".*_shoulder_yaw_joint": 25.6,
+                ".*_elbow_.*": 25.6,
+                ".*_wrist_.*": 40.0,
+                ".*_thumb_proximal_.*": 40.0,
+                ".*_index_proximal_joint": 10.0,
+                ".*_middle_proximal_joint": 10.0,
+                ".*_ring_proximal_joint": 10.0,
+                ".*_pinky_proximal_joint": 10.0,
             },
             damping={
                 ".*_hip_.*": _XR_LOCK_DAMPING,
@@ -171,14 +232,16 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
                 ".*_ankle_.*": _XR_LOCK_DAMPING,
                 "torso_yaw_joint": _XR_LOCK_DAMPING,
                 "neck_.*": _XR_LOCK_DAMPING,
-                ".*_shoulder_.*": _XR_ARM_DAMPING,
-                ".*_elbow_.*": _XR_ARM_DAMPING,
-                ".*_wrist_.*": _XR_ARM_DAMPING,
-                ".*_thumb_proximal_.*": _XR_FINGER_DAMPING,
-                ".*_index_proximal_joint": _XR_FINGER_DAMPING,
-                ".*_middle_proximal_joint": _XR_FINGER_DAMPING,
-                ".*_ring_proximal_joint": _XR_FINGER_DAMPING,
-                ".*_pinky_proximal_joint": _XR_FINGER_DAMPING,
+                ".*_shoulder_pitch_joint": 3.2,
+                ".*_shoulder_roll_joint": 3.2,
+                ".*_shoulder_yaw_joint": 1.4,
+                ".*_elbow_.*": 1.4,
+                ".*_wrist_.*": 1.0,
+                ".*_thumb_proximal_.*": 2.0,
+                ".*_index_proximal_joint": 1.0,
+                ".*_middle_proximal_joint": 1.0,
+                ".*_ring_proximal_joint": 1.0,
+                ".*_pinky_proximal_joint": 1.0,
             },
             effort_limit={
                 ".*_hip_pitch_joint": 380.0,
@@ -207,6 +270,7 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
 
 # Upper-body / finger keys in motors cfg — not on the locomotion actuator group.
 _LOCOMOTION_GAIN_SKIP = (
+    "neck",
     "shoulder",
     "elbow",
     "wrist",
@@ -220,80 +284,68 @@ _LOCOMOTION_GAIN_SKIP = (
 )
 
 
-def _locomotion_gain_dict(mapping: dict | None, *, include_neck: bool = True) -> dict | None:
-    """Keep leg/torso(/neck) gain keys only (for split ``locomotion`` actuators)."""
+def _locomotion_gain_dict(mapping: dict | None) -> dict | None:
+    """Keep leg/torso gain keys only (for the split ``locomotion`` group)."""
     if mapping is None:
         return None
-    skip = _LOCOMOTION_GAIN_SKIP if include_neck else _LOCOMOTION_GAIN_SKIP + ("neck",)
     return {
         key: value
         for key, value in mapping.items()
-        if not any(s in key for s in skip)
+        if not any(s in key for s in _LOCOMOTION_GAIN_SKIP)
     }
 
 
-def _xr_upper_actuator() -> ImplicitActuatorCfg:
-    """ImplicitActuator PD for XR arm/finger teleop.
+def _upper_gain_dict(mapping: dict | None) -> dict | None:
+    """Keep only the entries whose pattern is one of the upper-body joints."""
+    if mapping is None:
+        return None
+    return {key: value for key, value in mapping.items() if key in _UPPER_JOINT_EXPR_SET}
 
-    Drives ``*_wrist_crank_joint`` -- the motor dof of the wrist four-bar --
-    not the passive ``*_wrist_pitch_joint`` output.
+
+def _xr_upper_actuator():
+    """green_challenge's ``motors`` group, restricted to arms/wrists/fingers/neck.
+
+    Same actuator class, armature, friction model, effort and velocity limits as
+    their single ``motors`` group -- only the joint subset differs, because we
+    split legs and torso into their own group. Two deliberate deviations, both
+    forced by the fact that we command positions where they command torque:
+
+    Nothing is overridden -- not the gains, not ``force_control``. The 25 body
+    joints are force-controlled, so their cfg gains get zeroed at init and the
+    real ones arrive when ``Network.__init__`` restores the loaded policy's
+    table; wrists and fingers are position-controlled and keep the cfg's 40/40/10.
+    That is exactly the sequence green_challenge runs.
+
+    Drives ``*_wrist_crank_joint`` -- the motor dof of the wrist four-bar -- not
+    the passive ``*_wrist_pitch_joint`` output.
+
+    This group used to be an ``ImplicitActuatorCfg`` at 3000/100. Implicit gains
+    reach PhysX exactly once, in ``Articulation._process_actuators_cfg``, and
+    nothing re-reads ``actuator.stiffness`` afterwards -- so the runtime
+    re-assert below could never move them, and every demo recorded before this
+    change ran with arms ~70x stiffer than the plant it was meant to match.
     """
-    return ImplicitActuatorCfg(
-        joint_names_expr=[
-            ".*_shoulder_pitch_joint",
-            ".*_shoulder_roll_joint",
-            ".*_shoulder_yaw_joint",
-            ".*_elbow_pitch_joint",
-            ".*_elbow_yaw_joint",
-            WRIST_MOTOR_JOINT_EXPR,
-            ".*_wrist_roll_joint",
-            ".*_thumb_proximal_yaw_joint",
-            ".*_thumb_proximal_pitch_joint",
-            ".*_index_proximal_joint",
-            ".*_middle_proximal_joint",
-            ".*_ring_proximal_joint",
-            ".*_pinky_proximal_joint",
-        ],
-        stiffness={
-            ".*_shoulder_.*": _XR_ARM_STIFFNESS,
-            ".*_elbow_.*": _XR_ARM_STIFFNESS,
-            ".*_wrist_.*": _XR_ARM_STIFFNESS,
-            ".*_thumb_proximal_.*": _XR_FINGER_STIFFNESS,
-            ".*_index_proximal_joint": _XR_FINGER_STIFFNESS,
-            ".*_middle_proximal_joint": _XR_FINGER_STIFFNESS,
-            ".*_ring_proximal_joint": _XR_FINGER_STIFFNESS,
-            ".*_pinky_proximal_joint": _XR_FINGER_STIFFNESS,
-        },
-        damping={
-            ".*_shoulder_.*": _XR_ARM_DAMPING,
-            ".*_elbow_.*": _XR_ARM_DAMPING,
-            ".*_wrist_.*": _XR_ARM_DAMPING,
-            ".*_thumb_proximal_.*": _XR_FINGER_DAMPING,
-            ".*_index_proximal_joint": _XR_FINGER_DAMPING,
-            ".*_middle_proximal_joint": _XR_FINGER_DAMPING,
-            ".*_ring_proximal_joint": _XR_FINGER_DAMPING,
-            ".*_pinky_proximal_joint": _XR_FINGER_DAMPING,
-        },
-        effort_limit={
-            ".*_shoulder_pitch_joint": 90.0,
-            ".*_shoulder_roll_joint": 90.0,
-            ".*_shoulder_yaw_joint": 36.0,
-            ".*_elbow_.*": 36.0,
-            ".*_wrist_.*": 16.0,
-            ".*_thumb_proximal_.*": 8.5,
-            ".*_index_proximal_joint": 8.5,
-            ".*_middle_proximal_joint": 8.5,
-            ".*_ring_proximal_joint": 8.5,
-            ".*_pinky_proximal_joint": 8.5,
-        },
-    )
+    from dataclasses import fields
+
+    motors = SBERCHEL_CONFIG.actuators["motors"]
+    overrides: dict = {"joint_names_expr": list(_UPPER_JOINT_EXPRS)}
+    for field in fields(motors):
+        if field.name == "class_type" or field.name in overrides:
+            continue
+        value = getattr(motors, field.name)
+        if isinstance(value, dict):
+            overrides[field.name] = _upper_gain_dict(value)
+    return motors.replace(**overrides)
 
 
-def _locomotion_actuators(*, neck_on_locomotion: bool = True):
-    """Frictional leg/torso actuators + ImplicitActuator arms for XR teleop.
+def _locomotion_actuators():
+    """green_challenge's ``motors`` group, split into legs/torso and upper body.
 
-    When ``neck_on_locomotion`` is False, neck joints are omitted from the
-    frictional group so a separate ImplicitActuator can drive them.
+    Their side has one group for the whole body. We split it only so the halves
+    can be commanded differently -- legs from the RL policy, upper body from Pink
+    IK -- not to change the plant: both keep the same actuator class, friction
+    model, armature and limits. The neck sits with the upper body because the
+    headset drives it as a position target.
     """
     from dataclasses import fields
 
@@ -307,35 +359,19 @@ def _locomotion_actuators(*, neck_on_locomotion: bool = True):
         ".*_ankle_b_crank_joint",
         "torso_yaw_joint",
     ]
-    if neck_on_locomotion:
-        leg_torso_expr.extend(["neck_yaw_joint", "neck_pitch_joint"])
     locomotion_overrides: dict = {"joint_names_expr": leg_torso_expr}
     for field in fields(motors):
         if field.name in ("class_type", "joint_names_expr"):
             continue
         value = getattr(motors, field.name)
         if isinstance(value, dict):
-            locomotion_overrides[field.name] = _locomotion_gain_dict(
-                value, include_neck=neck_on_locomotion
-            )
+            locomotion_overrides[field.name] = _locomotion_gain_dict(value)
     locomotion = motors.replace(**locomotion_overrides)
     return {
         "locomotion": locomotion,
         "xr_upper": _xr_upper_actuator(),
         **_passive_actuators(),
     }
-
-
-def _locomotion_actuators_with_neck_pd():
-    """Legs/torso frictional + neck ImplicitActuator PD + XR arm PD."""
-    actuators = _locomotion_actuators(neck_on_locomotion=False)
-    actuators["neck"] = ImplicitActuatorCfg(
-        joint_names_expr=["neck_yaw_joint", "neck_pitch_joint"],
-        stiffness={"neck_.*": _XR_NECK_STIFFNESS},
-        damping={"neck_.*": _XR_NECK_DAMPING},
-        effort_limit={"neck_.*": 36.0},
-    )
-    return actuators
 
 
 _xr_locomotion_joint_pos = dict(_upperbody_joint_pos)
@@ -349,130 +385,19 @@ SBERCHEL_XR_LOCOMOTION_NECK_ROBOT = ArticulationCfg(
         joint_pos=_xr_locomotion_joint_pos,
         joint_vel=SBERCHEL_CONFIG.init_state.joint_vel,
     ),
-    actuators=_locomotion_actuators_with_neck_pd(),
+    actuators=_locomotion_actuators(),
     soft_joint_pos_limit_factor=SBERCHEL_CONFIG.soft_joint_pos_limit_factor,
 )
 
 
-# --- green_challenge-native upper-body PD ------------------------------------
-#
-# These are the gains the green_challenge evaluation env actually runs, so demos
-# recorded with them are demos of a plant that exists. Two sources combine:
-#
-#   1. ``sberchel_v3_0_alpha_locomanipulation_full.json`` (the same interface JSON
-#      this module loads at import time) gives the raw per-joint PD.
-#   2. green_challenge routes *body* joints (legs, torso, arms, neck) through
-#      ``jm_step`` -> ``scripts/pos2torque.py``, which converts position targets
-#      to torque with ``kp_gain_scale = kd_gain_scale = 1.4``. That path is on by
-#      default (``ENABLE_JOINT_MANAGER_TORQUE_CONTROL``, ``envs/manip_env.py:44``;
-#      only an env var disables it). Wrists and fingers stay position-controlled
-#      and are NOT scaled.
-#
-# So the effective gains below are JSON x 1.4 for arms/neck, JSON as-is for
-# wrists/fingers. Matching *effective* values is the point: raw JSON values would
-# leave us 1.4x soft on every arm joint.
-#
-# Per-joint detail matters and is easy to lose. green_challenge distinguishes
-# shoulder_yaw from shoulder pitch/roll, and thumb from the other four digits.
-# An earlier version of this table matched on substrings ("shoulder", "proximal")
-# and silently collapsed both, leaving the thumb -- the opposing digit that
-# carries most of the grip force -- 4x too soft. Match joints explicitly.
-_GC_KP_SCALE = 1.4  # pos2torque.py kp_gain_scale (body joints only)
-
-_GC_SHOULDER_PR_STIFFNESS = 30.0 * _GC_KP_SCALE  # 42.0  pitch / roll
-_GC_SHOULDER_PR_DAMPING = 1.5 * _GC_KP_SCALE  # 2.1
-_GC_SHOULDER_YAW_STIFFNESS = 20.0 * _GC_KP_SCALE  # 28.0
-_GC_SHOULDER_YAW_DAMPING = 1.0 * _GC_KP_SCALE  # 1.4
-_GC_ELBOW_STIFFNESS = 20.0 * _GC_KP_SCALE  # 28.0
-_GC_ELBOW_DAMPING = 1.0 * _GC_KP_SCALE  # 1.4
-_GC_NECK_STIFFNESS = 20.0 * _GC_KP_SCALE  # 28.0
-_GC_NECK_DAMPING = 1.0 * _GC_KP_SCALE  # 1.4
-# Position-controlled on their side: no 1.4 scale.
-_GC_WRIST_STIFFNESS = 40.0
-_GC_WRIST_DAMPING = 1.0
-_GC_THUMB_STIFFNESS = 40.0
-_GC_THUMB_DAMPING = 2.0
-_GC_FINGER_STIFFNESS = 10.0
-_GC_FINGER_DAMPING = 1.0
-
-
-def _gc_upper_gains_for_joint(j_name: str) -> tuple[float, float] | None:
-    """Return ``(stiffness, damping)`` for an ``xr_upper`` joint, or None.
-
-    Order matters: thumb must be tested before the generic ``proximal`` branch,
-    and shoulder yaw before the generic shoulder branch. The ``wrist`` branch
-    covers both ``wrist_crank`` (pitch motor) and ``wrist_roll``.
-    """
-    if "shoulder" in j_name:
-        if "yaw" in j_name:
-            return _GC_SHOULDER_YAW_STIFFNESS, _GC_SHOULDER_YAW_DAMPING
-        return _GC_SHOULDER_PR_STIFFNESS, _GC_SHOULDER_PR_DAMPING
-    if "elbow" in j_name:
-        return _GC_ELBOW_STIFFNESS, _GC_ELBOW_DAMPING
-    if "wrist" in j_name:
-        return _GC_WRIST_STIFFNESS, _GC_WRIST_DAMPING
-    if "thumb" in j_name:
-        return _GC_THUMB_STIFFNESS, _GC_THUMB_DAMPING
-    if "proximal" in j_name:
-        return _GC_FINGER_STIFFNESS, _GC_FINGER_DAMPING
-    return None
-
-
-def apply_sberchel_xr_teleop_pd_gains(robot) -> None:
-    """Raise arm/finger PD on ``xr_upper`` and neck PD when present."""
-    if "xr_upper" in robot.actuators:
-        actuator = robot.actuators["xr_upper"]
-        for local_idx, j_name in enumerate(actuator.joint_names):
-            if "shoulder" in j_name or "elbow" in j_name or "wrist" in j_name:
-                actuator.stiffness[:, local_idx] = _XR_ARM_STIFFNESS
-                actuator.damping[:, local_idx] = _XR_ARM_DAMPING
-            elif "proximal" in j_name:
-                actuator.stiffness[:, local_idx] = _XR_FINGER_STIFFNESS
-                actuator.damping[:, local_idx] = _XR_FINGER_DAMPING
-    if "neck" in robot.actuators:
-        neck = robot.actuators["neck"]
-        for local_idx, _j_name in enumerate(neck.joint_names):
-            neck.stiffness[:, local_idx] = _XR_NECK_STIFFNESS
-            neck.damping[:, local_idx] = _XR_NECK_DAMPING
-
-
-def apply_sberchel_loco_upper_pd_gains(robot, *, include_neck: bool = True) -> None:
-    """Set ``xr_upper`` (and neck) PD to green_challenge's effective gains.
-
-    This is the plant green_challenge evaluates on, so it is the plant demos
-    intended for their VLA must be recorded on. Use it for the whole session --
-    both WASD locomotion and static hand teleop -- not as one half of a runtime
-    gain switch: switching plants mid-episode makes the dataset non-Markovian
-    (identical observations, different action->outcome mapping) and produces a
-    transition their env has no analogue for.
-
-    ``include_neck=False`` keeps the stiff XR neck PD for headset look, at the
-    cost of diverging from their config (neck sits in their ``torso_joint_pos``
-    group and moves the head camera, so it does affect recorded images).
-    """
-    if "xr_upper" in robot.actuators:
-        actuator = robot.actuators["xr_upper"]
-        for local_idx, j_name in enumerate(actuator.joint_names):
-            gains = _gc_upper_gains_for_joint(j_name)
-            if gains is None:
-                continue
-            actuator.stiffness[:, local_idx] = gains[0]
-            actuator.damping[:, local_idx] = gains[1]
-    if include_neck and "neck" in robot.actuators:
-        neck = robot.actuators["neck"]
-        for local_idx, _j_name in enumerate(neck.joint_names):
-            neck.stiffness[:, local_idx] = _GC_NECK_STIFFNESS
-            neck.damping[:, local_idx] = _GC_NECK_DAMPING
-
-
 def sberchel_upper_pd_gain_table(robot) -> dict[str, tuple[float, float]]:
-    """Current ``(stiffness, damping)`` per joint for ``xr_upper`` + ``neck``.
+    """Current ``(stiffness, damping)`` per joint of every actuated group.
 
     Used for the startup gain dump and for recording gain provenance into the
     demo dataset, so a converter never has to guess what plant produced a demo.
     """
     table: dict[str, tuple[float, float]] = {}
-    for group in ("xr_upper", "neck"):
+    for group in ("locomotion", "xr_upper"):
         actuator = robot.actuators.get(group)
         if actuator is None:
             continue
