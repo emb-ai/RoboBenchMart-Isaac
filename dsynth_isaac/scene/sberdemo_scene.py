@@ -42,7 +42,8 @@ _STORE_PKG_VER4 = Path(__file__).resolve().parents[2] / "small_store_aij_ver4"
 # symlink here pointing at ../<package> - as ver2/ver3/ver4 have.
 _STORE_PKG_VER5 = Path(__file__).resolve().parents[2] / "small_store_aij_ver5_debranded"
 _STORE_PKG_VER6 = Path(__file__).resolve().parents[2] / "small_store_aij_ver6_blurred"
-STORE_USD = (_STORE_PKG_VER2 / "store.usd").resolve()
+_STORE_PKG_VER7 = Path(__file__).resolve().parents[2] / "small_store_aij_ver7"
+STORE_USD = (_STORE_PKG_VER7 / "store.usd").resolve()
 
 # Exported store layout (see small_store_aij/store.usd).
 STORE_DSYNTH_SUBPATH = "/World/envs/env_0/dsynth_scene"
