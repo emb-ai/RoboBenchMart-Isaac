@@ -30,7 +30,13 @@ from dsynth_isaac.tasks.manager_based.darkstore_base_cfg import TerminationsCfg
 
 @configclass
 class SberchelXRActionsCfg:
-    """Action layout: ``[legs(12), neck(2), upper_body_ik(26)]`` (legs first)."""
+    """Action layout: ``[legs(12), neck(2), upper_body_ik(26), torso_yaw(1)]``.
+
+    ``torso_yaw_joint_pos`` is declared last on purpose: appending it keeps the
+    first 40 dims identical to the layout every earlier dataset was recorded
+    with, so legacy rows replay by zero-padding the tail (zero = default pose =
+    exactly what an uncommanded torso_yaw did before the term existed).
+    """
 
     legs_joint_pos = mdp.JointPositionActionCfg(
         asset_name="robot",
@@ -45,6 +51,15 @@ class SberchelXRActionsCfg:
         preserve_order=True,
     )
     upper_body_ik = UpperbodySberchelXRActionsCfg().upper_body_ik
+    # The walk policy commands torso_yaw as part of its gait (torso
+    # counter-rotation); without this term that output had nowhere to go and the
+    # joint was PD-held at its default.
+    torso_yaw_joint_pos = mdp.JointPositionActionCfg(
+        asset_name="robot",
+        joint_names=["torso_yaw_joint"],
+        scale=1.0,
+        preserve_order=True,
+    )
 
 
 @configclass

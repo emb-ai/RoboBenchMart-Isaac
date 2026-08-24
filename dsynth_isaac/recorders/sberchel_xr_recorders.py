@@ -15,6 +15,7 @@ from isaaclab.utils import configclass
 
 LOCO_COMMAND_ATTR = "_sberchel_loco_command"
 TELEOP_STATE_ATTR = "_sberchel_teleop_state"
+ZEST_UPPER_REF_ATTR = "_sberchel_zest_upper_ref"
 
 # Optional dict set on an EpisodeData; each entry is written as an HDF5 attr on
 # the demo group at export (e.g. {"target_item": ..., "task_instruction": ...}).
@@ -72,6 +73,47 @@ def stash_teleop_state(env, *, loco_mode: str, squeeze: float, legacy_gains: boo
             device=env.device,
         ).repeat(env.num_envs, 1),
     )
+
+
+def stash_zest_upper_ref(env, ref: list[float]) -> None:
+    """Store the 13-value zest torso-block reference for the next recorder tick.
+
+    Layout: ``[torso_yaw, arms(10, POLICY_ARM_JOINT_NAMES order), neck_yaw,
+    neck_pitch]``, absolute radians -- exactly what the recorder fed into
+    ``Network.set_joint_overrides`` for this step. Replay needs it to re-run
+    zest bit-exact: unlike the velocity command, the reference cannot be
+    reconstructed from anything else in the dataset (it is the *previous* step's
+    raw Pink IK arm solution, which the processed arm targets no longer hold
+    once zest's output overwrites them).
+    """
+    setattr(
+        env,
+        ZEST_UPPER_REF_ATTR,
+        torch.tensor([list(ref)], dtype=torch.float32, device=env.device).repeat(
+            env.num_envs, 1
+        ),
+    )
+
+
+class ZestUpperRefRecorder(RecorderTerm):
+    """Record the stashed zest upper-body reference (zest_upper sessions only).
+
+    Returns no row when nothing was stashed, so legacy (non ``--zest_upper``)
+    sessions keep their exact dataset schema.
+    """
+
+    def record_pre_step(self):
+        ref = getattr(self._env, ZEST_UPPER_REF_ATTR, None)
+        if ref is None:
+            return None, None
+        return "zest_upper_ref", ref
+
+
+@configclass
+class ZestUpperRefRecorderCfg(RecorderTermCfg):
+    """Configuration for the zest upper-body reference recorder term."""
+
+    class_type: type[RecorderTerm] = ZestUpperRefRecorder
 
 
 class LocomotionCommandRecorder(RecorderTerm):
@@ -293,6 +335,7 @@ class SberchelXRRecorderManagerCfg(ActionStateRecorderManagerCfg):
 
     record_pre_step_loco_commands = LocomotionCommandRecorderCfg()
     record_pre_step_teleop_state = TeleopStateRecorderCfg()
+    record_pre_step_zest_upper_ref = ZestUpperRefRecorderCfg()
     record_post_step_joint_targets = PostStepJointTargetsRecorderCfg()
     record_post_step_store_products = PostStepStoreProductsRecorderCfg()
     record_pre_step_rgb_camera_observations = PreStepRgbCameraObservationsRecorderCfg()

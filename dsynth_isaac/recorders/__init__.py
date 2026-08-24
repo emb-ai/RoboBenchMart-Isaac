@@ -3,6 +3,7 @@
 from dsynth_isaac.recorders.sberchel_xr_recorders import (
     LOCO_COMMAND_ATTR,
     TELEOP_STATE_ATTR,
+    ZEST_UPPER_REF_ATTR,
     AsyncDatasetFileHandler,
     LocomotionCommandRecorder,
     LocomotionCommandRecorderCfg,
@@ -14,14 +15,18 @@ from dsynth_isaac.recorders.sberchel_xr_recorders import (
     SberchelXRRecorderManagerCfg,
     TeleopStateRecorder,
     TeleopStateRecorderCfg,
+    ZestUpperRefRecorder,
+    ZestUpperRefRecorderCfg,
     stash_episode_extra_attrs,
     stash_locomotion_command,
     stash_teleop_state,
+    stash_zest_upper_ref,
 )
 
 __all__ = [
     "LOCO_COMMAND_ATTR",
     "TELEOP_STATE_ATTR",
+    "ZEST_UPPER_REF_ATTR",
     "AsyncDatasetFileHandler",
     "LocomotionCommandRecorder",
     "LocomotionCommandRecorderCfg",
@@ -33,7 +38,10 @@ __all__ = [
     "SberchelXRRecorderManagerCfg",
     "TeleopStateRecorder",
     "TeleopStateRecorderCfg",
+    "ZestUpperRefRecorder",
+    "ZestUpperRefRecorderCfg",
     "stash_episode_extra_attrs",
     "stash_locomotion_command",
     "stash_teleop_state",
+    "stash_zest_upper_ref",
 ]

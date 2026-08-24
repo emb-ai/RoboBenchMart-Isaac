@@ -265,30 +265,48 @@ POLICY_ARM_JOINT_NAMES = [
 ]
 ARM_ACTION_DIM = len(POLICY_ARM_JOINT_NAMES)
 
+# Tail of the 25-target model-order vector: neck_yaw, neck_pitch. Together with
+# ``POLICY_TORSO_MODEL_INDEX`` and ``POLICY_MODEL_ARM_SLICE`` this accounts for
+# every non-leg output of ``Network.__call__``.
+POLICY_MODEL_NECK_SLICE = slice(23, 25)
 
-def policy_full_targets(net, vx: float, vy: float, wz: float) -> list[float]:
+
+def policy_full_targets(
+    net, vx: float, vy: float, wz: float, upper_ref: list[float] | None = None
+) -> list[float]:
     """Run ``net``; return all 25 joint targets in green_challenge model order.
 
     Values have the USD default pose already subtracted, because the leg/neck
     ``JointPositionActionCfg`` terms re-add it (``use_default_offset=True``).
     Anything writing *absolute* targets (``PinkJointHold``) must add it back.
 
+    ``upper_ref`` is zest's 13-value commander reference for the torso block --
+    ``[torso_yaw, arms(10, POLICY_ARM_JOINT_NAMES order), neck_yaw, neck_pitch]``
+    in *absolute* radians (the commander stores absolute joint refs; its
+    defaults for the whole torso block are 0.0 = the standing pose). ``None``
+    keeps the pre-existing behaviour of pinning the reference at that standing
+    pose, which is what frozen-arm locomotion wants.
+
     Both policy types are driven through here on purpose. ``set_command_detailed``
     does not filter by the commander's ``cmd_names`` -- it works for either type
     only because ``lin_vel_x/y`` and ``ang_vel_z`` exist in both. The
-    ``set_joint_overrides`` call is what zest needs to hold its upper-body
-    reference at zero; the walk policy's commander advertises only
-    ``lin_vel_x/y``, ``ang_vel_z`` and ``height_offset``, so every key below is
-    filtered out and the call is a no-op for it.
+    ``set_joint_overrides`` call is what zest needs for its upper-body
+    reference; the walk policy's commander advertises only ``lin_vel_x/y``,
+    ``ang_vel_z`` and ``height_offset``, so every key below is filtered out and
+    the call is a no-op for it.
 
     Never share an observation between two ``Network`` instances: the policy
     joint order differs per type, and the controllers mutate the obs dict in
     place (tensor coercion, default subtraction, zest's motor->joint mapping).
     ``net(net.obs())`` keeps each instance self-contained.
     """
+    if upper_ref is not None and len(upper_ref) != 13:
+        raise ValueError(
+            f"upper_ref must be 13 values (torso_yaw + 10 arms + 2 neck), got {len(upper_ref)}"
+        )
     net.set_command_detailed(vx, vy, wz)
     net.set_joint_overrides({
-        "torso_joint_pos": [0.0] * 13,
+        "torso_joint_pos": [0.0] * 13 if upper_ref is None else [float(v) for v in upper_ref],
         "wrist_joint_pos": [0.0] * 4,
         "finger_joint_pos": [0.0] * 12,
     })
@@ -503,12 +521,25 @@ class LocoPolicySet:
             self._phase[policy_type] = 0
             self._held[policy_type] = None
 
-    def step(self, mode: LocoMode, vx: float, vy: float, wz: float) -> list[float]:
+    def step(
+        self,
+        mode: LocoMode,
+        vx: float,
+        vy: float,
+        wz: float,
+        upper_ref: list[float] | None = None,
+    ) -> list[float]:
         """All 25 joint targets from ``mode``'s policy, honouring its decimation.
 
         Call once per *recorded* step. The phase counter advances only on those
         steps and is zeroed on every activation, so replay reconstructs it from
         the recorded mode transitions alone -- nothing extra has to be stored.
+
+        ``upper_ref`` (absolute 13-value torso-block reference, see
+        ``policy_full_targets``) reaches the commander only on inference steps;
+        on decimation-held steps the held targets are returned and the ref is
+        dropped. Only walk is decimated today and walk ignores the ref anyway,
+        so a zest ref is never silently lost.
         """
         net = self.activate(mode)
         policy_type = self._mode_map[mode]
@@ -517,7 +548,7 @@ class LocoPolicySet:
         if decim > 1 and held is not None and (self._phase[policy_type] % decim) != 0:
             self._phase[policy_type] += 1
             return held
-        targets = policy_full_targets(net, vx, vy, wz)
+        targets = policy_full_targets(net, vx, vy, wz, upper_ref=upper_ref)
         self._held[policy_type] = targets
         self._phase[policy_type] += 1
         return targets

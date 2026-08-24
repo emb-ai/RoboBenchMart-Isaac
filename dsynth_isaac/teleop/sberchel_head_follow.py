@@ -520,10 +520,12 @@ def pack_sberchel_xr_action(
     legs: torch.Tensor,
     upper: torch.Tensor,
     neck: torch.Tensor | None = None,
+    torso: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Concatenate ``[legs(12), neck(2), upper(26)]`` for Sberchel XR action layout.
+    """Concatenate ``[legs(12), neck(2), upper(26), torso_yaw(1)]`` for Sberchel XR.
 
-    If ``neck`` is None, inserts zeros matching ``legs`` batch/device/dtype.
+    If ``neck`` / ``torso`` is None, inserts zeros matching ``legs``
+    batch/device/dtype (zero action = default pose for the offset-based terms).
     """
     if legs.ndim == 1:
         legs = legs.unsqueeze(0)
@@ -533,7 +535,11 @@ def pack_sberchel_xr_action(
         neck = torch.zeros(legs.shape[0], 2, device=legs.device, dtype=legs.dtype)
     elif neck.ndim == 1:
         neck = neck.unsqueeze(0)
-    return torch.cat([legs, neck, upper], dim=-1)
+    if torso is None:
+        torso = torch.zeros(legs.shape[0], 1, device=legs.device, dtype=legs.dtype)
+    elif torso.ndim == 1:
+        torso = torso.unsqueeze(0)
+    return torch.cat([legs, neck, upper, torso], dim=-1)
 
 
 def clip(value: float, limit: float) -> float:

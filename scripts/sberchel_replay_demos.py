@@ -4,8 +4,10 @@
 # SPDX-License-Identifier: BSD-3-Clause
 """Replay Sberchel XR demonstrations recorded by ``sberchel_kb_record_demos.py`` / record scripts.
 
-Supports the 40D action layout ``[legs(12), neck(2), upper_body_ik(26)]`` with headset
-neck targets. Legacy 38D demos are padded with zero neck where needed.
+Supports the 41D action layout ``[legs(12), neck(2), upper_body_ik(26), torso_yaw(1)]``
+with headset neck targets. Legacy 40D demos (no torso_yaw term) are padded with a zero
+torso tail, legacy 38D demos additionally with zero neck — zero action = default pose,
+exactly what those joints did before their terms existed.
 
 With ``--output_dataset_file`` and ``--enable_cameras``, each replayed episode is copied
 into a new HDF5 with live robot RGB for every camera selected via ``--cameras``:
@@ -172,7 +174,7 @@ parser.add_argument(
         "Replay command source. 'policy_loco' (default) re-runs the recorded leg "
         "policy from recorded loco_commands and applies recorded upper-body joint "
         "targets. 'processed_joint_targets' applies recorded post-IK joint targets "
-        "directly. 'actions' feeds raw 40D Pink+leg+neck actions through the env "
+        "directly. 'actions' feeds raw Pink+leg+neck+torso actions through the env "
         "(re-solves IK); it is rejected for datasets whose arms were driven by the "
         "walk policy, because the raw upper action still holds the frozen-snapshot "
         "IK targets rather than what actually ran."
@@ -419,7 +421,8 @@ def make_third_person_camera_cfg(size: tuple[int, int]) -> CameraCfg:
 
 is_paused = False
 
-# Action layout: [legs(12), neck(2), upper_body_ik(26)] = 40D.
+# Action layout: [legs(12), neck(2), upper_body_ik(26), torso_yaw(1)] = 41D.
+# torso_yaw is appended last so legacy 40D/38D rows stay prefix-compatible.
 _UPPER_ACTION_OFFSET = LEGS_ACTION_DIM + NECK_ACTION_DIM
 _UPPER_ACTION_DIM = 26  # Pink idle / raw upper slice size
 
@@ -532,6 +535,11 @@ class PolicyLocoStep(NamedTuple):
     loco_command: torch.Tensor
     processed_actions: torch.Tensor
     is_locomotion: bool
+    # --zest_upper datasets only: the 13-value absolute commander reference
+    # (torso_yaw + arms + neck) the recorder fed to zest on this step. None on
+    # legacy datasets, which replays as the standing-pose reference — exactly
+    # what those sessions ran.
+    zest_upper_ref: torch.Tensor | None = None
 
 
 def get_next_policy_loco_step(episode_data: EpisodeData) -> PolicyLocoStep | None:
@@ -541,6 +549,7 @@ def get_next_policy_loco_step(episode_data: EpisodeData) -> PolicyLocoStep | Non
     loco_commands = episode_data.data.get("loco_commands")
     processed_actions = episode_data.data.get("processed_actions")
     teleop_state = episode_data.data.get("teleop_state")
+    zest_upper_refs = episode_data.data.get("zest_upper_ref")
     if loco_commands is None:
         raise ValueError(
             "Dataset episode is missing 'loco_commands' required for policy_loco replay. "
@@ -560,44 +569,75 @@ def get_next_policy_loco_step(episode_data: EpisodeData) -> PolicyLocoStep | Non
     is_locomotion = True
     if teleop_state is not None and index < len(teleop_state):
         is_locomotion = bool(float(teleop_state[index].reshape(-1)[0]) > 0.5)
-    return PolicyLocoStep(loco_commands[index], processed_actions[index], is_locomotion)
+    zest_upper_ref = None
+    if zest_upper_refs is not None and index < len(zest_upper_refs):
+        zest_upper_ref = zest_upper_refs[index]
+    return PolicyLocoStep(
+        loco_commands[index], processed_actions[index], is_locomotion, zest_upper_ref
+    )
 
 
-def _processed_term_dims(env) -> tuple[int, int, int]:
-    """Return ``(legs_dim, neck_dim, upper_dim)`` from live action terms."""
+def _processed_term_dims(env) -> tuple[int, int, int, int]:
+    """Return ``(legs_dim, neck_dim, upper_dim, torso_dim)`` from live action terms."""
     legs_dim = env.action_manager.get_term("legs_joint_pos")._processed_actions.shape[-1]
     upper_dim = env.action_manager.get_term("upper_body_ik")._processed_actions.shape[-1]
     if "neck_joint_pos" in env.action_manager.active_terms:
         neck_dim = env.action_manager.get_term("neck_joint_pos")._processed_actions.shape[-1]
     else:
         neck_dim = 0
-    return legs_dim, neck_dim, upper_dim
+    if "torso_yaw_joint_pos" in env.action_manager.active_terms:
+        torso_dim = env.action_manager.get_term("torso_yaw_joint_pos")._processed_actions.shape[-1]
+    else:
+        torso_dim = 0
+    return legs_dim, neck_dim, upper_dim, torso_dim
 
 
 def _split_processed_joint_targets(
     processed: torch.Tensor,
     env,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Split processed targets into ``(legs, neck, upper)``.
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split processed targets into ``(legs, neck, upper, torso)``.
 
-    Uses live action-term processed widths. Legacy recordings without a neck slice
-    get zero neck targets.
+    Uses live action-term processed widths. Legacy recordings get zero targets
+    for the slices they predate: 40D rows lack the torso_yaw tail, 38D rows also
+    lack the neck slice (zero action = default pose for those offset terms).
     """
     flat = processed.reshape(-1)
-    legs_dim, neck_dim, upper_dim = _processed_term_dims(env)
+    legs_dim, neck_dim, upper_dim, torso_dim = _processed_term_dims(env)
 
+    def _zero_torso() -> torch.Tensor:
+        return torch.zeros(max(torso_dim, 1), device=flat.device, dtype=flat.dtype)[
+            : torso_dim if torso_dim > 0 else 1
+        ]
+
+    # Current layout: legs + neck + upper + torso.
+    if (
+        neck_dim > 0
+        and torso_dim > 0
+        and flat.numel() == legs_dim + neck_dim + upper_dim + torso_dim
+    ):
+        return (
+            flat[:legs_dim],
+            flat[legs_dim : legs_dim + neck_dim],
+            flat[legs_dim + neck_dim : legs_dim + neck_dim + upper_dim],
+            flat[legs_dim + neck_dim + upper_dim :],
+        )
+
+    # Legacy 40D: legs + neck + upper (recorded before the torso_yaw term).
     if neck_dim > 0 and flat.numel() == legs_dim + neck_dim + upper_dim:
         return (
             flat[:legs_dim],
             flat[legs_dim : legs_dim + neck_dim],
             flat[legs_dim + neck_dim :],
+            _zero_torso(),
         )
 
+    # Legacy 38D: legs + upper.
     if flat.numel() == legs_dim + upper_dim:
         neck = torch.zeros(max(neck_dim, NECK_ACTION_DIM), device=flat.device, dtype=flat.dtype)
         if neck_dim > 0:
             neck = neck[:neck_dim]
-        return flat[:legs_dim], neck, flat[legs_dim:]
+        return flat[:legs_dim], neck, flat[legs_dim:], _zero_torso()
 
     # Best-effort fallback for mismatched recordings.
     legs = flat[:legs_dim]
@@ -609,7 +649,12 @@ def _split_processed_joint_targets(
         if neck_dim > 0:
             neck = neck[:neck_dim]
         upper = flat[legs_dim:]
-    return legs, neck, upper
+    if torso_dim > 0 and upper.numel() > upper_dim:
+        torso = upper[upper_dim : upper_dim + torso_dim]
+        upper = upper[:upper_dim]
+    else:
+        torso = _zero_torso()
+    return legs, neck, upper, torso
 
 
 def assert_dataset_matches_robot(dataset_env_args: dict, robot) -> None:
@@ -659,14 +704,18 @@ def step_recorded_joint_targets(
     legs: torch.Tensor,
     upper: torch.Tensor,
     neck: torch.Tensor | None = None,
+    torso: torch.Tensor | None = None,
 ) -> None:
-    """Step physics with separate leg/neck/upper joint targets, bypassing Pink IK re-solve."""
+    """Step physics with separate leg/neck/upper/torso joint targets, bypassing Pink IK re-solve."""
     robot = env.scene["robot"]
     legs_term = env.action_manager.get_term("legs_joint_pos")
     upper_term = env.action_manager.get_term("upper_body_ik")
     neck_term = None
     if "neck_joint_pos" in env.action_manager.active_terms:
         neck_term = env.action_manager.get_term("neck_joint_pos")
+    torso_term = None
+    if "torso_yaw_joint_pos" in env.action_manager.active_terms:
+        torso_term = env.action_manager.get_term("torso_yaw_joint_pos")
 
     legs_term._processed_actions[:] = legs
     upper_term._processed_actions[:] = upper
@@ -679,6 +728,17 @@ def step_recorded_joint_targets(
                 dtype=legs.dtype,
             )
         neck_term._processed_actions[:] = neck
+    if torso_term is not None:
+        if torso is None:
+            torso = torch.zeros(
+                legs.shape[0],
+                torso_term._processed_actions.shape[-1],
+                device=legs.device,
+                dtype=legs.dtype,
+            )
+        torso_term._processed_actions[:] = torso.reshape(
+            legs.shape[0], torso_term._processed_actions.shape[-1]
+        )
 
     is_rendering = env.sim.has_gui() or env.sim.has_rtx_sensors()
     for _ in range(env.cfg.decimation):
@@ -686,6 +746,8 @@ def step_recorded_joint_targets(
         legs_term.apply_actions()
         if neck_term is not None:
             neck_term.apply_actions()
+        if torso_term is not None:
+            torso_term.apply_actions()
         robot.set_joint_position_target(upper, joint_ids=upper_term._controlled_joint_ids)
         env.scene.write_data_to_sim()
         env.sim.step(render=False)
@@ -702,28 +764,33 @@ def step_processed_joint_targets(env, processed_actions: torch.Tensor) -> None:
     legs_list = []
     neck_list = []
     upper_list = []
+    torso_list = []
     for env_id in range(processed_actions.shape[0]):
-        legs, neck, upper = _split_processed_joint_targets(processed_actions[env_id], env)
+        legs, neck, upper, torso = _split_processed_joint_targets(processed_actions[env_id], env)
         legs_list.append(legs)
         neck_list.append(neck)
         upper_list.append(upper)
+        torso_list.append(torso)
     step_recorded_joint_targets(
         env,
         torch.stack(legs_list, dim=0),
         torch.stack(upper_list, dim=0),
         torch.stack(neck_list, dim=0),
+        torch.stack(torso_list, dim=0),
     )
 
 
 def normalize_processed_to_env(processed: torch.Tensor, env) -> torch.Tensor:
-    """Pad legacy processed targets with a zero neck slice when needed."""
+    """Pad legacy processed targets (zero neck slice / zero torso tail) when needed."""
     flat = processed.reshape(-1).to(dtype=torch.float32)
-    legs_dim, neck_dim, upper_dim = _processed_term_dims(env)
-    expected = legs_dim + neck_dim + upper_dim
+    legs_dim, neck_dim, upper_dim, torso_dim = _processed_term_dims(env)
+    expected = legs_dim + neck_dim + upper_dim + torso_dim
     if flat.numel() == expected:
         return flat
-    if neck_dim > 0 and flat.numel() == legs_dim + upper_dim:
-        return torch.cat(
+    # Legacy 38D rows lack the neck slice in the middle; insert it, then fall
+    # through to the tail pad (which supplies the missing torso zeros).
+    if neck_dim > 0 and flat.numel() in (legs_dim + upper_dim, legs_dim + upper_dim + torso_dim):
+        flat = torch.cat(
             [
                 flat[:legs_dim],
                 torch.zeros(neck_dim, device=flat.device, dtype=flat.dtype),
@@ -731,6 +798,8 @@ def normalize_processed_to_env(processed: torch.Tensor, env) -> torch.Tensor:
             ],
             dim=0,
         )
+        if flat.numel() == expected:
+            return flat
     if flat.numel() < expected:
         out = torch.zeros(expected, device=flat.device, dtype=flat.dtype)
         out[: flat.numel()] = flat
@@ -739,13 +808,21 @@ def normalize_processed_to_env(processed: torch.Tensor, env) -> torch.Tensor:
 
 
 def normalize_raw_action_to_env(action: torch.Tensor, action_dim: int) -> torch.Tensor:
-    """Pad legacy 38D raw actions with zero neck, or truncate/pad to ``action_dim``."""
+    """Pad legacy raw actions (zero neck slice / zero torso tail) to ``action_dim``.
+
+    Legacy 40D rows only need the trailing torso zero; legacy 38D rows also get
+    the neck slice inserted after the legs before the tail pad.
+    """
     flat = action.reshape(-1).to(dtype=torch.float32)
     if flat.numel() == action_dim:
         return flat
-    # Legacy [legs(12), upper(26)] -> insert zero neck.
-    if flat.numel() == LEGS_ACTION_DIM + _UPPER_ACTION_DIM and action_dim == LEGS_ACTION_DIM + NECK_ACTION_DIM + _UPPER_ACTION_DIM:
-        return torch.cat(
+    # Legacy [legs(12), upper(26)] -> insert zero neck; the tail pad below
+    # supplies the torso zero(s) if the env carries the torso_yaw term.
+    if (
+        flat.numel() == LEGS_ACTION_DIM + _UPPER_ACTION_DIM
+        and action_dim >= LEGS_ACTION_DIM + NECK_ACTION_DIM + _UPPER_ACTION_DIM
+    ):
+        flat = torch.cat(
             [
                 flat[:LEGS_ACTION_DIM],
                 torch.zeros(NECK_ACTION_DIM, device=flat.device, dtype=flat.dtype),
@@ -753,6 +830,8 @@ def normalize_raw_action_to_env(action: torch.Tensor, action_dim: int) -> torch.
             ],
             dim=0,
         )
+        if flat.numel() == action_dim:
+            return flat
     if flat.numel() < action_dim:
         out = torch.zeros(action_dim, device=flat.device, dtype=flat.dtype)
         out[: flat.numel()] = flat
@@ -1112,6 +1191,20 @@ def main() -> None:
             "the raw 'actions' rows still hold the frozen-snapshot IK targets rather "
             "than what was applied. Use --replay_source policy_loco (default) or "
             "processed_joint_targets, both of which carry the executed arm targets."
+        )
+    _replay_zest_upper = bool(_dataset_env_args.get("sberchel_zest_upper", False))
+    if args_cli.replay_source == "actions" and _replay_zest_upper:
+        raise ValueError(
+            "This is a --zest_upper dataset: the arm joints executed zest's output, "
+            "while the raw 'actions' rows hold the operator's IK intent. Use "
+            "--replay_source policy_loco (default, re-runs zest from the recorded "
+            "'zest_upper_ref' rows) or processed_joint_targets."
+        )
+    if _replay_zest_upper:
+        print(
+            ">>> zest-upper dataset: policy_loco replay feeds the recorded "
+            "'zest_upper_ref' commander references back into zest.",
+            flush=True,
         )
 
     recorded_enhanced_determinism = bool(_dataset_env_args.get("sberchel_enhanced_determinism", False))
@@ -1703,7 +1796,12 @@ def main() -> None:
                             postprocess = frame_postprocess.get(img_key)
                             for env_id in stride_envs:
                                 # Keep frames on CPU — buffering a full episode of RGB on CUDA OOMs.
-                                frame = img_batch[env_id].detach().to("cpu", non_blocking=False).contiguous()
+                                # clone(): on a CPU sim device .to("cpu") is a no-op, and the
+                                # sensor buffer is overwritten in place each render — an aliased
+                                # frame would silently become the episode's last frame.
+                                frame = (
+                                    img_batch[env_id].detach().to("cpu", non_blocking=False).contiguous().clone()
+                                )
                                 if frame.is_floating_point():
                                     frame = frame.clamp(0, 255).to(torch.uint8)
                                 if postprocess is not None:
@@ -1714,7 +1812,15 @@ def main() -> None:
                             # of the observation pipeline entirely).
                             tp_batch = env.scene["third_person_camera"].data.output["rgb"]
                             for env_id in stride_envs:
-                                frame = tp_batch[env_id, ..., :3].detach().to("cpu", non_blocking=False).contiguous()
+                                # clone() for the same reason as above: this aliases the camera's
+                                # persistent output buffer on CPU sim devices.
+                                frame = (
+                                    tp_batch[env_id, ..., :3]
+                                    .detach()
+                                    .to("cpu", non_blocking=False)
+                                    .contiguous()
+                                    .clone()
+                                )
                                 if frame.is_floating_point():
                                     frame = frame.clamp(0, 255).to(torch.uint8)
                                 camera_frame_buffers[env_id][THIRD_PERSON_IMG_KEY].append(frame)
@@ -1725,7 +1831,7 @@ def main() -> None:
                     env.episode_length_buf += 1
                     env.common_step_counter += 1
                 elif args_cli.replay_source == "policy_loco":
-                    legs_dim, neck_dim, upper_dim = _processed_term_dims(env)
+                    legs_dim, neck_dim, upper_dim, torso_dim = _processed_term_dims(env)
                     legs_batch = torch.zeros(num_envs, legs_dim, device=env.device, dtype=torch.float32)
                     neck_batch = torch.zeros(
                         num_envs, max(neck_dim, NECK_ACTION_DIM), device=env.device, dtype=torch.float32
@@ -1733,6 +1839,11 @@ def main() -> None:
                     if neck_dim > 0:
                         neck_batch = neck_batch[:, :neck_dim]
                     upper_batch = torch.zeros(num_envs, upper_dim, device=env.device, dtype=torch.float32)
+                    torso_batch = torch.zeros(
+                        num_envs, max(torso_dim, 1), device=env.device, dtype=torch.float32
+                    )
+                    if torso_dim > 0:
+                        torso_batch = torso_batch[:, :torso_dim]
                     for env_id in range(num_envs):
                         step_data = policy_loco_steps[env_id]
                         if step_data is None:
@@ -1748,14 +1859,28 @@ def main() -> None:
                         # recorder used, driven off the recorded mode flag: row k
                         # of loco_commands and teleop_state describe the same step.
                         mode = "locomotion" if step_data.is_locomotion else "static"
-                        legs = policies.step(mode, vx, vy, wz)[:LEGS_ACTION_DIM]
+                        # --zest_upper datasets: replay the recorded commander
+                        # reference too, or the re-run zest sees a standing-pose
+                        # ref where the recorder fed live arms and its leg
+                        # output stops matching the recording.
+                        upper_ref = None
+                        if step_data.zest_upper_ref is not None:
+                            upper_ref = [
+                                float(v) for v in step_data.zest_upper_ref.reshape(-1)[:13].tolist()
+                            ]
+                        legs = policies.step(mode, vx, vy, wz, upper_ref=upper_ref)[:LEGS_ACTION_DIM]
                         legs_batch[env_id] = torch.as_tensor(legs, dtype=torch.float32, device=env.device)
-                        _legs_t, neck_t, upper_t = _split_processed_joint_targets(
+                        _legs_t, neck_t, upper_t, torso_t = _split_processed_joint_targets(
                             processed.to(device=env.device, dtype=torch.float32), env
                         )
                         if neck_dim > 0:
                             neck_batch[env_id] = neck_t
-                        # Policy overrides legs; use recorded neck+upper processed targets.
+                        if torso_dim > 0:
+                            # Recorded torso_yaw processed target: the walk policy's
+                            # output the recorder actually applied (zero on legacy
+                            # rows and zest segments).
+                            torso_batch[env_id] = torso_t[:torso_dim]
+                        # Policy overrides legs; use recorded neck+upper+torso processed targets.
                         if upper_t.numel() != upper_dim:
                             padded = torch.zeros(upper_dim, device=env.device, dtype=torch.float32)
                             padded[: min(upper_t.numel(), upper_dim)] = upper_t[: min(upper_t.numel(), upper_dim)]
@@ -1767,10 +1892,11 @@ def main() -> None:
                         legs_batch,
                         upper_batch,
                         neck_batch if neck_dim > 0 else None,
+                        torso_batch if torso_dim > 0 else None,
                     )
                 elif args_cli.replay_source == "processed_joint_targets":
-                    legs_dim, neck_dim, upper_dim = _processed_term_dims(env)
-                    expected = legs_dim + neck_dim + upper_dim
+                    legs_dim, neck_dim, upper_dim, torso_dim = _processed_term_dims(env)
+                    expected = legs_dim + neck_dim + upper_dim + torso_dim
                     step_processed_joint_targets(env, actions[:, :expected])
                 else:
                     env.step(actions)
