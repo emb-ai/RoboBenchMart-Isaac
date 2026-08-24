@@ -413,13 +413,19 @@ class LocoPolicySet:
     """
 
     def __init__(self, env, mode_map: dict[LocoMode, str], *,
-                 decimation: dict[str, int] | None = None, device: str = "cpu") -> None:
+                 decimation: dict[str, int] | None = None, device: str = "cpu",
+                 gain_reassert=None) -> None:
         # Imported here, not at module scope: this module is imported to build env
         # configs in contexts where the green_challenge checkout is not on the path.
         from green_challenge.policy.network import Network
 
         self._mode_map = dict(mode_map)
         self._decimation = dict(decimation or {})
+        # Optional no-arg callable run after every point where a Network writes
+        # its policy gains into the articulation (construction and each swap).
+        # The legacy stiff-teleop plant uses it to keep the (implicit, inert)
+        # xr_upper gain tensors truthful for the provenance dump.
+        self._gain_reassert = gain_reassert
         # dict.fromkeys keeps construction order deterministic, and builds one
         # net per distinct type: the single-policy case constructs exactly one.
         self._nets: dict[str, "Network"] = {
@@ -431,6 +437,8 @@ class LocoPolicySet:
         self._held: dict[str, list[float] | None] = {t: None for t in self._nets}
         # Each Network constructor wrote its own policy's gains, so the last one
         # built is the one left resident; activate() puts the right one back.
+        if self._gain_reassert is not None:
+            self._gain_reassert()
 
     @property
     def multi_policy(self) -> bool:
@@ -467,6 +475,8 @@ class LocoPolicySet:
         # This policy's gains *are* the plant, and the other net's constructor may
         # have left its own resident, so re-assert on every swap.
         apply_policy_pd_gains(net)
+        if self._gain_reassert is not None:
+            self._gain_reassert()
         # Neither policy expects to resume mid-segment: zest's previous action
         # and walk's 15-frame observation history would both be a segment stale.
         # Reset is what each gets at episode start anyway, and unlike keeping the

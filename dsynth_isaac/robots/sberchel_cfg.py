@@ -374,6 +374,116 @@ def _locomotion_actuators():
     }
 
 
+# --- legacy stiff teleop plant ----------------------------------------------
+#
+# The XR upper-body plant every demo before the green_challenge-native split ran
+# on: an ImplicitActuatorCfg whose gains are pushed into the PhysX drives once
+# at spawn. Kept because it is far easier to teleoperate than the native soft PD
+# (arms 3000 vs ~42 Nm/rad), at the cost of being a plant green_challenge does
+# not evaluate on. Opt back in with --legacy_teleop_gains on the recorder.
+#
+# Being implicit is also what makes these gains *stable*: PhysX integrates the
+# drive implicitly. Copying these numbers onto the FrictionalActuator group
+# instead makes the PD explicit software torque, which at 3000/100 and sim dt
+# 1/150 is unstable (arm chatter saturating the effort limits). The recorder
+# exposes that deliberately as --legacy_gains_keep_actuator, an experiment to
+# observe the actuator-model half of the plant difference in isolation; never
+# record demos on it.
+_LEGACY_XR_ARM_STIFFNESS = 3000.0
+_LEGACY_XR_ARM_DAMPING = 100.0
+_LEGACY_XR_FINGER_STIFFNESS = 400.0
+_LEGACY_XR_FINGER_DAMPING = 40.0
+_LEGACY_XR_NECK_STIFFNESS = 200.0
+_LEGACY_XR_NECK_DAMPING = 20.0
+
+
+def legacy_teleop_gains_for_joint(j_name: str) -> tuple[float, float] | None:
+    """Legacy stiff ``(stiffness, damping)`` for an ``xr_upper`` joint, or None."""
+    if "shoulder" in j_name or "elbow" in j_name or "wrist" in j_name:
+        return _LEGACY_XR_ARM_STIFFNESS, _LEGACY_XR_ARM_DAMPING
+    if "thumb" in j_name or "proximal" in j_name:
+        return _LEGACY_XR_FINGER_STIFFNESS, _LEGACY_XR_FINGER_DAMPING
+    if "neck" in j_name:
+        return _LEGACY_XR_NECK_STIFFNESS, _LEGACY_XR_NECK_DAMPING
+    return None
+
+
+def xr_upper_legacy_teleop_actuator() -> ImplicitActuatorCfg:
+    """The pre-split stiff XR ``xr_upper`` group, over today's joint set.
+
+    Same joints as the native group (so neck membership, action terms and every
+    ``robot.actuators["xr_upper"]`` consumer are unchanged), but the old implicit
+    PD: arms/wrists 3000/100, fingers 400/40, neck 200/20 -- the neck values the
+    retired separate ``neck`` group carried. Effort limits are the old group's.
+    """
+    return ImplicitActuatorCfg(
+        joint_names_expr=list(_UPPER_JOINT_EXPRS),
+        stiffness={
+            ".*_shoulder_.*": _LEGACY_XR_ARM_STIFFNESS,
+            ".*_elbow_.*": _LEGACY_XR_ARM_STIFFNESS,
+            ".*_wrist_.*": _LEGACY_XR_ARM_STIFFNESS,
+            ".*_thumb_proximal_.*": _LEGACY_XR_FINGER_STIFFNESS,
+            ".*_index_proximal_joint": _LEGACY_XR_FINGER_STIFFNESS,
+            ".*_middle_proximal_joint": _LEGACY_XR_FINGER_STIFFNESS,
+            ".*_ring_proximal_joint": _LEGACY_XR_FINGER_STIFFNESS,
+            ".*_pinky_proximal_joint": _LEGACY_XR_FINGER_STIFFNESS,
+            "neck_.*": _LEGACY_XR_NECK_STIFFNESS,
+        },
+        damping={
+            ".*_shoulder_.*": _LEGACY_XR_ARM_DAMPING,
+            ".*_elbow_.*": _LEGACY_XR_ARM_DAMPING,
+            ".*_wrist_.*": _LEGACY_XR_ARM_DAMPING,
+            ".*_thumb_proximal_.*": _LEGACY_XR_FINGER_DAMPING,
+            ".*_index_proximal_joint": _LEGACY_XR_FINGER_DAMPING,
+            ".*_middle_proximal_joint": _LEGACY_XR_FINGER_DAMPING,
+            ".*_ring_proximal_joint": _LEGACY_XR_FINGER_DAMPING,
+            ".*_pinky_proximal_joint": _LEGACY_XR_FINGER_DAMPING,
+            "neck_.*": _LEGACY_XR_NECK_DAMPING,
+        },
+        effort_limit={
+            ".*_shoulder_pitch_joint": 90.0,
+            ".*_shoulder_roll_joint": 90.0,
+            ".*_shoulder_yaw_joint": 36.0,
+            ".*_elbow_.*": 36.0,
+            ".*_wrist_.*": 16.0,
+            ".*_thumb_proximal_.*": 8.5,
+            ".*_index_proximal_joint": 8.5,
+            ".*_middle_proximal_joint": 8.5,
+            ".*_ring_proximal_joint": 8.5,
+            ".*_pinky_proximal_joint": 8.5,
+            "neck_.*": 36.0,
+        },
+    )
+
+
+def reassert_legacy_teleop_gain_tensors(robot) -> None:
+    """Rewrite ``xr_upper``'s python-side gain tensors to the legacy values.
+
+    Call it after every policy construction/swap when the legacy gains are
+    active (``Network._restore_pd_gains_from_policy_cfg`` writes the *policy's*
+    arm/neck gains into the same tensors at each of those points). What the
+    write means depends on the group's actuator class:
+
+    * ImplicitActuator (the legacy plant swap): physically inert -- the PhysX
+      drives got the cfg values once at spawn and tensor writes never reach
+      them. The rewrite only keeps ``sberchel_upper_pd_gain_table`` -- the
+      startup dump and the dataset's gain provenance -- from reporting a plant
+      that is not running.
+    * FrictionalActuator (--legacy_gains_keep_actuator experiment): live --
+      ``compute()`` reads these tensors every step, so this IS the mechanism
+      that holds the stiff gains on the unchanged actuator model.
+    """
+    actuator = robot.actuators.get("xr_upper")
+    if actuator is None:
+        return
+    for local_idx, j_name in enumerate(actuator.joint_names):
+        gains = legacy_teleop_gains_for_joint(j_name)
+        if gains is None:
+            continue
+        actuator.stiffness[:, local_idx] = gains[0]
+        actuator.damping[:, local_idx] = gains[1]
+
+
 _xr_locomotion_joint_pos = dict(_upperbody_joint_pos)
 
 # Free-floating XR loco robot with neck on ImplicitActuator for headset look control.

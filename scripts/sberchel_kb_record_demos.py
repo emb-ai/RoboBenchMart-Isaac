@@ -256,6 +256,38 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--legacy_teleop_gains",
+    action="store_true",
+    default=False,
+    help=(
+        "Run the upper body on the legacy stiff teleop plant: the pre-split "
+        "ImplicitActuator XR PD (arms/wrists 3000/100, fingers 400/40, neck "
+        "200/20) instead of green_challenge's native soft gains, for the whole "
+        "session and both modes. Much easier to teleoperate, but it is NOT the "
+        "plant green_challenge evaluates on -- demos recorded with it track the "
+        "operator far better than their VLA stack could reproduce. Legs/torso "
+        "still take the active policy's PD, so locomotion is unaffected. "
+        "Recorded in provenance (sberchel_legacy_stiff_teleop) and per step in "
+        "teleop_state[:,2]. Makes --gravity_compensation redundant (no droop at "
+        "3000 Nm/rad), though combining them is harmless."
+    ),
+)
+parser.add_argument(
+    "--legacy_gains_keep_actuator",
+    action="store_true",
+    default=False,
+    help=(
+        "EXPERIMENT, only with --legacy_teleop_gains: keep green_challenge's "
+        "FrictionalActuator on xr_upper and write the stiff legacy gains into its "
+        "live tensors, instead of swapping the group to a PhysX-implicit drive. "
+        "Isolates 'same gains, different actuator model': friction and armature "
+        "stay active, but the PD becomes explicit software torque at sim dt "
+        "1/150, which is numerically unstable at 3000/100 -- expect the arms to "
+        "chatter/oscillate, saturating at the effort limits. Recorded in "
+        "provenance as sberchel_legacy_gains_actuator='frictional'."
+    ),
+)
+parser.add_argument(
     "--print_every_n",
     type=int,
     default=30,
@@ -637,7 +669,9 @@ from dsynth_isaac.teleop.xr_anchor import (
 )
 from dsynth_isaac.teleop.xr_target_hud import XrTargetHud
 from dsynth_isaac.robots.sberchel_cfg import (
+    reassert_legacy_teleop_gain_tensors,
     sberchel_upper_pd_gain_table,
+    xr_upper_legacy_teleop_actuator,
 )
 from dsynth_isaac.tasks.manager_based.sberchel_upperbody_xr_env_cfg import (
     SBERCHEL_HAND_JOINT_NAMES,
@@ -1308,6 +1342,40 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
         env_cfg.actions.upper_body_ik.enable_gravity_compensation = True
         print(">>> gravity compensation: ON (recorded in dataset provenance)", flush=True)
 
+    if args_cli.legacy_gains_keep_actuator and not args_cli.legacy_teleop_gains:
+        raise SystemExit(
+            "--legacy_gains_keep_actuator is a modifier for --legacy_teleop_gains; "
+            "pass both."
+        )
+    if args_cli.legacy_teleop_gains:
+        if args_cli.legacy_gains_keep_actuator:
+            # No cfg change: xr_upper stays the FrictionalActuator group, and the
+            # stiff gains are written into its live tensors at runtime by the
+            # LocoPolicySet gain_reassert hook (after every policy gain write).
+            # Explicit PD at these gains is unstable by construction -- this mode
+            # exists to observe exactly that, not to record usable demos.
+            print(
+                ">>> GAINS: LEGACY stiff gains on the UNCHANGED FrictionalActuator "
+                "(EXPERIMENT) -- explicit PD at 3000/100, dt 1/150: expect arm "
+                "chatter at the effort limits. Written live via the gain hook.",
+                flush=True,
+            )
+        else:
+            # Swap the whole group cfg, not the gain tensors: the stiff values
+            # are only stable as PhysX-implicit drives, and on the
+            # FrictionalActuator group runtime tensor writes would be both live
+            # and explicit. Rebind a fresh dict -- cfg .replace() is shallow, so
+            # mutating in place would leak into the module-level robot cfg.
+            actuators = dict(env_cfg.scene.robot.actuators)
+            actuators["xr_upper"] = xr_upper_legacy_teleop_actuator()
+            env_cfg.scene.robot.actuators = actuators
+            print(
+                ">>> GAINS: LEGACY stiff teleop plant on xr_upper (implicit PD, arms "
+                "3000/100, fingers 400/40, neck 200/20) -- easier to teleoperate, but "
+                "NOT the plant green_challenge evaluates on. Recorded in provenance.",
+                flush=True,
+            )
+
     env_cfg.recorders = SberchelXRRecorderManagerCfg()
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
@@ -1425,6 +1493,17 @@ def main() -> None:
         {"locomotion": args_cli.loco_policy, "static": "zest"},
         decimation={"walk": args_cli.walk_policy_decimation},
         device="cpu",
+        # Re-write the legacy gains after every Network construction and policy
+        # swap (each of those writes policy values into the xr_upper tensors).
+        # Default legacy mode: the group is implicit, tensors are inert, and this
+        # only keeps the gain dump/provenance truthful. --legacy_gains_keep_actuator:
+        # the group is still the FrictionalActuator, its tensors ARE the plant,
+        # and this hook is the mechanism that holds the stiff gains resident.
+        gain_reassert=(
+            (lambda: reassert_legacy_teleop_gain_tensors(robot))
+            if args_cli.legacy_teleop_gains
+            else None
+        ),
     )
     policies.reset_all()
     walk_arm_drive = (
@@ -1550,8 +1629,16 @@ def main() -> None:
         flush=True,
     )
     _gain_table = sberchel_upper_pd_gain_table(robot)
+    if args_cli.legacy_teleop_gains:
+        _gain_label = (
+            "LEGACY stiff gains on FrictionalActuator (EXPERIMENT) + policy legs"
+            if args_cli.legacy_gains_keep_actuator
+            else "LEGACY stiff teleop upper body + policy legs"
+        )
+    else:
+        _gain_label = "green_challenge-native"
     print(
-        ">>> PD gains (green_challenge-native, whole robot): "
+        f">>> PD gains ({_gain_label}, whole robot): "
         + ", ".join(f"{n}={k:g}/{d:g}" for n, (k, d) in sorted(_gain_table.items())),
         flush=True,
     )
@@ -1602,8 +1689,22 @@ def main() -> None:
                     ),
                     "sberchel_hand_joint_names": list(upper_term._hand_joint_names),
                     "sberchel_upper_pd_gains": {n: list(v) for n, v in _gain_table.items()},
-                    # Retired: the stiff two-regime XR plant no longer exists.
-                    "sberchel_legacy_stiff_teleop": False,
+                    # True when --legacy_teleop_gains ran the session on the old
+                    # stiff implicit XR plant (single regime, both modes) instead
+                    # of the green_challenge-native soft PD. Unlike the retired
+                    # two-regime flag of the same name, the plant never switches
+                    # mid-session.
+                    "sberchel_legacy_stiff_teleop": bool(args_cli.legacy_teleop_gains),
+                    # Which actuator model carried the stiff gains: 'implicit'
+                    # (the faithful legacy plant: PhysX drives, no friction) or
+                    # 'frictional' (--legacy_gains_keep_actuator experiment:
+                    # same gains live on green_challenge's explicit actuator).
+                    # null when the session ran the native soft plant.
+                    "sberchel_legacy_gains_actuator": (
+                        ("frictional" if args_cli.legacy_gains_keep_actuator else "implicit")
+                        if args_cli.legacy_teleop_gains
+                        else None
+                    ),
                     "sberchel_squeeze_scale": float(args_cli.squeeze_scale),
                     "sberchel_squeeze_binary": bool(args_cli.squeeze_binary),
                     "sberchel_squeeze_on_value": float(args_cli.squeeze_on_value),
@@ -1647,8 +1748,8 @@ def main() -> None:
                     ],
                     "sberchel_action_layout": "legs(12) + neck(2) + upper_body_ik(26)",
                     "sberchel_teleop_state_layout": (
-                        "is_locomotion, squeeze, legacy_gains (always 0 since the "
-                        "stiff two-regime plant was retired)"
+                        "is_locomotion, squeeze, legacy_gains (1 iff the session "
+                        "ran with --legacy_teleop_gains; constant per session)"
                     ),
                     # Which policy produced each segment. teleop_state[:,0] is the
                     # per-step selector into this map, so no extra channel is needed.
@@ -2467,7 +2568,7 @@ def main() -> None:
                         base_env,
                         loco_mode=loco_mode,
                         squeeze=squeeze_cmd,
-                        legacy_gains=False,
+                        legacy_gains=args_cli.legacy_teleop_gains,
                     )
                     env.step(actions)
                     # From here on joint_pos_target holds a real command, so the
