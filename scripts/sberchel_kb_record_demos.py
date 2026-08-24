@@ -292,18 +292,26 @@ parser.add_argument(
     action="store_true",
     default=False,
     help=(
-        "Canonical green_challenge tract (run_with_vla.py parity): one zest "
-        "policy for both modes, arms LIVE from XR in both, and the Pink IK arm "
-        "solution fed to zest as its commander reference (set_joint_overrides) "
-        "instead of being applied to the joints. What the arm/torso/neck joints "
-        "actually execute is zest's output (ref + residual); wrists and fingers "
-        "stay direct from the retargeter, so squeeze grip is unchanged. Walking "
-        "is just a nonzero velocity command -- the operator keeps the arms the "
-        "whole time, so no frozen snapshots, no walk arm swing, no mode blends "
-        "(--static_blend_time/--loco_blend_time are inert). Requires "
-        "--loco_policy zest; incompatible with --legacy_teleop_gains. The "
-        "per-step 13-value reference is recorded as 'zest_upper_ref' so "
-        "policy_loco replay re-runs zest bit-exact."
+        "Canonical green_challenge zest tract, one zest policy for both modes. "
+        "STATIC mode (run_with_vla.py parity): arms track XR live -- the Pink "
+        "IK arm solution feeds zest's commander reference "
+        "(set_joint_overrides) and the arm/torso/neck joints execute zest's "
+        "output (ref + residual); wrists/fingers stay direct from the "
+        "retargeter, so squeeze grip is unchanged. LOCOMOTION mode: the "
+        "--loco_policy net runs through the classic machinery. With zest "
+        "(run_kb/run.py parity) it contributes only the legs -- the whole "
+        "upper body holds its commanded targets (grip preserved, IK skipped "
+        "for speed), neck 0, torso held, and the frozen arm pose is fed as "
+        "zest's reference so its observations stay consistent (its arm output "
+        "is discarded: the residual wobbles arms with the gait). With "
+        "--loco_policy walk (the organizers' declared walk+zest split) walk "
+        "drives the legs and, per --walk_arm_drive, the arm swing; gain swap "
+        "and reset-on-swap apply as in any walk session; the recorded ref is "
+        "a no-op for walk's commander. "
+        "--static_blend_time ramps back into live tracking on the return to "
+        "static. Incompatible with --legacy_teleop_gains. The per-step "
+        "13-value reference is recorded as 'zest_upper_ref' so policy_loco "
+        "replay re-runs zest bit-exact."
     ),
 )
 parser.add_argument(
@@ -926,6 +934,11 @@ class PinkJointHold:
         return source[:, ids].detach().clone()
 
     def enable(self, robot) -> None:
+        # Mutually exclusive with zest passthrough: --zest_upper locomotion
+        # swaps the wrapper back to the classic hold (wrists/fingers frozen at
+        # commanded targets, IK skipped), with set_arm_targets layering zest's
+        # arm output on top.
+        self._zest_passthrough = False
         self._targets = self._capture(robot)
         if not self._active:
             self._term.apply_actions = self._apply_hold  # type: ignore[method-assign]
@@ -1427,12 +1440,6 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
         print(">>> gravity compensation: ON (recorded in dataset provenance)", flush=True)
 
     if args_cli.zest_upper:
-        if args_cli.loco_policy != "zest":
-            raise SystemExit(
-                "--zest_upper is the single-zest tract; it cannot combine with "
-                "--loco_policy walk (walk's commander has no joint refs and its "
-                "arm swing is exactly what this mode removes)."
-            )
         if args_cli.legacy_teleop_gains:
             raise SystemExit(
                 "--zest_upper and --legacy_teleop_gains contradict each other: "
@@ -1725,12 +1732,10 @@ def main() -> None:
         min_ang=args_cli.station_min_ang,
     )
     pink_hold = PinkJointHold(base_env)
-    if args_cli.zest_upper:
-        # Arms are never held: IK runs live in both modes, zest re-commands the
-        # arm joints, and the raw IK solve is captured as the next tick's ref.
-        pink_hold.enable_zest_passthrough()
-    else:
-        pink_hold.enable(robot)
+    # --zest_upper starts in the classic hold too (startup mode is locomotion);
+    # entering static swaps the wrapper to zest passthrough, entering locomotion
+    # swaps it back.
+    pink_hold.enable(robot)
     # Articulation ids for assembling the absolute 13-value zest reference
     # (torso_yaw + arms + neck). Resolved unconditionally: cheap, and loud if
     # the model ever renames a joint.
@@ -1738,11 +1743,18 @@ def main() -> None:
     zest_ref_torso_id = _joint_id_by_name["torso_yaw_joint"]
     zest_ref_neck_ids = [_joint_id_by_name[n] for n in NECK_JOINT_NAMES]
     if args_cli.zest_upper:
+        _loco_desc = (
+            "walk drives the legs (+ arm swing per --walk_arm_drive), gain "
+            "swap and reset on every C"
+            if policies.type_for("locomotion") == "walk"
+            else "upper body frozen on the classic hold, zest drives ONLY the "
+            "legs (fixed arm reference keeps its obs consistent)"
+        )
         print(
-            ">>> ZEST-UPPER tract (run_with_vla parity): single zest policy, arms "
-            "LIVE from XR in both modes; Pink IK arm solution -> zest reference "
-            "(set_joint_overrides), robot executes zest's torso/arm/neck output; "
-            "wrists+fingers direct. Per-step ref recorded as 'zest_upper_ref'.",
+            ">>> ZEST-UPPER tract. STATIC (run_with_vla parity): arms track XR "
+            "live (Pink IK solution -> zest reference), torso/arm/neck execute "
+            f"zest's output. LOCOMOTION ({policies.type_for('locomotion')}): "
+            f"{_loco_desc}. Per-step ref recorded as 'zest_upper_ref'.",
             flush=True,
         )
     set_render_interval(base_env, args_cli.loco_render_interval)
@@ -1941,12 +1953,19 @@ def main() -> None:
                     # Gate for the walk policy's torso_yaw target: same value and
                     # semantics as sberchel_walk_arm_drive ('never' under zest).
                     "sberchel_walk_torso_drive": walk_arm_drive if loco_is_walk else "never",
-                    # --zest_upper: run_with_vla-parity tract. Arms/torso/neck
-                    # execute zest(ref + residual) in BOTH modes; the ref is the
-                    # previous step's raw Pink IK arm solution + headset neck,
-                    # recorded per step as 'zest_upper_ref' (layout below,
-                    # absolute radians). Wrists/fingers are direct from the
-                    # retargeter. Raw 'actions' upper 26D = operator IK intent;
+                    # --zest_upper: split-parity zest tract. STATIC segments
+                    # (teleop_state[:,0]==0, run_with_vla parity): arms/torso/
+                    # neck execute zest(ref + residual), ref = previous step's
+                    # raw Pink IK arm solution + headset neck (live tracking).
+                    # LOCOMOTION segments: the --loco_policy net runs through
+                    # the classic machinery -- upper body PD-held at commanded
+                    # targets (hold, IK skipped) unless walk's arm drive is
+                    # engaged (sberchel_walk_arm_drive); the frozen arm pose is
+                    # still fed as the zest ref (no-op for walk's commander) so
+                    # zest's observations stay consistent across swaps. The
+                    # ref is recorded per step as 'zest_upper_ref' (layout
+                    # below, absolute radians). Raw 'actions' upper 26D =
+                    # operator IK intent (frozen snapshot during locomotion);
                     # processed_actions/joint_pos_target = what ran.
                     "sberchel_zest_upper": bool(args_cli.zest_upper),
                     "sberchel_zest_upper_ref_layout": (
@@ -2016,6 +2035,13 @@ def main() -> None:
     # Walk locomotion writes the policy's target here; static mode ramps it back
     # to 0 so the torso ends where every pre-torso-term demo held it.
     last_torso_target = 0.0
+    # --zest_upper: the arm reference fed to zest during locomotion, captured
+    # (absolute, [num_envs, 10]) on every locomotion entry -- the last IK solve,
+    # or the measured pose before any static teleop. The reference keeps zest's
+    # observations consistent with the PD-held arms; its arm OUTPUT is discarded
+    # for the whole locomotion segment (run_kb/run.py parity -- see the apply
+    # site below).
+    loco_zest_ref_arms: torch.Tensor | None = None
     last_hz_t = time.time()
     hz_window_steps = 0
     effective_hz = 0.0
@@ -2064,6 +2090,7 @@ def main() -> None:
     def enter_locomotion_mode(*, capture_frozen: bool) -> None:
         nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
         nonlocal last_loco_cmd_t, arm_drive_engaged, arms_moved_by_policy
+        nonlocal loco_zest_ref_arms
         # First: the leg PD that follows the active policy has to be resident
         # before the policy it belongs to produces a target.
         policies.activate("locomotion")
@@ -2072,13 +2099,20 @@ def main() -> None:
         last_loco_cmd_t = None
         arm_drive_engaged = False
         arms_moved_by_policy = False
-        if args_cli.zest_upper:
-            # Arms/neck stay live XR->IK->zest in both modes: nothing to freeze,
-            # hold or blend, and the neck reference keeps flowing from the
-            # headset. Only the velocity source changes.
-            set_render_interval(base_env, args_cli.loco_render_interval)
-            return
         last_neck_targets = (0.0, 0.0)
+        if args_cli.zest_upper:
+            # Freeze the zest arm reference where the operator's IK last left
+            # it, ON EVERY locomotion entry. Capturing lazily in the loop (only
+            # when frozen_snapshot was None) kept a stale ref across C-presses:
+            # the C entry pre-fills frozen_snapshot, so the ref stayed at its
+            # episode-start capture -- the default pose -- and zest's leg
+            # inference saw arms it did not have.
+            _ref = pink_hold.last_ik_arm_solution()
+            loco_zest_ref_arms = (
+                _ref.clone()
+                if _ref is not None
+                else robot.data.joint_pos[:, pink_hold.arm_joint_ids].clone()
+            )
         if capture_frozen:
             frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
         # The upper plant never moves with the mode, so C changes what is being
@@ -2104,15 +2138,6 @@ def main() -> None:
         if args_cli.disable_left_hand:
             # The left hand is never used, so the measured pose is the hold target.
             left_hold_snapshot = capture_frozen_upper(robot)
-        if args_cli.zest_upper:
-            # No arm-source switch happens on this toggle (XR->IK->zest in both
-            # modes), so the blend machinery has nothing to ramp between, and
-            # the passthrough wrapper must stay installed -- skip the
-            # pink_hold.disable() below.
-            static_blend_from = None
-            frozen_snapshot = None
-            set_render_interval(base_env, args_cli.static_render_interval)
-            return
         if args_cli.static_blend_time > 0.0:
             # Ramp from what is being commanded right now (the loco hold pose if
             # there is one, else the measured pose) into the live XR targets.
@@ -2140,7 +2165,13 @@ def main() -> None:
             last_torso_target = 0.0
         frozen_snapshot = None
         last_neck_targets = (0.0, 0.0)
-        pink_hold.disable()
+        if args_cli.zest_upper:
+            # Static teleop runs the zest passthrough: live Pink IK (its raw arm
+            # solution feeds zest's reference), arms execute zest's output,
+            # wrists/fingers take the IK directly.
+            pink_hold.enable_zest_passthrough()
+        else:
+            pink_hold.disable()
         set_render_interval(base_env, args_cli.static_render_interval)
 
     def apply_left_hold(upper_body: torch.Tensor) -> torch.Tensor:
@@ -2281,8 +2312,9 @@ def main() -> None:
             enter_locomotion_mode(capture_frozen=True)
             if args_cli.zest_upper:
                 print(
-                    "Mode: LOCOMOTION (WASD velocity to zest; arms stay LIVE "
-                    "through the zest reference — keep holding the object)",
+                    f"Mode: LOCOMOTION (WASD velocity to "
+                    f"{policies.type_for('locomotion')}; hands are ignored until "
+                    "you return to static)",
                     flush=True,
                 )
             else:
@@ -2303,8 +2335,8 @@ def main() -> None:
             target_hud.refresh_soon()
         if args_cli.zest_upper:
             print(
-                "Recording started (zest-upper: arms live in BOTH modes; "
-                "C toggles WASD walking vs station-keep)"
+                "Recording started (zest-upper: WASD locomotion with frozen upper "
+                "body; press C for static teleop — arms live through zest)"
             )
         else:
             print("Recording started (WASD locomotion fast-path; press C for static teleop)")
@@ -2674,44 +2706,14 @@ def main() -> None:
                     push_squeeze(squeeze_cmd)
 
                     if teleoperation_active:
-                        if args_cli.zest_upper:
-                            # Canonical tract: arms live from XR in BOTH modes;
-                            # only the velocity source depends on the mode. The
-                            # 26D IK action below is the operator's intent -- the
-                            # arm joints themselves will execute zest's output
-                            # (applied in the passthrough wrapper after the IK).
-                            raw = teleop_interface._get_raw_data()
-                            if loco_mode == "locomotion":
-                                vx, vy, wz = controller_command()
-                            else:
-                                if hold_xy_yaw is None:
-                                    hold_xy_yaw = capture_hold_pose_from_robot(robot)
-                                vx, vy, wz = station_keeper.command(robot, hold_xy_yaw)
-                            upper_body = torch.cat(
-                                [r.retarget(raw) for r in teleop_interface._retargeters],
-                                dim=-1,
-                            )
-                            upper_body = apply_left_hold(upper_body)
-                            last_teleop_upper = (
-                                upper_body.squeeze(0).clone()
-                                if upper_body.ndim > 1
-                                else upper_body.clone()
-                            )
-                            upper_body_mode = "teleop"
-                            head_pose = raw.get(DeviceBase.TrackingTarget.HEAD)
-                            if head_pose is not None:
-                                last_neck_targets = headset_to_neck_targets(
-                                    head_pose,
-                                    robot_yaw,
-                                    yaw_limit=NECK_YAW_LIMIT,
-                                    pitch_limit=NECK_PITCH_LIMIT,
-                                )
-                            # Missing HEAD: hold the last neck reference.
-                        elif loco_mode == "locomotion":
+                        if loco_mode == "locomotion":
                             vx, vy, wz = controller_command()
                             if frozen_snapshot is None:
                                 frozen_snapshot = capture_frozen_upper(robot, last_teleop_upper)
                                 pink_hold.refresh(robot)
+                                # (--zest_upper: the frozen arm reference was
+                                # already captured in enter_locomotion_mode --
+                                # every entry path runs it, C-press included.)
                             # Wrist targets still recorded for replay; Pink solve is skipped.
                             upper_body = apply_left_hold(
                                 build_upper_from_frozen_snapshot(
@@ -2794,13 +2796,19 @@ def main() -> None:
                     if args_cli.zest_upper:
                         # Absolute 13-value commander reference: torso_yaw at its
                         # default (the operator has no torso input; zest's
-                        # residual owns the counter-rotation), arms from the
-                        # previous tick's raw Pink IK solution, neck from the
-                        # headset. First tick after a reset has no IK solve yet;
-                        # the measured pose is the honest stand-in.
-                        ref_arm = pink_hold.last_ik_arm_solution()
-                        if ref_arm is None:
-                            ref_arm = robot.data.joint_pos[:, pink_hold.arm_joint_ids]
+                        # residual owns the counter-rotation), neck from the
+                        # headset (zeroed in locomotion). Arms: in static, the
+                        # previous tick's raw Pink IK solution (live tracking);
+                        # in locomotion, the reference FROZEN at loco entry --
+                        # the operator walks away from the robot, so live hand
+                        # tracking stops describing an intent. First tick after
+                        # a reset has no IK solve yet; measured pose stands in.
+                        if loco_mode == "locomotion" and loco_zest_ref_arms is not None:
+                            ref_arm = loco_zest_ref_arms
+                        else:
+                            ref_arm = pink_hold.last_ik_arm_solution()
+                            if ref_arm is None:
+                                ref_arm = robot.data.joint_pos[:, pink_hold.arm_joint_ids]
                         defaults = robot.data.default_joint_pos[0]
                         zest_ref = [
                             float(defaults[zest_ref_torso_id]),
@@ -2811,25 +2819,36 @@ def main() -> None:
                     body_targets = policies.step(loco_mode, vx, vy, wz, upper_ref=zest_ref)
                     legs = body_targets[:LEGS_ACTION_DIM]
                     if args_cli.zest_upper:
-                        # run_with_vla parity: everything in the torso block that
-                        # reaches the robot is zest's output (ref + residual).
-                        # Values are default-subtracted (Network.__call__), same
-                        # units as the offset-based action terms.
-                        # last_neck_targets deliberately NOT updated here: under
-                        # --zest_upper it holds the *headset reference* (reused
-                        # when HEAD tracking drops out); overwriting it with the
-                        # policy output would feed zest its own neck back.
-                        policy_neck = body_targets[POLICY_MODEL_NECK_SLICE]
-                        neck_yaw_cmd = float(policy_neck[0])
-                        neck_pitch_cmd = float(policy_neck[1])
-                        torso_yaw_cmd = float(body_targets[POLICY_TORSO_MODEL_INDEX])
-                        last_torso_target = torso_yaw_cmd
-                        arm_raw = torch.as_tensor(
-                            body_targets[POLICY_MODEL_ARM_SLICE],
-                            dtype=torch.float32,
-                            device=base_env.device,
-                        ).unsqueeze(0).repeat(base_env.num_envs, 1)
-                        pink_hold.set_zest_arm_targets(arm_raw)
+                        if loco_mode == "static":
+                            # run_with_vla parity for manipulation: everything
+                            # in the torso block that reaches the robot is
+                            # zest's output (ref + residual). Values are
+                            # default-subtracted (Network.__call__), same units
+                            # as the offset-based action terms.
+                            # last_neck_targets deliberately NOT updated here:
+                            # under --zest_upper it holds the *headset
+                            # reference* (reused when HEAD tracking drops out);
+                            # overwriting it with the policy output would feed
+                            # zest its own neck back.
+                            policy_neck = body_targets[POLICY_MODEL_NECK_SLICE]
+                            neck_yaw_cmd = float(policy_neck[0])
+                            neck_pitch_cmd = float(policy_neck[1])
+                            torso_yaw_cmd = float(body_targets[POLICY_TORSO_MODEL_INDEX])
+                            last_torso_target = torso_yaw_cmd
+                            arm_raw = torch.as_tensor(
+                                body_targets[POLICY_MODEL_ARM_SLICE],
+                                dtype=torch.float32,
+                                device=base_env.device,
+                            ).unsqueeze(0).repeat(base_env.num_envs, 1)
+                            pink_hold.set_zest_arm_targets(arm_raw)
+                        # locomotion: zest contributes ONLY the legs, exactly
+                        # like run_kb/run.py (their loops PD-hold the raw torso
+                        # block and discard zest's). Its residual wobbles the
+                        # arms with the gait -- the classic hold carries an
+                        # object far more steadily -- and at an empty ref its
+                        # equilibrium parks the hands behind the hips. The hold
+                        # keeps arms/wrists/fingers PD-pinned; neck stays 0 and
+                        # torso_yaw holds its last value via the defaults above.
                         stash_zest_upper_ref(base_env, zest_ref)
                     if loco_mode == "locomotion" and loco_is_walk:
                         # run_kb parity: walk's neck targets apply whenever it
