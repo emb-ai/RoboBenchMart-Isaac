@@ -124,6 +124,20 @@ METHOD_NOTES = {
   not be carried over: some encoded label relief or were photographs of the
   original product. Roughness/metallic keep a single median value per channel so
   materials still read as metal, glass or plastic.""",
+    "monotone": """- **Every product is a single flat colour.** That colour is the mean of the
+  product's own albedo, taken over the texels its UVs actually cover (unused
+  atlas padding is excluded, or every product would be dragged toward black)
+  and weighted across the product's materials by the 3D surface area each
+  covers. The mean is taken in sRGB rather than linear light: linear averaging
+  is the correct mean reflectance but washes the products out and pulls them
+  together, while the sRGB mean keeps each product distinguishable on the shelf.
+- **Shading maps are flattened too** - normals to flat, emissive to black, and
+  roughness/metallic/occlusion to their own masked mean. Left alone, the label
+  would survive as relief in the roughness and normal maps even though the
+  colour is uniform.
+- No label artwork of any kind is shipped: every product texture is a solid
+  colour field. `product_colours.json` in the build directory records the
+  colour assigned to each product.""",
     "mirror+blur": """- **Textures are the source atlases, mirrored and blurred.** Each UV panel is
   flipped horizontally, so label text reads backwards on the product, and then
   Gaussian-blurred. The mirror is per panel rather than per image, because a

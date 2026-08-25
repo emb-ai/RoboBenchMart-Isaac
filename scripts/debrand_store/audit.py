@@ -47,6 +47,18 @@ ARTWORK_NOTES = {
         "be carried over -- the source Tabasco emissive map is a photograph of the",
         "bottles and the source Nivea ORM map holds legible label relief.",
     ],
+    "monotone": [
+        "Every product texture is a single flat colour field. The colour is the",
+        "product's own mean albedo over the texels its UVs cover, weighted across",
+        "materials by 3D surface area; shading maps are flattened to constants so",
+        "no label relief survives in roughness or normals.",
+        "",
+        "The colour is a one-number-per-channel summary of the original artwork, so",
+        "nothing of the source design - no shape, text, logo or layout - is",
+        "reproducible from it. Colour alone can still evoke a brand where a product",
+        "is strongly associated with one (a red-and-white can reads as cola), but no",
+        "mark is depicted.",
+    ],
     "mirror+blur": [
         "**These textures are NOT synthetic.** Every product texture is the source",
         "atlas with each UV panel flipped horizontally and Gaussian-blurred, so the",

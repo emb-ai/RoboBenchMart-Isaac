@@ -261,8 +261,9 @@ def main() -> None:
     Path(args.out).write_text(yaml.safe_dump(
         {"products": plan}, sort_keys=True, default_flow_style=False, width=100))
 
-    dropped = sum(plan[a]["instances"] for a in SHAPE_IP if a in plan)
-    print(f"{len(plan)} products planned; {len(SHAPE_IP)} shape-IP drops "
+    present = [a for a in SHAPE_IP if a in plan]
+    dropped = sum(plan[a]["instances"] for a in present)
+    print(f"{len(plan)} products planned; {len(present)} shape-IP drops "
           f"({dropped} item prims re-pointed)")
     for asset in SHAPE_IP:
         if asset in plan:
