@@ -1207,6 +1207,30 @@ def main() -> None:
             flush=True,
         )
 
+    # Auto-match the recorded physics step (--sim_dt_denominator sessions).
+    # Datasets from before the key existed all ran the task cfg's dt.
+    _recorded_sim_dt = _dataset_env_args.get("sberchel_sim_dt")
+    if _recorded_sim_dt is not None and abs(float(_recorded_sim_dt) - env_cfg.sim.dt) > 1e-9:
+        print(
+            f">>> sim dt: {float(_recorded_sim_dt):.6f} s "
+            f"(task cfg {env_cfg.sim.dt:.6f} s) — auto-matched from dataset provenance"
+        )
+        env_cfg.sim.dt = float(_recorded_sim_dt)
+
+    # Auto-match the recorded self-collision plant. Datasets from before the
+    # key existed were all recorded with the MuJoCo-faithful filter (it predates
+    # the opt-out), so the default is True.
+    if not bool(_dataset_env_args.get("sberchel_mjcf_collision_filters", True)):
+        from dsynth_isaac.robots.sberchel_cfg import GREEN_CHALLENGE_SPAWN_FUNC
+
+        env_cfg.scene.robot.spawn = env_cfg.scene.robot.spawn.replace(
+            func=GREEN_CHALLENGE_SPAWN_FUNC
+        )
+        print(
+            ">>> self-collisions: green_challenge parity (MJCF masks NOT restored) "
+            "— auto-matched from dataset provenance"
+        )
+
     recorded_enhanced_determinism = bool(_dataset_env_args.get("sberchel_enhanced_determinism", False))
     enhanced_determinism = args_cli.enhanced_determinism or recorded_enhanced_determinism
     if recorded_enhanced_determinism and not args_cli.enhanced_determinism:

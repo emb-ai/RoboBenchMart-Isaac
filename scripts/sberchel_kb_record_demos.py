@@ -315,6 +315,70 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--spawn_height",
+    type=float,
+    default=0.0,
+    help=(
+        "Override the robot root spawn/reset height in metres (0 = keep the "
+        "task cfg's SBERCHEL_STAND_HEIGHT = 0.9). green_challenge initialises "
+        "at 0.88 (their json init_state and validation_scene 'center'), so our "
+        "default drops the robot 2 cm onto the floor at EVERY reset -- a "
+        "systematic landing jolt their plant never has, and part of what "
+        "decides which contact equilibrium the in-palm thumbs settle into. "
+        "Pass 0.88 for their exact start. Recorded in provenance as "
+        "sberchel_spawn_height (replay needs no matching: it restores the "
+        "recorded initial state verbatim)."
+    ),
+)
+parser.add_argument(
+    "--sim_dt_denominator",
+    type=int,
+    default=0,
+    help=(
+        "Override the physics step to 1/N s (0 = keep the task cfg's 1/150). "
+        "250 is the measured stability point for the thumb explicit-PD limit "
+        "cycle (kd=2.0, armature=0.005 -> critical step ~5 ms; 1/150 = 6.7 ms "
+        "rings, 1/250 = 4 ms does not) -- the ring green_challenge's own "
+        "run.sh shows too. Invisible in the dataset artifact (achieved states, "
+        "resampled to 30 fps on export). Pair with --walk_policy_decimation 5 "
+        "so walk keeps its trained 50 Hz. Recorded in provenance as "
+        "sberchel_sim_dt; replay auto-matches it."
+    ),
+)
+parser.add_argument(
+    "--thumb_probe",
+    action="store_true",
+    default=False,
+    help=(
+        "Print per-thumb-joint oscillation stats (RMS joint velocity, "
+        "peak-to-peak position) every sim second, plus the resident "
+        "stiffness/damping/armature at startup. Same metric as "
+        "scripts/thumb_probe_socket.py prints against green_challenge's "
+        "run.sh socket, so the two plants compare in joint units instead of "
+        "screencast pixels."
+    ),
+)
+parser.add_argument(
+    "--gc_self_collisions",
+    action="store_true",
+    default=False,
+    help=(
+        "green_challenge-parity self-collisions: spawn the robot WITHOUT "
+        "restoring the MJCF contype/conaffinity masks (their importer drops "
+        "them, so PhysX collides every non-parent/child link pair -- including "
+        "thumb-vs-palm pairs MuJoCo, the policies' training plant, never "
+        "collides). Matches the plant their run.sh/eval actually runs: expect "
+        "a thumb to sit jammed in the palm at the open-hand pose, and in-hand "
+        "contact during grasps to include extra palm/proximal pairs. Also "
+        "skips the post-reset settle re-latch of the locomotion hold, so the "
+        "init-pose finger command persists exactly like their constant "
+        "default-pose commands (their quiet thumb is quiet because the command "
+        "wedges it into the palm). Default (off) keeps the MuJoCo-faithful "
+        "filter from sberchel_self_collision. Recorded in provenance as "
+        "sberchel_mjcf_collision_filters; replay auto-matches it."
+    ),
+)
+parser.add_argument(
     "--print_every_n",
     type=int,
     default=30,
@@ -697,6 +761,7 @@ from dsynth_isaac.teleop.xr_anchor import (
 )
 from dsynth_isaac.teleop.xr_target_hud import XrTargetHud
 from dsynth_isaac.robots.sberchel_cfg import (
+    GREEN_CHALLENGE_SPAWN_FUNC,
     reassert_legacy_teleop_gain_tensors,
     sberchel_upper_pd_gain_table,
     xr_upper_legacy_teleop_actuator,
@@ -715,6 +780,7 @@ from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
     POLICY_MODEL_ARM_SLICE,
     POLICY_MODEL_NECK_SLICE,
     POLICY_TORSO_MODEL_INDEX,
+    SBERCHEL_STAND_HEIGHT,
     LocoMode,
     LocoPolicySet,
 )
@@ -944,9 +1010,21 @@ class PinkJointHold:
             self._term.apply_actions = self._apply_hold  # type: ignore[method-assign]
             self._active = True
 
-    def refresh(self, robot) -> None:
-        """Re-capture hold targets (call after reset / mode entry)."""
-        self._targets = self._capture(robot)
+    def refresh(self, robot, *, measured: bool = False) -> None:
+        """Re-capture hold targets (call after reset / mode entry).
+
+        ``measured=True`` forces the capture from the measured pose even after
+        steps have validated ``joint_pos_target``. Needed for the post-reset
+        settle re-latch: by then the commanded targets ARE the problem (the
+        in-penetration reset pose), and capturing them would re-latch it.
+        """
+        if measured:
+            source_valid = self._targets_valid
+            self._targets_valid = False
+            self._targets = self._capture(robot)
+            self._targets_valid = source_valid
+        else:
+            self._targets = self._capture(robot)
 
     def disable(self) -> None:
         if self._active:
@@ -1487,6 +1565,45 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
                 flush=True,
             )
 
+    if args_cli.spawn_height > 0.0:
+        # Rebind a fresh init_state on this cfg copy (shallow-shared with the
+        # module-level robot cfg). The reset event reads default_root_state, so
+        # the override applies to every episode's teleport, not just spawn.
+        _p = env_cfg.scene.robot.init_state.pos
+        env_cfg.scene.robot.init_state = env_cfg.scene.robot.init_state.replace(
+            pos=(_p[0], _p[1], float(args_cli.spawn_height))
+        )
+        print(
+            f">>> SPAWN HEIGHT: z={args_cli.spawn_height:g} m (task cfg {_p[2]:g}; "
+            "green_challenge initialises at 0.88). Recorded in provenance.",
+            flush=True,
+        )
+    if args_cli.sim_dt_denominator > 0:
+        env_cfg.sim.dt = 1.0 / float(args_cli.sim_dt_denominator)
+        print(
+            f">>> SIM DT: 1/{args_cli.sim_dt_denominator} s (task cfg overridden; "
+            "recorded in provenance, replay auto-matches). Control still runs "
+            "once per env step -- retune --walk_policy_decimation for 50 Hz.",
+            flush=True,
+        )
+    if args_cli.gc_self_collisions:
+        # Spawn through green_challenge's raw spawner instead of the
+        # mask-restoring wrapper: the MJCF contype/conaffinity masks stay lost,
+        # exactly like their run.sh/eval plant. The filter is applied to the
+        # live stage at spawn time (never baked into the USD cache), so the
+        # unwrapped func is a clean opt-out. Rebind spawn on this cfg copy --
+        # .replace() is shallow and mutating in place would leak into the
+        # module-level robot cfg.
+        env_cfg.scene.robot.spawn = env_cfg.scene.robot.spawn.replace(
+            func=GREEN_CHALLENGE_SPAWN_FUNC
+        )
+        print(
+            ">>> SELF-COLLISIONS: green_challenge parity (MJCF masks NOT "
+            "restored) -- PhysX collides every non-adjacent link pair. Expect "
+            "run.sh thumb behaviour (one jammed in the palm) and extra in-hand "
+            "contact pairs during grasps. Recorded in provenance.",
+            flush=True,
+        )
     env_cfg.recorders = SberchelXRRecorderManagerCfg()
     env_cfg.recorders.dataset_export_dir_path = output_dir
     env_cfg.recorders.dataset_filename = output_file_name
@@ -1854,6 +1971,24 @@ def main() -> None:
                     # of the green_challenge-native soft PD. Unlike the retired
                     # two-regime flag of the same name, the plant never switches
                     # mid-session.
+                    # True (default): the MuJoCo-faithful contype/conaffinity
+                    # filter from sberchel_self_collision was applied at spawn.
+                    # False (--gc_self_collisions): green_challenge parity, the
+                    # importer's masks-lost collision set -- every non-adjacent
+                    # link pair collides, thumb-vs-palm included. Replay
+                    # auto-matches this from provenance.
+                    "sberchel_mjcf_collision_filters": not args_cli.gc_self_collisions,
+                    # Physics step the session actually ran (s). Replay matches
+                    # it; the dataset artifact itself never exposes it (achieved
+                    # states, 30 fps export).
+                    "sberchel_sim_dt": float(base_env.physics_dt),
+                    # Root z the robot spawns/resets at. Replay restores the
+                    # recorded initial state verbatim, so no matching needed.
+                    "sberchel_spawn_height": (
+                        float(args_cli.spawn_height)
+                        if args_cli.spawn_height > 0.0
+                        else float(SBERCHEL_STAND_HEIGHT)
+                    ),
                     "sberchel_legacy_stiff_teleop": bool(args_cli.legacy_teleop_gains),
                     # Which actuator model carried the stiff gains: 'implicit'
                     # (the faithful legacy plant: PhysX drives, no friction) or
@@ -2042,6 +2177,16 @@ def main() -> None:
     # for the whole locomotion segment (run_kb/run.py parity -- see the apply
     # site below).
     loco_zest_ref_arms: torch.Tensor | None = None
+    # Post-reset settle re-latch for the locomotion hold, same physics as
+    # _LEFT_HOLD_SETTLE_STEPS: the reset pose writes both thumb yaws at -0.1,
+    # inside the palm collision hull, and the hold captures BEFORE PhysX kicks
+    # them out to the ~0.24 contact equilibrium. Left as-is, the whole
+    # locomotion segment commands the unreachable -0.1 into the palm (kp*0.34 >
+    # the 8.5 Nm finger limit) and both thumbs chatter from step 0. Once the
+    # pose has settled, re-capture the hold from the MEASURED pose. Cleared on
+    # static entry: from there the operator owns the hand and the
+    # grip-preserving commanded-target capture is the right one again.
+    pink_hold_settle_pending = True
     last_hz_t = time.time()
     hz_window_steps = 0
     effective_hz = 0.0
@@ -2128,6 +2273,10 @@ def main() -> None:
         nonlocal static_blend_from, static_blend_neck_from, static_blend_torso_from
         nonlocal static_blend_steps_done, static_blend_total
         nonlocal loco_arm_blend_from, arm_drive_engaged
+        nonlocal pink_hold_settle_pending
+        # The operator owns the hand from here; later holds must capture the
+        # grip-preserving commanded targets, not the measured pose.
+        pink_hold_settle_pending = False
         policies.activate("static")
         loco_mode = "static"
         loco_arm_blend_from = None
@@ -2538,6 +2687,51 @@ def main() -> None:
         else:
             _finger_gains.append((0.0, 0.0))
 
+    # --- thumb oscillation probe (--thumb_probe) ---------------------------
+    # Same metric as scripts/thumb_probe_socket.py reads off green_challenge's
+    # run.sh socket: per-joint RMS velocity + peak-to-peak position over ~1 sim
+    # second. Includes the passive intermediate/distal dofs -- they are the
+    # visibly rattling segments and carry no PD of their own.
+    _thumb_ids = [i for i, n in enumerate(robot.joint_names) if "thumb" in n]
+    _thumb_names = [robot.joint_names[i].replace("_joint", "") for i in _thumb_ids]
+    _thumb_pos_buf: list[torch.Tensor] = []
+    _thumb_vel_buf: list[torch.Tensor] = []
+    if args_cli.thumb_probe:
+        _gain_rows = []
+        for _gname, _gact in robot.actuators.items():
+            for _li, _jn in enumerate(_gact.joint_names):
+                if "thumb" not in _jn:
+                    continue
+                _arm = (
+                    float(_gact.armature[0, _li].item())
+                    if getattr(_gact, "armature", None) is not None
+                    else float("nan")
+                )
+                _gain_rows.append(
+                    f"{_jn}[{_gname}] kp={float(_gact.stiffness[0, _li]):g} "
+                    f"kd={float(_gact.damping[0, _li]):g} armature={_arm:g}"
+                )
+        print(">>> [thumb-probe] resident params: " + "; ".join(_gain_rows), flush=True)
+
+    def thumb_probe_tick() -> None:
+        if not args_cli.thumb_probe:
+            return
+        _thumb_pos_buf.append(robot.data.joint_pos[0, _thumb_ids].detach().cpu().clone())
+        _thumb_vel_buf.append(robot.data.joint_vel[0, _thumb_ids].detach().cpu().clone())
+        if len(_thumb_pos_buf) < 150:
+            return
+        pos = torch.stack(_thumb_pos_buf)
+        vel = torch.stack(_thumb_vel_buf)
+        _thumb_pos_buf.clear()
+        _thumb_vel_buf.clear()
+        stats = "  ".join(
+            f"{name}: rms_v={vel[:, k].pow(2).mean().sqrt():.4f} "
+            f"p2p={(pos[:, k].max() - pos[:, k].min()):.4f} "
+            f"mean={pos[:, k].mean():.3f}"
+            for k, name in enumerate(_thumb_names)
+        )
+        print(f"[thumb-probe] {stats}", flush=True)
+
     def grip_report() -> str:
         """Per-hand peak *closing* torque, and how many digits are saturated.
 
@@ -2693,6 +2887,31 @@ def main() -> None:
                         left_hold_snapshot = capture_frozen_upper(robot)
                         print(
                             f"[left-hold] latched at step {step_count} from measured pose",
+                            flush=True,
+                        )
+                    if (
+                        pink_hold_settle_pending
+                        and not args_cli.gc_self_collisions
+                        and loco_mode == "locomotion"
+                        and step_count >= _LEFT_HOLD_SETTLE_STEPS
+                    ):
+                        # Re-latch the locomotion hold from the settled measured
+                        # pose (see pink_hold_settle_pending above): drops the
+                        # in-penetration reset thumb command that chatters both
+                        # thumbs against the palm from step 0.
+                        #
+                        # Skipped under --gc_self_collisions: run.sh parity
+                        # means commanding the init pose forever, exactly like
+                        # their constant default-pose finger commands. Their
+                        # quiet thumb is quiet BECAUSE the command wedges it
+                        # into the palm (a static jam a solver constraint
+                        # holds); re-latching to the settled pose un-jams it
+                        # and frees it to ring.
+                        pink_hold.refresh(robot, measured=True)
+                        pink_hold_settle_pending = False
+                        print(
+                            f"[loco-hold] re-latched at step {step_count} from "
+                            "settled measured pose (thumb de-penetration)",
                             flush=True,
                         )
                     vx = vy = wz = 0.0
@@ -2922,6 +3141,7 @@ def main() -> None:
                     # From here on joint_pos_target holds a real command, so the
                     # Pink hold can capture grasp intent instead of measured pose.
                     pink_hold.mark_stepped()
+                    thumb_probe_tick()
 
                     should_print = False
                     if args_cli.print_every_n > 0:
@@ -3044,6 +3264,9 @@ def main() -> None:
                     # Targets survive reset while the robot is teleported back to
                     # its init pose, so they no longer describe the robot.
                     pink_hold.invalidate()
+                    # New episode, new in-penetration reset pose: re-arm the
+                    # settle re-latch of the locomotion hold.
+                    pink_hold_settle_pending = True
                     if discard:
                         base_env.recorder_manager.cfg.export_in_record_pre_reset = True
                     hold_xy_yaw = None

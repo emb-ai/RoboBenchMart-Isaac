@@ -141,6 +141,19 @@ _UPPER_JOINT_EXPRS: list[str] = [
     ".*_middle_proximal_joint",
     ".*_ring_proximal_joint",
     ".*_pinky_proximal_joint",
+    # The mimic-slave linkage dofs. green_challenge's ``motors`` group claims
+    # them too: no PD (absent from stiffness/damping -> kp=kd=0) but REAL
+    # armature (0.005) and friction (viscous 0.08, breakaway/coulomb 0.005)
+    # from the json. Leaving them unclaimed (as this list did before) strips
+    # that reflected inertia and damping from the geared finger chains -- the
+    # thumb-yaw contact limit cycle rang ~2.5x harder here than in their
+    # run.sh (measured 3.86 vs 1.54 rad/s RMS) until they were added.
+    ".*_thumb_intermediate_joint",
+    ".*_thumb_distal_joint",
+    ".*_index_intermediate_joint",
+    ".*_middle_intermediate_joint",
+    ".*_ring_intermediate_joint",
+    ".*_pinky_intermediate_joint",
     "neck_yaw_joint",
     "neck_pitch_joint",
 ]
@@ -152,7 +165,9 @@ def _passive_actuators() -> dict:
     Covers ``.*_ankle_pitch``, ``.*_ankle_roll``, ``.*_knee_pitch`` and
     ``.*_wrist_pitch`` -- the dofs the four-bars drive. It carries no gains; it
     exists so Isaac Lab accounts for those joints instead of leaving them
-    unclaimed. The remaining rod/inter dofs stay unclaimed, as on their side.
+    unclaimed. Only the loop-closure rod dofs stay unclaimed, as on their side
+    (the finger intermediate/distal dofs belong to ``xr_upper``, mirroring
+    their ``motors`` group's armature+friction on them).
     """
     passive = SBERCHEL_CONFIG.actuators.get("passive")
     return {"passive": passive} if passive is not None else {}
@@ -399,6 +414,11 @@ _LEGACY_XR_NECK_DAMPING = 20.0
 
 def legacy_teleop_gains_for_joint(j_name: str) -> tuple[float, float] | None:
     """Legacy stiff ``(stiffness, damping)`` for an ``xr_upper`` joint, or None."""
+    # Mimic-slave linkage dofs: in the group only for armature/friction parity
+    # with green_challenge's motors group; they are kinematically geared and
+    # never carried PD on either plant, legacy or native.
+    if "intermediate" in j_name or "distal" in j_name:
+        return None
     if "shoulder" in j_name or "elbow" in j_name or "wrist" in j_name:
         return _LEGACY_XR_ARM_STIFFNESS, _LEGACY_XR_ARM_DAMPING
     if "thumb" in j_name or "proximal" in j_name:
