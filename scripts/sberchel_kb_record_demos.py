@@ -3289,9 +3289,10 @@ def main() -> None:
                             # checkpoint rollbacks (which truncate the buffer) are exactly
                             # the flips of teleop_state[:,0]. Each index is the first step
                             # of its segment: [0, s0), [s0, s1), ... splits the demo into
-                            # walk / manipulate subtasks.
+                            # walk / manipulate subtasks. Buffer rows are the per-env
+                            # slice, shape (3,) -- reshape like the replay reader does.
                             is_loco = [
-                                bool(float(row[0, 0]) > 0.5)
+                                bool(float(row.reshape(-1)[0]) > 0.5)
                                 for row in episode.data.get("teleop_state", [])
                             ]
                             switch_steps = [
