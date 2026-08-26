@@ -926,6 +926,51 @@ def sync_scene_to_recorded_state(env, recorded_state: dict, env_id: int, zero_ve
 
 
 _warned_no_store_products = False
+# Indices into the live store snapshot for each recorded store_products row
+# (LongTensor), or None when recorded rows already cover the live store in
+# order. Set once in main() via build_store_row_body_indices().
+_store_row_body_indices = None
+
+
+def build_store_row_body_indices(env, dataset_file: str, dataset_env_args: dict):
+    """Map recorded store_products rows onto the live store snapshot by prim path.
+
+    Demos recorded with a lean store (--keep_boards in the recorder) carry rows
+    for only the populated boards, while replay runs the fully stocked store.
+    The recorder's ``<dataset>.store_prims.json`` sidecar gives the recorded
+    prim order; each path is matched to its index in the live snapshot. Returns
+    ``None`` when the recorded order equals the live order (full-store
+    recordings; legacy demos predate the sidecar and were always full-store).
+    """
+    snapshot = getattr(env.scene, "_store_rigid_snapshot", None)
+    if snapshot is None:
+        return None
+    live_paths = list(snapshot.prim_paths)
+    sidecar = Path(dataset_file).with_suffix(".store_prims.json")
+    if not sidecar.exists():
+        recorded_count = dataset_env_args.get("sberchel_store_prim_count")
+        if recorded_count is not None and int(recorded_count) != len(live_paths):
+            raise FileNotFoundError(
+                f"Dataset records {recorded_count} store products but the replay scene has "
+                f"{len(live_paths)}; mapping lean-store rows onto the full store needs the "
+                f"{sidecar.name} sidecar next to the dataset file."
+            )
+        return None
+    recorded_paths = json.loads(sidecar.read_text())
+    if recorded_paths == live_paths:
+        return None
+    live_index = {path: i for i, path in enumerate(live_paths)}
+    missing = [path for path in recorded_paths if path not in live_index]
+    if missing:
+        raise ValueError(
+            f"{len(missing)} recorded store product prims are absent from the replay scene "
+            f"(first: {missing[0]}). The replay store version does not match the recording."
+        )
+    print(
+        f">>> store products: mapping {len(recorded_paths)} recorded rows onto "
+        f"{len(live_paths)} live bodies by prim path (lean-store recording)"
+    )
+    return torch.tensor([live_index[path] for path in recorded_paths], dtype=torch.long)
 
 
 def sync_store_products_to_recorded(
@@ -964,6 +1009,15 @@ def sync_store_products_to_recorded(
                 reason = "store product sync is single-env only"
             print(f"Warning: store products not synced — {reason}; grasped objects may drift.")
         return
+    if _store_row_body_indices is None:
+        live_count = len(getattr(env.scene, "_store_rigid_snapshot").prim_paths)
+        if store["transforms"].shape[1] != live_count:
+            raise ValueError(
+                f"Recorded store_products rows ({store['transforms'].shape[1]}) do not match "
+                f"the live store ({live_count} bodies) and no .store_prims.json sidecar was "
+                "found next to the dataset to map them by prim path. Lean-store recordings "
+                "need their sidecar for replay."
+            )
     velocities = store["velocities"][step_idx]
     if zero_velocities:
         velocities = torch.zeros_like(velocities)
@@ -974,6 +1028,7 @@ def sync_store_products_to_recorded(
             "velocities": velocities,
         },
         only_moved=only_moved,
+        body_indices=_store_row_body_indices,
     )
 
 
@@ -1361,6 +1416,10 @@ def main() -> None:
 
     env = gym_env.unwrapped
     assert_dataset_matches_robot(_dataset_env_args, env.scene["robot"])
+    # Lean-store recordings carry store_products rows for a subset of the fully
+    # stocked replay store; resolve the row -> live-body mapping once.
+    global _store_row_body_indices
+    _store_row_body_indices = build_store_row_body_indices(env, args_cli.dataset_file, _dataset_env_args)
     # FrictionalActuator zeros stiffness wherever force_control=true (all loco
     # joints). The policy PD gains required for joint-position tracking are
     # restored by Network.__init__ and re-asserted on every activate. Recording
@@ -1429,6 +1488,13 @@ def main() -> None:
                 "height": tp_size[1],
             }
         output_dataset_handler.add_env_args(merged_env_args)
+        # The output carries the recording's store_products rows verbatim, so
+        # its sidecar (recorded prim order) must travel with it too.
+        _src_sidecar = Path(args_cli.dataset_file).with_suffix(".store_prims.json")
+        if _src_sidecar.exists():
+            _out_sidecar = Path(args_cli.output_dataset_file).with_suffix(".store_prims.json")
+            _out_sidecar.write_text(_src_sidecar.read_text())
+            print(f"Camera augment: store product prim order -> {_out_sidecar}")
         keys_str = ", ".join(f"obs/{key}" for key in export_img_keys)
         print(
             f"Camera augment: writing {keys_str} "
@@ -1704,6 +1770,7 @@ def main() -> None:
                                             "velocities": store["velocities"][0],
                                         },
                                         only_moved=False,
+                                        body_indices=_store_row_body_indices,
                                     )
                                 # Renders read transforms from Fabric, which only
                                 # syncs from PhysX during a physics step: without

@@ -647,7 +647,7 @@ parser.add_argument(
 parser.add_argument(
     "--target_items",
     type=str,
-    default="Energy Drink,Juice,Tomato Paste,Shampoo",
+    default="Energy Drink,Juice,Sauce,Shampoo",
     help=(
         "Comma-separated pick-target names. The session's first start pose gets "
         "a random target (derived from the episode seed); every later pose "
@@ -655,6 +655,26 @@ parser.add_argument(
         "target either way. Shown as a small text panel at the top-right of "
         "the VR view."
     ),
+)
+parser.add_argument(
+    "--keep_boards",
+    type=str,
+    default="r01_s02_b2,r02_s01_b2,r03_s01_b2,r04_s01_b2",
+    help=(
+        "Comma-separated store board labels (rXX_sYY_bZ from the item prim names) "
+        "to keep populated during recording; all other store products are removed "
+        "from the sim for speed and re-appear at replay/export. The default is the "
+        "third board (b2) on the four shelf units the default --target_items are "
+        "picked from: Shampoo=r01_s02_b2, Energy Drink=r02_s01_b2, "
+        "Juice=r03_s01_b2, Tomato Paste=r04_s01_b2. Keep this in sync with "
+        "--target_items if you change either."
+    ),
+)
+parser.add_argument(
+    "--full_store",
+    action="store_true",
+    default=False,
+    help="Spawn every store product during recording (disables the --keep_boards lean store).",
 )
 parser.add_argument(
     "--no_target_hud",
@@ -1475,6 +1495,24 @@ def create_environment_config(output_dir: str, output_file_name: str) -> Manager
         env_cfg.sim.physx.enable_enhanced_determinism = True
         print(">>> PhysX enhanced determinism: ON (recorded in dataset provenance)", flush=True)
 
+    # Lean store (default): spawn only the boards the pick targets live on;
+    # every other store product is deactivated before PhysX parses the stage,
+    # which is the dominant sim cost (~2200 never-sleeping convex bodies down
+    # to ~320). Replay (sberchel_replay_demos.py) runs the full store and maps
+    # the recorded store_products rows back by prim path via the
+    # .store_prims.json sidecar, so exported datasets show every shelf stocked.
+    keep_boards: list[str] | None = None
+    if not args_cli.full_store:
+        keep_boards = [b.strip() for b in args_cli.keep_boards.split(",") if b.strip()]
+        if not keep_boards:
+            raise ValueError("--keep_boards is empty; pass board labels or use --full_store.")
+        if hasattr(env_cfg.scene, "keep_product_boards"):
+            env_cfg.scene.keep_product_boards = keep_boards
+            print(f">>> lean store: only boards {keep_boards} populated (--full_store disables)", flush=True)
+        else:
+            keep_boards = None
+            print(f"[WARN] {args_cli.task} scene has no keep_product_boards; recording full store", flush=True)
+
     if args_cli.solver_iters:
         pos, vel = (int(v) for v in args_cli.solver_iters.split(","))
         env_cfg.scene.robot.spawn.articulation_props.solver_position_iteration_count = pos
@@ -2202,6 +2240,10 @@ def main() -> None:
                     "sberchel_store_prim_paths_blake2b": hashlib.blake2b(
                         "\n".join(_store_prim_paths).encode(), digest_size=8
                     ).hexdigest(),
+                    # Boards populated at record time (lean store), or None for
+                    # the full store. Replay repopulates everything and maps the
+                    # store_products rows back by prim path via the sidecar.
+                    "sberchel_store_keep_boards": keep_boards,
                 }
             )
             if _store_prim_paths:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from collections.abc import Iterator
 from dataclasses import MISSING, dataclass, field
 from pathlib import Path
@@ -160,6 +161,57 @@ def iter_store_rigid_bodies(
             yield prim, rb.GetKinematicEnabledAttr().Get()
 
 
+# Store item prims are named ``r{row}_s{unit}_b{board}_item_{idx}`` under each
+# shelf unit's ``visual_items`` scope; group(1) is the board label.
+_STORE_ITEM_NAME_RE = re.compile(r"^(r\d+_s\d+_b\d+)_item_\d+$")
+
+
+def deactivate_off_board_products(
+    stage: Usd.Stage,
+    env_prim_paths: list[str],
+    keep_boards: list[str],
+    store_root_name: str = "dsynth_scene",
+) -> tuple[int, int]:
+    """Deactivate store item prims that are not on the given boards.
+
+    ``keep_boards`` entries are board labels as encoded in the item prim names
+    (``"r01_s02_b2"`` keeps every ``r01_s02_b2_item_*``). Must run before the
+    first ``sim.reset()``: PhysX never parses inactive prims, so stripped
+    products cost nothing to simulate or render. Returns (kept, removed);
+    raises if a requested board matches no item (typo protection — a lean
+    recording session against an empty board would be wasted).
+    """
+    keep = set(keep_boards)
+    matched: set[str] = set()
+    to_deactivate: list[Usd.Prim] = []
+    kept = 0
+    for env_path in env_prim_paths:
+        store_root = stage.GetPrimAtPath(f"{env_path}/{store_root_name}")
+        if not store_root.IsValid():
+            logger.warning("[SberDemo] Store root missing under %s", env_path)
+            continue
+        it = iter(Usd.PrimRange(store_root))
+        for prim in it:
+            match = _STORE_ITEM_NAME_RE.match(prim.GetName())
+            if match is None or prim.GetParent().GetName() != "visual_items":
+                continue
+            it.PruneChildren()
+            if match.group(1) in keep:
+                matched.add(match.group(1))
+                kept += 1
+            else:
+                to_deactivate.append(prim)
+    unmatched = keep - matched
+    if unmatched:
+        raise ValueError(
+            f"[SberDemo] keep_product_boards entries matched no store items: {sorted(unmatched)}. "
+            "Board labels come from item prim names, e.g. 'r01_s02_b2'."
+        )
+    for prim in to_deactivate:
+        prim.SetActive(False)
+    return kept, len(to_deactivate)
+
+
 def _world_pose_wxyz(prim: Usd.Prim, xform_cache: UsdGeom.XformCache) -> tuple[np.ndarray, np.ndarray]:
     """Return world position (3,) and orientation wxyz (4,) for a prim."""
     matrix = xform_cache.GetLocalToWorldTransform(prim)
@@ -247,6 +299,7 @@ class StoreRigidBodySnapshot:
         pos_tol: float = 0.02,
         ang_tol: float = 4e-3,
         lin_vel_tol: float = 0.25,
+        body_indices=None,
     ) -> int:
         """Write a :meth:`capture_live_state` snapshot back to PhysX.
 
@@ -261,6 +314,13 @@ class StoreRigidBodySnapshot:
         jitter-flagged products makes whole shelves visibly re-settle on every
         restore. Angular velocity is ignored for the same reason.
 
+        ``body_indices`` (integer tensor of indices into this snapshot's prim
+        order) declares which bodies the state rows describe, row ``k`` of the
+        state mapping to body ``body_indices[k]`` — for states captured on a
+        scene with fewer products (lean recording via ``keep_product_boards``)
+        replayed against the full store. ``None`` means the state covers every
+        body in snapshot order.
+
         Returns the number of bodies written.
         """
         if state is None or len(self.prim_paths) == 0:
@@ -269,25 +329,45 @@ class StoreRigidBodySnapshot:
         import torch
 
         view = self._ensure_view(sim)
+        state_tf = state["transforms"]
+        state_vel = state["velocities"]
+        if body_indices is not None:
+            body_idx = torch.as_tensor(body_indices, device=sim.device, dtype=torch.long)
+            # Scatter the recorded rows into full-view-sized buffers (the PhysX
+            # tensor API indexes data buffers by view row); unmapped rows keep
+            # their current state and are never selected below.
+            full_tf = view.get_transforms().clone()
+            full_vel = view.get_velocities().clone()
+            full_tf[body_idx] = state_tf.to(dtype=full_tf.dtype, device=full_tf.device)
+            full_vel[body_idx] = state_vel.to(dtype=full_vel.dtype, device=full_vel.device)
+            state_tf, state_vel = full_tf, full_vel
+        else:
+            body_idx = None
         if only_moved:
             current_tf = view.get_transforms()
             current_vel = view.get_velocities()
-            dpos = torch.linalg.norm(current_tf[:, :3] - state["transforms"][:, :3], dim=-1)
+            dpos = torch.linalg.norm(current_tf[:, :3] - state_tf[:, :3], dim=-1)
             quat_dot = (
-                (current_tf[:, 3:] * state["transforms"][:, 3:]).sum(dim=-1).abs().clamp(max=1.0)
+                (current_tf[:, 3:] * state_tf[:, 3:]).sum(dim=-1).abs().clamp(max=1.0)
             )
             moved = (
                 (dpos > pos_tol)
                 | (quat_dot < 1.0 - ang_tol)
                 | (torch.linalg.norm(current_vel[:, :3], dim=-1) > lin_vel_tol)
             )
+            if body_idx is not None:
+                mapped = torch.zeros_like(moved)
+                mapped[body_idx] = True
+                moved &= mapped
             indices = torch.nonzero(moved).flatten().to(device=sim.device, dtype=torch.int32)
+        elif body_idx is not None:
+            indices = body_idx.to(device=sim.device, dtype=torch.int32)
         else:
             indices = torch.arange(len(self.prim_paths), device=sim.device, dtype=torch.int32)
         if indices.numel() == 0:
             return 0
-        view.set_transforms(state["transforms"], indices=indices)
-        view.set_velocities(state["velocities"], indices=indices)
+        view.set_transforms(state_tf, indices=indices)
+        view.set_velocities(state_vel, indices=indices)
         return int(indices.numel())
 
     def restore(self, sim: SimulationContext, jitter: FirstRowJitterCfg | None = None) -> int:
@@ -577,6 +657,14 @@ class SberDemoSceneCfg(InteractiveSceneCfg):
     # Set by demo env cfgs; ``None`` is skipped by InteractiveScene.
     left_head_camera: CameraCfg | None = None
 
+    # Record-time lean store: board labels (``rXX_sYY_bZ`` from the item prim
+    # names) whose products stay in the scene; every other store item prim is
+    # deactivated before PhysX parses the stage. The rigid-body snapshot, the
+    # recorded store_products rows and the ``.store_prims.json`` sidecar then
+    # cover only the kept boards; replay maps the rows back onto the fully
+    # populated store by prim path. ``None`` keeps the full store.
+    keep_product_boards: list[str] | None = None
+
     dsynth_scene = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/dsynth_scene",
         spawn=StoreSubpathUsdCfg(
@@ -612,8 +700,24 @@ class SberDemoInteractiveScene(InteractiveScene):
     """InteractiveScene for the exported store USD package."""
 
     def __init__(self, cfg: SberDemoSceneCfg):
-        super().__init__(cfg)
+        # InteractiveScene treats every non-None, non-keyword cfg field as an
+        # asset cfg to spawn, so lift the plain-data board filter off while the
+        # base class runs and put it back afterwards.
+        keep_boards = getattr(cfg, "keep_product_boards", None)
+        if keep_boards is not None:
+            cfg.keep_product_boards = None
+        try:
+            super().__init__(cfg)
+        finally:
+            if keep_boards is not None:
+                cfg.keep_product_boards = keep_boards
         fix_store_room_material_bindings(self)
+        if keep_boards:
+            kept, removed = deactivate_off_board_products(self.stage, self.env_prim_paths, keep_boards)
+            print(
+                f"[INFO] SberDemo lean store: kept {kept} products on boards "
+                f"{sorted(keep_boards)}, deactivated {removed} others"
+            )
         self._store_rigid_snapshot = capture_store_rigid_body_snapshot(self, dynamic_only=True)
         self.first_row_jitter = FirstRowJitterCfg()
         try:
