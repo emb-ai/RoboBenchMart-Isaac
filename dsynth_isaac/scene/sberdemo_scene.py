@@ -299,20 +299,24 @@ class StoreRigidBodySnapshot:
         pos_tol: float = 0.02,
         ang_tol: float = 4e-3,
         lin_vel_tol: float = 0.25,
+        ang_vel_tol: float = 0.5,
         body_indices=None,
     ) -> int:
         """Write a :meth:`capture_live_state` snapshot back to PhysX.
 
         With ``only_moved`` (default) only bodies genuinely disturbed since the
         snapshot are written: displaced beyond ``pos_tol`` (m), rotated beyond
-        ``ang_tol`` (as 1 - |quat dot|; 4e-3 is about 10 degrees), or currently
+        ``ang_tol`` (as 1 - |quat dot|; 4e-3 is about 10 degrees), currently
         translating faster than ``lin_vel_tol`` (m/s, catches a mid-fall body
-        near its captured pose). The thresholds are deliberately coarse — well
-        above the contact micro-jitter of never-sleeping shelf products (mm /
-        mrad / small angular velocities), which must NOT count as moved: a PhysX
-        state write wakes the body and drops its contact warm-start, so writing
+        near its captured pose), or spinning faster than ``ang_vel_tol``
+        (rad/s, catches a body rocking/swinging about its rest pose — such an
+        oscillation can stay under all three pose/linear gates forever). The
+        thresholds are deliberately coarse — well above the contact
+        micro-jitter of never-sleeping shelf products (mm / mrad / mrad-per-s
+        angular velocities), which must NOT count as moved: a PhysX state
+        write wakes the body and drops its contact warm-start, so writing
         jitter-flagged products makes whole shelves visibly re-settle on every
-        restore. Angular velocity is ignored for the same reason.
+        restore.
 
         ``body_indices`` (integer tensor of indices into this snapshot's prim
         order) declares which bodies the state rows describe, row ``k`` of the
@@ -354,6 +358,7 @@ class StoreRigidBodySnapshot:
                 (dpos > pos_tol)
                 | (quat_dot < 1.0 - ang_tol)
                 | (torch.linalg.norm(current_vel[:, :3], dim=-1) > lin_vel_tol)
+                | (torch.linalg.norm(current_vel[:, 3:], dim=-1) > ang_vel_tol)
             )
             if body_idx is not None:
                 mapped = torch.zeros_like(moved)
