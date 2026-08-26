@@ -34,6 +34,20 @@ Task instructions are per-episode: each demo's ``task_instruction`` HDF5 attr
 task, with one ``tasks.jsonl`` row per distinct instruction. ``--task`` is only
 a uniform fallback for files with no per-episode source.
 
+Each episode additionally carries a 5-way SUBTASK decomposition (walk-to-shelf
+/ pick / carry-to-table / place-in-container / retract-hand), with prompts from
+the demo's ``subtask_instructions`` attr (or rebuilt from the target item):
+per-frame ``subtask_index`` column (same index space as ``task_index``, i.e.
+``tasks.jsonl``) plus per-segment rows in ``meta/subtasks.jsonl``. Subtasks 1-4
+are delimited by the operator's three mode-switch presses (``teleop_state[:,0]``
+flips); the place->retract boundary has no button press and is derived from
+object motion alone: the step after which the carried product (the store
+product with metres of displacement in ``store_products``) stays at its final
+rest pose — placed in the container and no longer moved by the hand. The
+squeeze channel is deliberately not used (hand-tracking demos may record zero
+squeeze throughout). Demos where the split fails keep the main task as their
+only subtask, with a warning.
+
 Usage:
     python scripts/sberchel_hdf5_to_lerobot.py datasets/dex_*cam.hdf5 \
         --output /path/to/out_dataset \
@@ -151,6 +165,27 @@ def target_task_instruction(item: str) -> str:
     return f"Pick {article} {item.strip()} and place it on the table."
 
 
+def target_subtask_instructions(item: str | None) -> list[str]:
+    """Five subtask prompts in execution order (mirrors the record script).
+
+    ``item=None`` (no per-demo target source) falls back to a generic noun so
+    the segmentation is still usable, just without item conditioning.
+    """
+    noun = (item or "object").strip()
+    article = "an" if noun[:1].lower() in "aeiou" else "a"
+    return [
+        f"Go to the shelf with the {noun}.",
+        f"Pick {article} {noun} from the shelf.",
+        f"Carry the {noun} to the table.",
+        f"Put the {noun} into the container.",
+        "Move the hand out of the container and return it to the default position.",
+    ]
+
+
+# Skill label per subtask slot, used in subtasks.jsonl segment entries.
+SUBTASK_SKILLS = ["walk", "pick", "walk", "place", "retract"]
+
+
 def _attr_str(value) -> str | None:
     if value is None:
         return None
@@ -196,6 +231,57 @@ def resolve_task_instruction(
         "No per-episode task instruction found (no task_instruction attr, no "
         "seed+sberchel_target_items to derive one). Pass --raw_file with the "
         "original teleop HDF5, or --task as an explicit uniform fallback."
+    )
+
+
+def resolve_target_item(
+    demo_attrs: dict,
+    raw_attrs: dict,
+    env_args: dict,
+    raw_env_args: dict,
+    relabel_items: list[str] | None,
+) -> str | None:
+    """Per-episode target item name, same source priority as the instruction."""
+    seed = demo_attrs.get("seed", raw_attrs.get("seed"))
+    if relabel_items:
+        if seed is None:
+            raise SystemExit("--relabel_target_items needs a per-demo 'seed' attr.")
+        return relabel_items[derive_target_index(int(seed), len(relabel_items))]
+    item = _attr_str(demo_attrs.get("target_item")) or _attr_str(raw_attrs.get("target_item"))
+    if item:
+        return item
+    items = env_args.get("sberchel_target_items") or raw_env_args.get("sberchel_target_items")
+    if items and seed is not None:
+        return items[derive_target_index(int(seed), len(items))]
+    return None
+
+
+def resolve_subtask_instructions(
+    demo_attrs: dict,
+    raw_attrs: dict,
+    env_args: dict,
+    raw_env_args: dict,
+    relabel_items: list[str] | None,
+) -> list[str]:
+    """Per-episode subtask prompts: stamped attr first, else rebuilt from the item.
+
+    ``--relabel_target_items`` skips the stamped attr — it was written with the
+    outdated item names the relabel exists to correct.
+    """
+    if not relabel_items:
+        stamped = _attr_str(demo_attrs.get("subtask_instructions")) or _attr_str(
+            raw_attrs.get("subtask_instructions")
+        )
+        if stamped:
+            try:
+                texts = json.loads(stamped)
+            except json.JSONDecodeError:
+                texts = None
+            if isinstance(texts, list) and len(texts) == 5:
+                return [str(t) for t in texts]
+            print("[warn] malformed 'subtask_instructions' attr; rebuilding from target item")
+    return target_subtask_instructions(
+        resolve_target_item(demo_attrs, raw_attrs, env_args, raw_env_args, relabel_items)
     )
 
 
@@ -273,6 +359,98 @@ def video_feature(height: int, width: int, fps: float) -> dict:
 
 def scalar_feature(dtype: str) -> dict:
     return {"dtype": dtype, "shape": [1], "names": None}
+
+
+# ---------------------------------------------------------------------------
+# Subtask segmentation
+# ---------------------------------------------------------------------------
+
+# The carried product must have moved at least this far to be identified;
+# jittered/nudged shelf neighbours move millimetres, the carried item metres.
+SUBTASK_CARRY_MIN_DISP = 0.5
+# "At rest": within this of the final pose for the remainder of the episode.
+SUBTASK_SETTLE_EPS = 0.01
+
+
+def detect_subtask_spans(demo: h5py.Group) -> tuple[list[tuple[int, int, int]] | None, str | None]:
+    """Split a demo into subtask spans ``(start_step, end_step, prompt_slot)``.
+
+    Slots index ``target_subtask_instructions``: 0 walk-to-shelf, 1 pick,
+    2 carry-to-table, 3 place-in-container, 4 retract-hand. Subtasks 0-3 are
+    delimited by the three mode switches (``teleop_state[:,0]`` flips — the
+    operator's C / Create presses). The place->retract boundary has no button
+    press; it is derived purely from object motion in ``store_products``: the
+    step after which the carried product stays at its final rest pose for the
+    remainder of the episode. Released into the container, the item drops the
+    last few centimetres and stops for good; while the hand still holds it,
+    hand motion keeps perturbing it — so the last settle instant marks "the
+    object is placed and the hand no longer moves it", and everything after is
+    the retract. Deliberately independent of the squeeze channel
+    (``teleop_state[:,1]``): hand-tracking sessions can close the grip with
+    finger curl alone and record zero squeeze for the whole demo.
+
+    Returns ``(spans, problem)``: spans cover [0, S) exactly; ``problem`` is a
+    human-readable reason when the canonical 5-way split degraded (spans may
+    then have 4 entries, or be None for no split at all).
+    """
+    if "teleop_state" not in demo:
+        return None, "no teleop_state stream (recorded before mode recording)"
+    ts = demo["teleop_state"][:]
+    S = int(ts.shape[0])
+    loco = ts[:, 0] > 0.5
+    flips = (np.where(np.diff(loco.astype(np.int8)) != 0)[0] + 1).tolist()
+    if not bool(loco[0]) or len(flips) != 3:
+        return None, (
+            f"non-canonical mode sequence (starts_loco={bool(loco[0])}, "
+            f"{len(flips)} switches at {flips}; expected 3)"
+        )
+    s0, s1, s2 = (int(v) for v in flips)
+
+    place_spans = [(0, s0, 0), (s0, s1, 1), (s1, s2, 2), (s2, S, 3)]
+    if "store_products" not in demo:
+        return place_spans, (
+            "no store_products stream — cannot locate the object settling; "
+            "place segment runs to the episode end"
+        )
+    pos = demo["store_products/transforms"][:, :, :3]
+    disp = np.linalg.norm(pos - pos[0], axis=2)
+    target = int(disp.max(axis=0).argmax())
+    if float(disp[:, target].max()) < SUBTASK_CARRY_MIN_DISP:
+        return place_spans, (
+            f"no store product moved >{SUBTASK_CARRY_MIN_DISP} m — cannot "
+            "identify the carried item; place segment runs to the episode end"
+        )
+    dist_final = np.linalg.norm(pos[:, target] - pos[-1, target], axis=1)
+    unsettled = np.where(dist_final > SUBTASK_SETTLE_EPS)[0]
+    settle = int(unsettled[-1]) + 1 if len(unsettled) else None
+    if settle is None or not (s2 < settle < S):
+        return place_spans, (
+            f"carried item's settle step ({settle}) is not inside the final "
+            "static segment; place segment runs to the episode end"
+        )
+    return (
+        [(0, s0, 0), (s0, s1, 1), (s1, s2, 2), (s2, settle, 3), (settle, S, 4)],
+        None,
+    )
+
+
+def subtask_frame_spans(
+    spans: list[tuple[int, int, int]], stride: int, num_frames: int
+) -> list[tuple[int, int, int]]:
+    """Sim-step spans -> camera-frame spans (frame k = sim step k*stride).
+
+    A boundary at sim step b starts at the first frame whose sim step >= b.
+    Clamped to the exported frame count; empty frame spans are dropped.
+    """
+    out = []
+    for start, end, slot in spans:
+        f0 = min(-(-start // stride), num_frames)
+        f1 = min(-(-end // stride), num_frames)
+        if f1 > f0:
+            out.append((f0, f1, slot))
+    if out:
+        out[-1] = (out[-1][0], num_frames, out[-1][2])
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -366,8 +544,10 @@ def main() -> None:
                              "old->new mapping is exact; for recordings made with outdated "
                              "product names).")
     parser.add_argument("--skill", default=None,
-                        help="Skill label for subtasks.jsonl. Default: first word of the "
-                             "episode's task instruction.")
+                        help="Skill label for the whole-episode action_config entry (and the "
+                             "single fallback subtask when no split is possible); segmented "
+                             "subtasks carry fixed skills walk/pick/walk/place/retract. "
+                             "Default: first word of the episode's task instruction.")
     parser.add_argument("--robot_type", default="gamma")
     parser.add_argument("--only_successful", action="store_true",
                         help="Skip demos whose 'success' attribute is False.")
@@ -398,7 +578,11 @@ def main() -> None:
     fps = image_hw = None
 
     episodes_meta, episodes_stats, subtasks = [], [], []
+    # Main prompts and subtask prompts share one index space (tasks.jsonl):
+    # per-frame 'task_index' points at a main prompt, 'subtask_index' at a
+    # subtask prompt (or the main one when no split was possible).
     task_to_index: dict[str, int] = {}
+    main_tasks: set[str] = set()
     ep_index = 0
     global_index = 0
     skipped = 0
@@ -443,6 +627,7 @@ def main() -> None:
                     args.task,
                 )
                 task_index = task_to_index.setdefault(task, len(task_to_index))
+                main_tasks.add(task)
                 skill = args.skill or task.split()[0]
 
                 ep = convert_episode(demo, env_args, state_idx, arm_idx)
@@ -451,6 +636,40 @@ def main() -> None:
                     print(f"[skip] {path}:{demo_name}: only {T} frames")
                     skipped += 1
                     continue
+
+                # --- subtask segmentation ---
+                sub_texts = resolve_subtask_instructions(
+                    dict(demo.attrs),
+                    raw_demo_attrs.get(demo_name, {}),
+                    env_args,
+                    raw_env_args,
+                    relabel_items,
+                )
+                step_spans, sub_problem = detect_subtask_spans(demo)
+                stride = int(env_args.get("camera_frame_stride", 5))
+                if step_spans is None:
+                    print(
+                        f"[warn] {path}:{demo_name}: no subtask split — {sub_problem}; "
+                        "whole episode keeps the main task as its only subtask"
+                    )
+                    frame_spans = [(0, T, None)]
+                else:
+                    if sub_problem:
+                        print(f"[subtask] {path}:{demo_name}: {sub_problem}")
+                    frame_spans = subtask_frame_spans(step_spans, stride, T)
+                subtask_index_col = np.empty(T, dtype=np.int64)
+                subtask_rows = []
+                for f0, f1, slot in frame_spans:
+                    text = task if slot is None else sub_texts[slot]
+                    sub_idx = task_to_index.setdefault(text, len(task_to_index))
+                    subtask_index_col[f0:f1] = sub_idx
+                    subtask_rows.append({
+                        "descriptions": [text], "end_frame": int(f1),
+                        "is_mirrored": False, "is_negative_episode": False,
+                        "is_reversed": False,
+                        "skill": skill if slot is None else SUBTASK_SKILLS[slot],
+                        "start_frame": int(f0), "uses_task_text": slot is None,
+                    })
 
                 chunk = ep_index // CHUNKS_SIZE
                 if image_hw is None:
@@ -478,6 +697,7 @@ def main() -> None:
                     "episode_id": np.full(T, ep_index, dtype=np.int64),
                     "index": np.arange(global_index, global_index + T, dtype=np.int64),
                     "task_index": np.full(T, task_index, dtype=np.int64),
+                    "subtask_index": subtask_index_col,
                     "task_name_id": np.zeros(T, dtype=np.int64),
                     "init_scene_text_id": np.zeros(T, dtype=np.int64),
                     "skill_id": np.ones(T, dtype=np.int64),
@@ -511,12 +731,7 @@ def main() -> None:
                 })
                 subtasks.append({
                     "episode_index": ep_index,
-                    "subtasks": [{
-                        "descriptions": [task], "end_frame": T,
-                        "is_mirrored": False, "is_negative_episode": False,
-                        "is_reversed": False, "skill": skill,
-                        "start_frame": 0, "uses_task_text": True,
-                    }],
+                    "subtasks": subtask_rows,
                 })
                 episodes_stats.append({
                     "episode_index": ep_index,
@@ -530,9 +745,13 @@ def main() -> None:
                     },
                 })
 
+                seg_desc = " ".join(
+                    f"{f0}-{f1}:{'main' if slot is None else SUBTASK_SKILLS[slot]}"
+                    for f0, f1, slot in frame_spans
+                )
                 print(f"[ep {ep_index:03d}] {Path(path).name}:{demo_name}  frames={T}"
                       f"  success={bool(demo.attrs.get('success', False))}"
-                      f"  task[{task_index}]={task!r}")
+                      f"  task[{task_index}]={task!r}  subtasks[{seg_desc}]")
                 global_index += T
                 ep_index += 1
 
@@ -555,6 +774,7 @@ def main() -> None:
         "episode_id": scalar_feature("int64"),
         "index": scalar_feature("int64"),
         "task_index": scalar_feature("int64"),
+        "subtask_index": scalar_feature("int64"),
         "task_name_id": scalar_feature("int64"),
         "init_scene_text_id": scalar_feature("int64"),
         "skill_id": scalar_feature("int64"),
@@ -568,7 +788,7 @@ def main() -> None:
         "total_episodes": ep_index,
         "total_frames": global_index,
         "total_tasks": len(task_to_index),
-        "total_variations": len(task_to_index),
+        "total_variations": len(main_tasks),
         "total_videos": ep_index * len(CAMERA_MAP),
         "total_chunks": (ep_index + CHUNKS_SIZE - 1) // CHUNKS_SIZE,
         "chunks_size": CHUNKS_SIZE,

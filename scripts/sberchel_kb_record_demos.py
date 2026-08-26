@@ -714,6 +714,7 @@ app_launcher = AppLauncher(app_launcher_args)
 simulation_app = app_launcher.app
 
 import gymnasium as gym
+import numpy as np
 import torch
 
 from isaaclab.devices.device_base import DeviceBase
@@ -1377,6 +1378,28 @@ def target_task_instruction(item: str) -> str:
     return f"Pick {article} {item.strip()} and place it on the table."
 
 
+def target_subtask_instructions(item: str) -> list[str]:
+    """Five subtask prompts a demo decomposes into, in execution order.
+
+    Boundaries are data-derived, not stamped here: subtasks 1-4 split at the
+    three mode switches (``mode_switch_steps`` attr / ``teleop_state[:,0]``
+    flips); the place->retract boundary is the step after which the carried
+    product stays at its final rest pose in ``store_products`` — placed in the
+    container and no longer moved by the hand, only the retract motion remains.
+    (Squeeze is deliberately not used: hand-tracking demos can grip with finger
+    curl alone and record zero squeeze throughout.)
+    """
+    noun = item.strip()
+    article = "an" if noun[:1].lower() in "aeiou" else "a"
+    return [
+        f"Go to the shelf with the {noun}.",
+        f"Pick {article} {noun} from the shelf.",
+        f"Carry the {noun} to the table.",
+        f"Put the {noun} into the container.",
+        "Move the hand out of the container and return it to the default position.",
+    ]
+
+
 def exported_demo_count(env) -> int:
     """Total episodes written to HDF5."""
     base = env.unwrapped if hasattr(env, "unwrapped") else env
@@ -1806,6 +1829,10 @@ def main() -> None:
             episode,
             target_item=item,
             task_instruction=target_task_instruction(item),
+            # JSON string, not a list attr: h5py reads vlen-str attrs back as
+            # object arrays, which the replay script's attr re-stamping cannot
+            # write again; a plain string survives the whole pipeline.
+            subtask_instructions=json.dumps(target_subtask_instructions(item)),
         )
         rm._episodes[0] = episode
         print(
@@ -2057,6 +2084,38 @@ def main() -> None:
                     "sberchel_teleop_state_layout": (
                         "is_locomotion, squeeze, legacy_gains (1 iff the session "
                         "ran with --legacy_teleop_gains; constant per session)"
+                    ),
+                    # Per-demo attrs stamped at save: mode_switch_steps = step
+                    # indices where the operator's C / Create mode toggle took
+                    # effect (the flips of teleop_state[:,0] that survived
+                    # checkpoint rollbacks); mode_switch_to = the mode entered
+                    # at each (1 locomotion, 0 static). Segment k of the demo is
+                    # [step_{k-1}, step_k); a standard 3-press demo splits into
+                    # walk-to-shelf / take-object / walk-to-table / place-object.
+                    "sberchel_mode_switch_attrs": (
+                        "mode_switch_steps: first step of each new mode segment "
+                        "(= teleop_state[:,0] flip indices, i.e. surviving C / "
+                        "Create presses); mode_switch_to: mode entered at that "
+                        "step (1 locomotion, 0 static). Segment boundaries: "
+                        "step 0 (always locomotion), each mode_switch_steps "
+                        "entry, episode end — a 3-switch demo yields 4 subtasks"
+                    ),
+                    # Language decomposition of each demo. Boundaries are NOT
+                    # stamped: subtasks 1-4 split at mode_switch_steps; the
+                    # place->retract boundary (no button press exists there) is
+                    # derived offline from object motion alone — the step after
+                    # which the carried product stays at its final rest pose in
+                    # store_products (see sberchel_hdf5_to_lerobot.py). Squeeze
+                    # is deliberately not part of the rule: hand-tracking demos
+                    # can record zero squeeze for the whole session.
+                    "sberchel_subtask_scheme": (
+                        "per-demo attr 'subtask_instructions' (JSON list of 5 "
+                        "strings): walk-to-shelf / pick / carry-to-table / "
+                        "place-in-container / retract-hand prompts. Boundaries: "
+                        "subtasks 1-4 at mode_switch_steps; place->retract at "
+                        "the step after which the carried product (max-"
+                        "displacement store product) rests at its final pose in "
+                        "store_products for the remainder of the episode"
                     ),
                     # Which policy produced each segment. teleop_state[:,0] is the
                     # per-step selector into this map, so no extra channel is needed.
@@ -3223,7 +3282,42 @@ def main() -> None:
                             # .success from the (absent) success termination term right
                             # before export, while stashed attrs are written after the
                             # stock writer and win.
-                            stash_episode_extra_attrs(episode, success=True)
+                            #
+                            # Mode-switch moments (C / Create presses) are read back from
+                            # the recorded buffer, not live bookkeeping: a press flips the
+                            # mode of the NEXT recorded step, so the presses that survived
+                            # checkpoint rollbacks (which truncate the buffer) are exactly
+                            # the flips of teleop_state[:,0]. Each index is the first step
+                            # of its segment: [0, s0), [s0, s1), ... splits the demo into
+                            # walk / manipulate subtasks.
+                            is_loco = [
+                                bool(float(row[0, 0]) > 0.5)
+                                for row in episode.data.get("teleop_state", [])
+                            ]
+                            switch_steps = [
+                                i
+                                for i in range(1, len(is_loco))
+                                if is_loco[i] != is_loco[i - 1]
+                            ]
+                            stash_episode_extra_attrs(
+                                episode,
+                                success=True,
+                                mode_switch_steps=np.asarray(switch_steps, dtype=np.int64),
+                                mode_switch_to=np.asarray(
+                                    [int(is_loco[i]) for i in switch_steps],
+                                    dtype=np.int64,
+                                ),
+                            )
+                            switch_desc = ", ".join(
+                                f"{i}->{'loco' if is_loco[i] else 'static'}"
+                                for i in switch_steps
+                            )
+                            print(
+                                f"[save] mode switches at steps [{switch_desc}] — "
+                                f"{len(switch_steps) + 1} segment(s) over "
+                                f"{len(is_loco)} steps",
+                                flush=True,
+                            )
                     discard = should_discard_reset or should_next_reset
                     retry_same_pose = should_discard_reset
                     if discard:
