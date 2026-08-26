@@ -647,11 +647,13 @@ parser.add_argument(
 parser.add_argument(
     "--target_items",
     type=str,
-    default="Monster Pipeline Punch,Kagome Juice,Tomato Paste,Palmolive Shampoo",
+    default="Energy Drink,Juice,Tomato Paste,Shampoo",
     help=(
-        "Comma-separated pick-target names. One is chosen per trajectory "
-        "(derived from the episode seed, so a retried attempt keeps its target) "
-        "and shown as a small text panel at the top-right of the VR view."
+        "Comma-separated pick-target names. The session's first start pose gets "
+        "a random target (derived from the episode seed); every later pose "
+        "cycles through this list in order. A retried attempt keeps its "
+        "target either way. Shown as a small text panel at the top-right of "
+        "the VR view."
     ),
 )
 parser.add_argument(
@@ -1354,11 +1356,12 @@ def derive_episode_seed(session_seed: int, pose_index: int) -> int:
 
 
 def derive_target_index(episode_seed: int, num_items: int) -> int:
-    """Pick-target index for an episode, derived from its start-pose seed.
+    """Pick-target index for the session's FIRST start pose only.
 
     Hash-derived (not ``episode_seed % num_items``) so it is independent of the
     spawn randomization, and reproducible offline from the ``seed`` attr every
-    demo already carries — no extra per-demo storage needed.
+    demo already carries. Later poses ignore this and cycle through
+    ``--target_items`` in list order (see ``roll_target_hud``).
     """
     digest = hashlib.blake2b(f"{episode_seed}:target".encode(), digest_size=8).digest()
     return int.from_bytes(digest, "little") % num_items
@@ -1770,7 +1773,11 @@ def main() -> None:
         )
 
     def roll_target_hud() -> None:
-        """Choose this episode's target from its seed; show it and stamp the demo.
+        """Choose this episode's target; show it and stamp the demo.
+
+        Only the session's first start pose gets a random (seed-derived) target;
+        every later pose walks ``--target_items`` in list order, cycling. Both
+        are functions of ``pose_index``, so a retried pose keeps its target.
 
         ``target_item`` and ``task_instruction`` become HDF5 attrs on the demo
         group at export (see ``stash_episode_extra_attrs``), alongside the
@@ -1778,7 +1785,10 @@ def main() -> None:
         """
         if not target_items:
             return
-        idx = derive_target_index(episode_seed, len(target_items))
+        if pose_index == 0:
+            idx = derive_target_index(episode_seed, len(target_items))
+        else:
+            idx = (pose_index - 1) % len(target_items)
         item = target_items[idx]
         if target_hud is not None:
             shown = target_hud.show(idx)
@@ -2118,14 +2128,15 @@ def main() -> None:
                         else ["policy_loco", "processed_joint_targets", "actions"]
                     ),
                     # Pick target shown to the operator. Each demo group carries
-                    # 'target_item' and 'task_instruction' attrs; the scheme
-                    # below re-derives the item from the demo's 'seed' attr for
-                    # files written before those attrs existed.
+                    # 'target_item' and 'task_instruction' attrs (authoritative);
+                    # the scheme below documents how they were assigned.
                     "sberchel_target_items": target_items,
                     "sberchel_target_scheme": (
-                        "items[int.from_bytes(blake2b(f'{seed}:target', "
+                        "pose 0: items[int.from_bytes(blake2b(f'{seed}:target', "
                         "digest_size=8).digest(), 'little') % len(items)] "
-                        "with seed = demo attrs['seed']"
+                        "with seed = demo attrs['seed']; "
+                        "pose n>=1: items[(n - 1) % len(items)] (list order, cycling); "
+                        "per-demo attrs 'target_item'/'task_instruction' are authoritative"
                     ),
                     "sberchel_task_template": "Pick a/an {target_item} and place it on the table.",
                     "sberchel_store_prim_count": len(_store_prim_paths),
