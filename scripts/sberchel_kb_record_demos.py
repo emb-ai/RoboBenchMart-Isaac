@@ -651,9 +651,9 @@ parser.add_argument(
     help=(
         "Comma-separated pick-target names. The session's first start pose gets "
         "a random target (derived from the episode seed); every later pose "
-        "cycles through this list in order. A retried attempt keeps its "
-        "target either way. Shown as a small text panel at the top-right of "
-        "the VR view."
+        "continues from it through this list in order, cycling, so all items "
+        "appear once per len(list) poses. A retried attempt keeps its target. "
+        "Shown as a small text panel at the top-right of the VR view."
     ),
 )
 parser.add_argument(
@@ -1377,12 +1377,13 @@ def derive_episode_seed(session_seed: int, pose_index: int) -> int:
 
 
 def derive_target_index(episode_seed: int, num_items: int) -> int:
-    """Pick-target index for the session's FIRST start pose only.
+    """The session's target-cycle rotation offset (= the pose-0 target index).
 
     Hash-derived (not ``episode_seed % num_items``) so it is independent of the
     spawn randomization, and reproducible offline from the ``seed`` attr every
-    demo already carries. Later poses ignore this and cycle through
-    ``--target_items`` in list order (see ``roll_target_hud``).
+    demo already carries. Called with the pose-0 seed; pose ``n`` then picks
+    ``items[(this + n) % num_items]``, so every ``num_items`` consecutive poses
+    cover the whole list (see ``roll_target_hud``).
     """
     digest = hashlib.blake2b(f"{episode_seed}:target".encode(), digest_size=8).digest()
     return int.from_bytes(digest, "little") % num_items
@@ -1836,9 +1837,11 @@ def main() -> None:
     def roll_target_hud() -> None:
         """Choose this episode's target; show it and stamp the demo.
 
-        Only the session's first start pose gets a random (seed-derived) target;
-        every later pose walks ``--target_items`` in list order, cycling. Both
-        are functions of ``pose_index``, so a retried pose keeps its target.
+        The session's first start pose gets a random (seed-derived) target;
+        every later pose continues from it through ``--target_items`` in list
+        order, cycling, so any ``len(target_items)`` consecutive poses cover
+        every item exactly once. The index is a function of ``pose_index`` (and
+        the session seed), so a retried pose keeps its target.
 
         ``target_item`` and ``task_instruction`` become HDF5 attrs on the demo
         group at export (see ``stash_episode_extra_attrs``), alongside the
@@ -1846,10 +1849,10 @@ def main() -> None:
         """
         if not target_items:
             return
-        if pose_index == 0:
-            idx = derive_target_index(episode_seed, len(target_items))
-        else:
-            idx = (pose_index - 1) % len(target_items)
+        first_idx = derive_target_index(
+            derive_episode_seed(args_cli.seed, 0), len(target_items)
+        )
+        idx = (first_idx + pose_index) % len(target_items)
         item = target_items[idx]
         if target_hud is not None:
             shown = target_hud.show(idx)
@@ -2229,10 +2232,11 @@ def main() -> None:
                     # the scheme below documents how they were assigned.
                     "sberchel_target_items": target_items,
                     "sberchel_target_scheme": (
-                        "pose 0: items[int.from_bytes(blake2b(f'{seed}:target', "
-                        "digest_size=8).digest(), 'little') % len(items)] "
-                        "with seed = demo attrs['seed']; "
-                        "pose n>=1: items[(n - 1) % len(items)] (list order, cycling); "
+                        "pose n: items[(first + n) % len(items)] with "
+                        "first = int.from_bytes(blake2b(f'{seed0}:target', "
+                        "digest_size=8).digest(), 'little') % len(items) and "
+                        "seed0 = the pose-0 episode seed (see "
+                        "sberchel_episode_seed_scheme); "
                         "per-demo attrs 'target_item'/'task_instruction' are authoritative"
                     ),
                     "sberchel_task_template": "Pick a/an {target_item} and place it on the table.",
