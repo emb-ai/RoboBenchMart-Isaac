@@ -932,6 +932,19 @@ _warned_no_store_products = False
 _store_row_body_indices = None
 
 
+def _dataset_store_product_count(dataset_file: str) -> int | None:
+    """Store product rows per step in the dataset, or None if none are recorded."""
+    try:
+        with h5py.File(dataset_file, "r") as handle:
+            for demo in handle["data"].keys():
+                group = handle["data"][demo]
+                if "store_products" in group:
+                    return int(group["store_products/transforms"].shape[1])
+    except Exception as exc:  # a diagnostic path: never mask the real failure
+        print(f"Warning: could not read store_products row count from {dataset_file}: {exc!r}")
+    return None
+
+
 def build_store_row_body_indices(env, dataset_file: str, dataset_env_args: dict):
     """Map recorded store_products rows onto the live store snapshot by prim path.
 
@@ -949,11 +962,18 @@ def build_store_row_body_indices(env, dataset_file: str, dataset_env_args: dict)
     sidecar = Path(dataset_file).with_suffix(".store_prims.json")
     if not sidecar.exists():
         recorded_count = dataset_env_args.get("sberchel_store_prim_count")
+        if recorded_count is None:
+            # Sessions recorded while the provenance write was broken carry
+            # neither the sidecar nor this count, so read the row width off the
+            # episodes themselves -- otherwise the mismatch surfaces much later
+            # as a raw PhysX "Incompatible size of transform tensor" error.
+            recorded_count = _dataset_store_product_count(dataset_file)
         if recorded_count is not None and int(recorded_count) != len(live_paths):
             raise FileNotFoundError(
                 f"Dataset records {recorded_count} store products but the replay scene has "
                 f"{len(live_paths)}; mapping lean-store rows onto the full store needs the "
-                f"{sidecar.name} sidecar next to the dataset file."
+                f"{sidecar.name} sidecar next to the dataset file. Recover it with:\n"
+                f"  python scripts/sberchel_rebuild_store_prims_sidecar.py {dataset_file}"
             )
         return None
     recorded_paths = json.loads(sidecar.read_text())
@@ -1265,6 +1285,15 @@ def main() -> None:
     # Auto-match the recorded physics step (--sim_dt_denominator sessions).
     # Datasets from before the key existed all ran the task cfg's dt.
     _recorded_sim_dt = _dataset_env_args.get("sberchel_sim_dt")
+    if _recorded_sim_dt is None:
+        # IsaacLab's own recorder metadata carries the recording env's dt, so a
+        # dataset that lost the sberchel provenance block still knows its step
+        # rate. Falling through to the task cfg instead is not a harmless
+        # default: camera_fps below is derived from this dt, so a 240 Hz
+        # recording would be exported (and timestamped) as 150/stride fps.
+        _recorded_sim_dt = (_dataset_env_args.get("sim_args") or {}).get("dt")
+        if _recorded_sim_dt is not None:
+            print(f">>> sim dt: {float(_recorded_sim_dt):.6f} s — from the dataset's sim_args")
     if _recorded_sim_dt is not None and abs(float(_recorded_sim_dt) - env_cfg.sim.dt) > 1e-9:
         print(
             f">>> sim dt: {float(_recorded_sim_dt):.6f} s "

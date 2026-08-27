@@ -43,6 +43,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 
@@ -2018,6 +2019,32 @@ def main() -> None:
         # goes to a sidecar JSON bound to the file by the digest below.
         _store_snapshot = getattr(base_env.scene, "_store_rigid_snapshot", None)
         _store_prim_paths = list(_store_snapshot.prim_paths) if _store_snapshot is not None else []
+        # Read the lean-store board filter back off the scene cfg rather than
+        # from create_environment_config's local: that local is out of scope
+        # here, and the NameError it raised was swallowed by the except below,
+        # silently costing every lean session its whole provenance block AND
+        # its sidecar (see sberchel_rebuild_store_prims_sidecar.py).
+        _keep_boards = getattr(base_env.scene.cfg, "keep_product_boards", None)
+        _keep_boards = list(_keep_boards) if _keep_boards else None
+        # The sidecar is not metadata: without it a lean recording cannot be
+        # replayed at all, so write it first and on its own error budget.
+        if _store_prim_paths:
+            try:
+                _sidecar = Path(args_cli.dataset_file).with_suffix(".store_prims.json")
+                _sidecar.write_text(json.dumps(_store_prim_paths))
+                print(f">>> store product prim order -> {_sidecar}", flush=True)
+            except Exception as exc:
+                print(
+                    f"[provenance] FAILED to write the store prim sidecar: {exc!r}\n"
+                    f"{traceback.format_exc()}"
+                    + (
+                        "  This session records a LEAN store; without the sidecar its demos "
+                        "cannot be replayed against the full store.\n"
+                        if _keep_boards
+                        else ""
+                    ),
+                    flush=True,
+                )
         try:
             handler.add_env_args(
                 {
@@ -2247,16 +2274,18 @@ def main() -> None:
                     # Boards populated at record time (lean store), or None for
                     # the full store. Replay repopulates everything and maps the
                     # store_products rows back by prim path via the sidecar.
-                    "sberchel_store_keep_boards": keep_boards,
+                    "sberchel_store_keep_boards": _keep_boards,
                 }
             )
-            if _store_prim_paths:
-                _sidecar = Path(args_cli.dataset_file).with_suffix(".store_prims.json")
-                _sidecar.write_text(json.dumps(_store_prim_paths))
-                print(f">>> store product prim order -> {_sidecar}", flush=True)
             print(">>> dataset provenance written (joint order + gains)", flush=True)
         except Exception as exc:  # never lose a recording session over metadata
-            print(f"[provenance] could not write env args: {exc!r}", flush=True)
+            # Loud and with a traceback: a swallowed one-line repr here is how
+            # a month of recordings can end up without joint names.
+            print(
+                f"[provenance] FAILED to write env args -- this dataset has NO joint order, "
+                f"gains or plant provenance: {exc!r}\n{traceback.format_exc()}",
+                flush=True,
+            )
 
     _write_dataset_provenance()
 
