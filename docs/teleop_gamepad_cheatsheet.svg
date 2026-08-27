@@ -1,0 +1,287 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1700" height="1268" viewBox="0 0 1700 1268"
+     font-family="DejaVu Sans, Liberation Sans, Arial, sans-serif">
+
+  <rect width="1700" height="1268" fill="#0e1117"/>
+
+  <!-- ============================ title ============================ -->
+  <text x="60" y="84" font-size="40" font-weight="bold" fill="#f2f5f9">PS5 PAD — SBERCHEL TELEOP RECORDING</text>
+  <g font-size="16" font-weight="bold">
+    <circle cx="1101" cy="110" r="6" fill="#4ade80"/><text x="1113" y="116" fill="#8b95a6">MOVE</text>
+    <circle cx="1197" cy="110" r="6" fill="#fbbf24"/><text x="1209" y="116" fill="#8b95a6">MODE &amp; VIEW</text>
+    <circle cx="1381" cy="110" r="6" fill="#7bb3ff"/><text x="1393" y="116" fill="#8b95a6">EPISODE</text>
+    <circle cx="1515" cy="110" r="6" fill="#c98a8a"/><text x="1527" y="116" fill="#8b95a6">DON'T USE</text>
+  </g>
+  <line x1="60" y1="150" x2="1640" y2="150" stroke="#262c38" stroke-width="2"/>
+
+  <g transform="translate(0,-56)">
+
+  <!-- ========================= the controller ======================= -->
+  <g transform="translate(850,545) scale(1.15)">
+
+    <!-- shoulders / triggers, drawn behind the body -->
+    <rect x="-236" y="-206" width="116" height="30" rx="14" fill="#d3dae4"/>
+    <rect x="-232" y="-172" width="108" height="34" rx="12" fill="#f0b429"/>
+    <rect x="120"  y="-206" width="116" height="30" rx="14" fill="#d3dae4"/>
+    <rect x="124"  y="-172" width="108" height="34" rx="12" fill="#d3dae4"/>
+    <g font-size="17" font-weight="bold" text-anchor="middle" fill="#8a94a4">
+      <text x="-178" y="-184">L2</text>
+      <text x="-178" y="-152" fill="#1a2230">L1</text>
+      <text x="178"  y="-184">R2</text>
+      <text x="178"  y="-152">R1</text>
+    </g>
+
+    <!-- body -->
+    <path d="M 0,-150
+             C 40,-152 90,-152 120,-148
+             C 175,-142 215,-135 235,-112
+             C 252,-92 258,-60 256,-28
+             C 254,4 246,34 240,62
+             C 232,98 236,150 224,186
+             C 214,218 190,236 162,232
+             C 136,228 120,206 112,178
+             C 102,142 96,112 78,92
+             C 60,72 30,66 0,66
+             C -30,66 -60,72 -78,92
+             C -96,112 -102,142 -112,178
+             C -120,206 -136,228 -162,232
+             C -190,236 -214,218 -224,186
+             C -236,150 -232,98 -240,62
+             C -246,34 -254,4 -256,-28
+             C -258,-60 -252,-92 -235,-112
+             C -215,-135 -175,-142 -120,-148
+             C -90,-152 -40,-152 0,-150 Z"
+          fill="#e9edf3" stroke="#aab3c2" stroke-width="3"/>
+
+    <!-- touchpad -->
+    <rect x="-92" y="-120" width="184" height="102" rx="14" fill="#dde2ea" stroke="#b6bfcd" stroke-width="2"/>
+    <text x="0" y="-64" font-size="15" text-anchor="middle" fill="#a7b0be">touchpad</text>
+
+    <!-- create / options -->
+    <rect x="-134" y="-114" width="28" height="24" rx="6" fill="#f0b429"/>
+    <rect x="106"  y="-114" width="28" height="24" rx="6" fill="#ccd3de"/>
+
+    <!-- d-pad: up / down / left in use, right greyed out -->
+    <path d="M -183,-97 L -157,-97 L -157,-68 L -128,-68 L -128,-42 L -157,-42
+             L -157,-13 L -183,-13 L -183,-42 L -212,-42 L -212,-68 L -183,-68 Z"
+          fill="#4f9cf5" stroke="#4f9cf5" stroke-width="8" stroke-linejoin="round"/>
+    <path d="M -159,-73 L -127,-73 Q -123,-73 -123,-69 L -123,-41 Q -123,-37 -127,-37 L -159,-37 Z"
+          fill="#ccd3de"/>
+    <g fill="#ffffff" opacity="0.92">
+      <polygon points="-170,-90 -163,-79 -177,-79"/>
+      <polygon points="-170,-20 -163,-31 -177,-31"/>
+      <polygon points="-205,-55 -194,-48 -194,-62"/>
+    </g>
+    <polygon points="-135,-55 -146,-48 -146,-62" fill="#8a94a4"/>
+
+    <!-- face buttons (unused) -->
+    <g fill="#d3dae4" stroke="#b6bfcd" stroke-width="2">
+      <circle cx="170" cy="-97" r="20"/>
+      <circle cx="203" cy="-55" r="20"/>
+      <circle cx="170" cy="-13" r="20"/>
+      <circle cx="137" cy="-55" r="20"/>
+    </g>
+    <g font-size="19" text-anchor="middle" fill="#8a94a4">
+      <text x="170" y="-90">&#9651;</text>
+      <text x="203" y="-48">&#9675;</text>
+      <text x="170" y="-6">&#10005;</text>
+      <text x="137" y="-48">&#9633;</text>
+    </g>
+
+    <!-- ps + mute (unused) -->
+    <circle cx="0" cy="10" r="13" fill="#d3dae4" stroke="#b6bfcd" stroke-width="2"/>
+    <rect x="-14" y="36" width="28" height="13" rx="6" fill="#d3dae4" stroke="#b6bfcd" stroke-width="2"/>
+
+    <!-- sticks: left drives, right is off limits -->
+    <g>
+      <circle cx="-88" cy="40" r="40" fill="#34c184" stroke="#2aa06d" stroke-width="3"/>
+      <circle cx="-88" cy="40" r="26" fill="#e9edf3" stroke="#b6bfcd" stroke-width="2"/>
+      <g fill="#ffffff" opacity="0.95">
+        <polygon points="-88,3 -82,14 -94,14"/>
+        <polygon points="-88,77 -82,66 -94,66"/>
+        <polygon points="-125,40 -114,34 -114,46"/>
+        <polygon points="-51,40 -62,34 -62,46"/>
+      </g>
+      <circle cx="88" cy="40" r="40" fill="#ccd3de" stroke="#b0b9c7" stroke-width="3"/>
+      <circle cx="88" cy="40" r="26" fill="#e9edf3" stroke="#b6bfcd" stroke-width="2"/>
+    </g>
+  </g>
+
+  <!-- ========================== leader lines ======================== -->
+  <g stroke-width="2.5" fill="none" opacity="0.9">
+    <path d="M 470,294 L 579,325" stroke="#c98a8a" stroke-dasharray="7 5"/>
+    <path d="M 470,389 L 583,364" stroke="#fbbf24"/>
+    <path d="M 470,484 L 696,428" stroke="#fbbf24"/>
+    <path d="M 470,600 L 606,482" stroke="#7bb3ff"/>
+    <path d="M 470,784 L 703,591" stroke="#4ade80"/>
+    <path d="M 1230,349 L 1117,364" stroke="#c98a8a" stroke-dasharray="7 5"/>
+    <path d="M 1230,439 L 1004,428" stroke="#c98a8a" stroke-dasharray="7 5"/>
+    <path d="M 1230,539 L 1106,482" stroke="#7d8899" stroke-dasharray="7 5"/>
+    <path d="M 1230,639 L 997,591"  stroke="#c98a8a" stroke-dasharray="7 5"/>
+  </g>
+  <g>
+    <circle cx="579" cy="325" r="4.5" fill="#c98a8a"/>
+    <circle cx="583" cy="364" r="4.5" fill="#fbbf24"/>
+    <circle cx="696" cy="428" r="4.5" fill="#fbbf24"/>
+    <circle cx="606" cy="482" r="4.5" fill="#7bb3ff"/>
+    <circle cx="703" cy="591" r="4.5" fill="#4ade80"/>
+    <circle cx="1117" cy="364" r="4.5" fill="#c98a8a"/>
+    <circle cx="1004" cy="428" r="4.5" fill="#c98a8a"/>
+    <circle cx="1106" cy="482" r="4.5" fill="#7d8899"/>
+    <circle cx="997" cy="591" r="4.5" fill="#c98a8a"/>
+  </g>
+
+  <!-- =========================== left column ======================= -->
+  <g text-anchor="end">
+    <!-- L2 -->
+    <text x="452" y="300" font-size="22" font-weight="bold" fill="#8a94a4">
+      L2 GRIP — <tspan fill="#c98a8a">DON'T USE</tspan>
+    </text>
+    <text x="452" y="326" font-size="16" fill="#7d8899">Grip comes from your own fingers: close your</text>
+    <text x="452" y="348" font-size="16" fill="#7d8899">hand and the robot hand closes. Never pull L2.</text>
+
+    <!-- L1 -->
+    <text x="452" y="395" font-size="22" font-weight="bold" fill="#f2f5f9">
+      <tspan fill="#fbbf24">L1</tspan>  TELEPORT YOUR VIEW
+    </text>
+    <text x="452" y="421" font-size="16" fill="#98a2b3">Drops you just ahead of the robot, facing the</text>
+    <text x="452" y="443" font-size="16" fill="#98a2b3">way it faces — however you turned.</text>
+
+    <!-- CREATE -->
+    <text x="452" y="490" font-size="22" font-weight="bold" fill="#f2f5f9">
+      <tspan fill="#fbbf24">CREATE</tspan>  SWITCH MODE &#9733;
+    </text>
+    <text x="452" y="516" font-size="16" fill="#98a2b3">WALK (stick drives, arms frozen)  &#8646;  TELEOP</text>
+    <text x="452" y="538" font-size="16" fill="#98a2b3">(robot stands still, your hands drive).</text>
+
+    <!-- D-PAD panel -->
+    <rect x="60" y="560" width="410" height="178" rx="10" fill="#141a24" stroke="#263042" stroke-width="2"/>
+    <g text-anchor="start">
+      <text x="84" y="592" font-size="21" font-weight="bold" fill="#f2f5f9">
+        <tspan fill="#7bb3ff">D-PAD</tspan>  EPISODE CONTROL
+      </text>
+      <g font-size="15.5" fill="#c3cbd8">
+        <text x="112" y="622">save episode + reset — new start pose</text>
+        <text x="112" y="646">discard + reset — SAME pose, retry it</text>
+        <text x="112" y="670" fill="#7d8899">discard + reset, new pose — <tspan fill="#c98a8a">don't use</tspan></text>
+        <text x="112" y="694">restore checkpoint — undo in TELEOP</text>
+      </g>
+      <text x="84" y="722" font-size="13.5" fill="#7d8899">&#9664; rolls sim + recording back to the last CREATE.</text>
+      <g font-size="17" fill="#7bb3ff">
+        <text x="84" y="622">&#9650;</text>
+        <text x="84" y="646">&#9660;</text>
+        <text x="84" y="670" fill="#7d8899">&#9654;</text>
+        <text x="84" y="694">&#9664;</text>
+      </g>
+    </g>
+
+    <!-- LEFT STICK -->
+    <text x="452" y="790" font-size="22" font-weight="bold" fill="#f2f5f9">
+      <tspan fill="#4ade80">LEFT STICK</tspan>  WALK
+    </text>
+    <text x="452" y="816" font-size="16" fill="#98a2b3">Push = forward / back &#183; tilt = turn in place.</text>
+    <text x="452" y="838" font-size="16" fill="#98a2b3">Legs only respond in WALK mode.</text>
+  </g>
+
+  <!-- ========================== right column ======================== -->
+  <g text-anchor="start">
+    <!-- R1 -->
+    <text x="1248" y="355" font-size="22" font-weight="bold" fill="#8a94a4">
+      R1 RESTORE — <tspan fill="#c98a8a">DON'T USE</tspan>
+    </text>
+    <text x="1248" y="381" font-size="16" fill="#7d8899">Same action as D-pad &#9664; — reach for the</text>
+    <text x="1248" y="403" font-size="16" fill="#7d8899">D-pad for that, and leave R1 alone.</text>
+
+    <!-- OPTIONS -->
+    <text x="1248" y="445" font-size="22" font-weight="bold" fill="#8a94a4">
+      OPTIONS — <tspan fill="#c98a8a">DON'T USE</tspan>
+    </text>
+    <text x="1248" y="471" font-size="16" fill="#7d8899">It toggles recording, which is already</text>
+    <text x="1248" y="493" font-size="16" fill="#7d8899">running (--auto_start). Never touch it.</text>
+
+    <!-- UNUSED -->
+    <text x="1248" y="545" font-size="22" font-weight="bold" fill="#7d8899">NOTHING ELSE DOES ANYTHING</text>
+    <text x="1248" y="571" font-size="16" fill="#7d8899">&#10005; &#9675; &#9651; &#9633; &#183; R2 &#183; touchpad &#183; PS &#183; mute &#183;</text>
+    <text x="1248" y="593" font-size="16" fill="#7d8899">stick clicks (L3 / R3). Safe to press.</text>
+
+    <!-- RIGHT STICK -->
+    <text x="1248" y="645" font-size="22" font-weight="bold" fill="#8a94a4">
+      RIGHT STICK — <tspan fill="#c98a8a">DON'T USE</tspan>
+    </text>
+    <text x="1248" y="671" font-size="16" fill="#7d8899">No strafing. Turn with the left stick and</text>
+    <text x="1248" y="693" font-size="16" fill="#7d8899">walk in straight instead.</text>
+  </g>
+
+  <!-- ============================ run strip ======================== -->
+  <rect x="60" y="880" width="1580" height="268" rx="12" fill="#141a24" stroke="#263042" stroke-width="2"/>
+  <text x="88" y="916" font-size="20" font-weight="bold" fill="#f2f5f9">A TAKE, START TO FINISH</text>
+  <text x="1612" y="916" font-size="16" text-anchor="end" fill="#7d8899">exactly three CREATE presses per take — the dataset splits its subtasks at those three switches</text>
+
+  <!-- flow chips -->
+  <g stroke-width="1.5">
+    <rect x="130"  y="958" width="160" height="34" rx="8" fill="#14261e" stroke="#2f7d5a"/>
+    <rect x="312"  y="958" width="52"  height="34" rx="8" fill="#2a2113" stroke="#7a5f1e"/>
+    <rect x="386"  y="958" width="94"  height="34" rx="8" fill="#2a2113" stroke="#7a5f1e"/>
+    <rect x="502"  y="958" width="110" height="34" rx="8" fill="#1b212c" stroke="#333c4c"/>
+    <rect x="634"  y="958" width="94"  height="34" rx="8" fill="#2a2113" stroke="#7a5f1e"/>
+    <rect x="750"  y="958" width="160" height="34" rx="8" fill="#14261e" stroke="#2f7d5a"/>
+    <rect x="932"  y="958" width="52"  height="34" rx="8" fill="#2a2113" stroke="#7a5f1e"/>
+    <rect x="1006" y="958" width="94"  height="34" rx="8" fill="#2a2113" stroke="#7a5f1e"/>
+    <rect x="1122" y="958" width="118" height="34" rx="8" fill="#1b212c" stroke="#333c4c"/>
+    <rect x="1262" y="958" width="156" height="34" rx="8" fill="#1b212c" stroke="#333c4c"/>
+    <rect x="1440" y="958" width="130" height="34" rx="8" fill="#16233a" stroke="#2f5c96"/>
+  </g>
+  <g font-size="14" text-anchor="middle">
+    <text x="210"  y="980" fill="#4ade80">Walk to the shelf</text>
+    <text x="338"  y="980" fill="#fbbf24" font-weight="bold">L1</text>
+    <text x="433"  y="980" fill="#fbbf24" font-weight="bold">CREATE</text>
+    <text x="557"  y="980" fill="#c3cbd8">Take object</text>
+    <text x="681"  y="980" fill="#fbbf24" font-weight="bold">CREATE</text>
+    <text x="830"  y="980" fill="#4ade80">Walk to the table</text>
+    <text x="958"  y="980" fill="#fbbf24" font-weight="bold">L1</text>
+    <text x="1053" y="980" fill="#fbbf24" font-weight="bold">CREATE</text>
+    <text x="1181" y="980" fill="#c3cbd8">Place object</text>
+    <text x="1340" y="980" fill="#c3cbd8">Right hand to leg</text>
+    <text x="1505" y="980" fill="#7bb3ff" font-weight="bold">D-pad &#9650; save</text>
+  </g>
+  <g font-size="15" text-anchor="middle" fill="#4a5566">
+    <text x="301"  y="980">&#8594;</text>
+    <text x="375"  y="980">&#8594;</text>
+    <text x="491"  y="980">&#8594;</text>
+    <text x="623"  y="980">&#8594;</text>
+    <text x="739"  y="980">&#8594;</text>
+    <text x="921"  y="980">&#8594;</text>
+    <text x="995"  y="980">&#8594;</text>
+    <text x="1111" y="980">&#8594;</text>
+    <text x="1251" y="980">&#8594;</text>
+    <text x="1429" y="980">&#8594;</text>
+  </g>
+
+  <text x="557" y="1012" font-size="12.5" text-anchor="middle" fill="#7d8899">then hand down by the right leg</text>
+
+  <g font-size="14.5" fill="#98a2b3">
+    <text x="88" y="1038">L1 puts your view back on the robot — tap it whenever you drift while walking, and once more right before each CREATE.</text>
+    <text x="88" y="1060">Carrying: once the object is in hand, bring the arm down to the robot's right side by the leg, leaving a small gap between the object and the leg — then CREATE and walk.</text>
+    <text x="88" y="1082">Finish the take properly: after placing, bring the right hand back down beside the leg. That retract is a labeled subtask of the demo.</text>
+    <text x="88" y="1104">Hit something? Just press D-pad &#9664; — it rewinds the sim and the recording to the last CREATE, so you can take the grasp again.</text>
+    <text x="88" y="1126">&#9650; saves and resets to a new start pose. Bad take? &#9660; discards it and retries the same start pose.</text>
+  </g>
+
+  <!-- =========================== commands ========================== -->
+  <rect x="60" y="1168" width="1580" height="112" rx="12" fill="#141a24" stroke="#263042" stroke-width="2"/>
+
+  <g font-size="15" font-weight="bold" fill="#7d8899">
+    <text x="88" y="1212">START COLLECTING</text>
+    <text x="88" y="1252">CONVERT + VIDEOS</text>
+  </g>
+  <g font-size="16" font-family="DejaVu Sans Mono, Liberation Mono, monospace" fill="#c3cbd8">
+    <text x="380" y="1212">./scripts_bash/collect.sh</text>
+    <text x="380" y="1252">./scripts_bash/convert_hdf5_hdf5cam_lerobot.sh &lt;path_to_hdf5_file&gt;</text>
+  </g>
+  <g font-size="14" fill="#6e7a8c">
+    <text x="656" y="1212">run from the repo root — writes datasets/dex_&lt;timestamp&gt;.hdf5</text>
+    <text x="1052" y="1252">camera replay + preview MP4s + LeRobot dataset</text>
+  </g>
+
+  </g>
+
+</svg>
