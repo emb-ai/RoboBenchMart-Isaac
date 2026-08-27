@@ -525,11 +525,15 @@ parser.add_argument(
     type=float,
     default=0.5,
     help=(
-        "Seconds to ramp the arms from the held pose into the walk policy's targets "
-        "on every locomotion entry (mirror of --static_blend_time). walk's nominal "
-        "arm pose is arms-at-sides while the operator enters locomotion from a reach, "
-        "often radians away; without the ramp that whole delta is commanded in one "
-        "step. 0 snaps."
+        "Seconds to ramp the NECK -- and, under --walk_arm_drive, the arms/torso -- "
+        "from the held pose into their locomotion targets on every locomotion entry "
+        "(mirror of --static_blend_time). The neck ramp always applies: its target "
+        "is the default pose under --loco_policy zest and walk's own neck target "
+        "under walk, and the operator is usually looking down at a shelf when they "
+        "press C, so without the ramp the whole look-down angle is commanded in one "
+        "step and the head whips up. walk's nominal arm pose is arms-at-sides while "
+        "the operator enters locomotion from a reach, often radians away; same "
+        "story. 0 snaps."
     ),
 )
 parser.add_argument(
@@ -2311,6 +2315,11 @@ def main() -> None:
     left_hold_snapshot: FrozenUpperSnapshot | None = None
     last_teleop_upper: torch.Tensor | None = None
     last_neck_targets: tuple[float, float] = (0.0, 0.0)
+    # Neck action actually written into the action tensor last step. Not the same
+    # as last_neck_targets under --zest_upper, where that one holds the headset
+    # REFERENCE and the robot executes zest's output; the locomotion-entry ramp
+    # has to start from what the neck was really commanded to or it snaps first.
+    last_neck_cmd: tuple[float, float] = (0.0, 0.0)
     # Last commanded torso_yaw action (offset from default, i.e. action units).
     # Walk locomotion writes the policy's target here; static mode ramps it back
     # to 0 so the torso ends where every pre-torso-term demo held it.
@@ -2356,6 +2365,14 @@ def main() -> None:
     loco_torso_blend_from = 0.0
     loco_arm_blend_steps_done = 0
     loco_arm_blend_total = 0
+    # --loco_blend_time also ramps the NECK on every locomotion entry: the neck
+    # command drops to the default pose (or to walk's own neck target) the moment
+    # the mode flips, and the operator is usually looking down at a shelf when
+    # they press C, so the whole look-down angle is commanded in one step and the
+    # head whips up. Mirror image of the static-entry neck ramp.
+    loco_neck_blend_from: tuple[float, float] | None = None
+    loco_neck_blend_steps_done = 0
+    loco_neck_blend_total = 0
     # Whether the policy currently owns the arms (--walk_arm_drive when_free
     # hands them back the moment the operator squeezes).
     arm_drive_engaged = False
@@ -2377,6 +2394,23 @@ def main() -> None:
         step_dt = float(getattr(base_env, "step_dt", 1.0 / 50.0))
         loco_arm_blend_total = max(1, round(args_cli.loco_blend_time / step_dt))
 
+    def seed_loco_neck_blend() -> None:
+        """Start the neck ramp from whatever the neck was last commanded to.
+
+        Deliberately outside ``seed_loco_arm_blend``: that one is gated on
+        --walk_arm_drive and returns early under --loco_policy zest, where the
+        neck still needs the ramp.
+        """
+        nonlocal loco_neck_blend_from
+        nonlocal loco_neck_blend_steps_done, loco_neck_blend_total
+        if args_cli.loco_blend_time <= 0.0:
+            loco_neck_blend_from = None
+            return
+        loco_neck_blend_from = last_neck_cmd
+        loco_neck_blend_steps_done = 0
+        step_dt = float(getattr(base_env, "step_dt", 1.0 / 50.0))
+        loco_neck_blend_total = max(1, round(args_cli.loco_blend_time / step_dt))
+
     def enter_locomotion_mode(*, capture_frozen: bool) -> None:
         nonlocal loco_mode, hold_xy_yaw, frozen_snapshot, last_neck_targets
         nonlocal last_loco_cmd_t, arm_drive_engaged, arms_moved_by_policy
@@ -2390,6 +2424,9 @@ def main() -> None:
         arm_drive_engaged = False
         arms_moved_by_policy = False
         last_neck_targets = (0.0, 0.0)
+        # Before anything commands the neck this segment, so the ramp's start
+        # point is the pose the operator was actually holding.
+        seed_loco_neck_blend()
         if args_cli.zest_upper:
             # Freeze the zest arm reference where the operator's IK last left
             # it, ON EVERY locomotion entry. Capturing lazily in the loop (only
@@ -2418,6 +2455,7 @@ def main() -> None:
         nonlocal static_blend_from, static_blend_neck_from, static_blend_torso_from
         nonlocal static_blend_steps_done, static_blend_total
         nonlocal loco_arm_blend_from, arm_drive_engaged
+        nonlocal loco_neck_blend_from
         nonlocal pink_hold_settle_pending
         # The operator owns the hand from here; later holds must capture the
         # grip-preserving commanded targets, not the measured pose.
@@ -2425,6 +2463,10 @@ def main() -> None:
         policies.activate("static")
         loco_mode = "static"
         loco_arm_blend_from = None
+        # An unfinished locomotion-entry ramp is over: the static one takes the
+        # neck from here, and leaving the seed armed would restart it mid-flight
+        # on the next locomotion entry.
+        loco_neck_blend_from = None
         arm_drive_engaged = False
         hold_xy_yaw = capture_hold_pose_from_robot(robot)
         station_keeper.reset()
@@ -2536,6 +2578,7 @@ def main() -> None:
 
     def restore_checkpoint() -> None:
         nonlocal last_teleop_upper, last_neck_targets, last_torso_target, frozen_snapshot
+        nonlocal last_neck_cmd
         if not teleoperation_active:
             print("[checkpoint] ignored — recording is stopped", flush=True)
             return
@@ -2569,6 +2612,9 @@ def main() -> None:
         # so restart the static ramp from the restored measured pose.
         frozen_snapshot = None
         last_neck_targets = measured_neck_targets(robot)
+        # The pre-restore command belongs to the abandoned timeline; the restored
+        # neck pose is what a later locomotion ramp has to start from.
+        last_neck_cmd = last_neck_targets
         # Static blend (inside enter_static_mode) ramps the torso home from here.
         last_torso_target = measured_torso_target(robot)
         enter_static_mode()
@@ -3066,6 +3112,11 @@ def main() -> None:
                     # this with the policy's target; static mode ramps it to 0.
                     torso_yaw_cmd = last_torso_target
                     blend_alpha: float | None = None
+                    # Locomotion-entry neck ramp, resolved once per step in the
+                    # locomotion branch below and re-used by the walk override
+                    # after the policy step (both are the same ramp).
+                    neck_alpha: float | None = None
+                    neck_blend_from = loco_neck_blend_from
                     squeeze_cmd = shape_squeeze(controller_squeeze())
                     push_squeeze(squeeze_cmd)
 
@@ -3085,7 +3136,25 @@ def main() -> None:
                                 )
                             )
                             upper_body_mode = "frozen"
+                            # Neck home is the default pose (0 offset); ramp
+                            # there from wherever the operator's head left it
+                            # instead of snapping. Under --loco_policy walk the
+                            # override after the policy step re-lerps this same
+                            # alpha onto walk's neck target.
                             last_neck_targets = (0.0, 0.0)
+                            if neck_blend_from is not None:
+                                loco_neck_blend_steps_done += 1
+                                neck_alpha = smoothstep(
+                                    loco_neck_blend_steps_done / loco_neck_blend_total
+                                )
+                                last_neck_targets = (
+                                    neck_blend_from[0]
+                                    + neck_alpha * (0.0 - neck_blend_from[0]),
+                                    neck_blend_from[1]
+                                    + neck_alpha * (0.0 - neck_blend_from[1]),
+                                )
+                                if loco_neck_blend_steps_done >= loco_neck_blend_total:
+                                    loco_neck_blend_from = None
                         else:
                             raw = teleop_interface._get_raw_data()
                             if hold_xy_yaw is None:
@@ -3221,6 +3290,15 @@ def main() -> None:
                         policy_neck = body_targets[POLICY_MODEL_NECK_SLICE]
                         neck_yaw_cmd = float(policy_neck[0])
                         neck_pitch_cmd = float(policy_neck[1])
+                        if neck_alpha is not None and neck_blend_from is not None:
+                            # Same ramp as above, retargeted: walk's neck target
+                            # is the destination, not 0.
+                            neck_yaw_cmd = neck_blend_from[0] + neck_alpha * (
+                                neck_yaw_cmd - neck_blend_from[0]
+                            )
+                            neck_pitch_cmd = neck_blend_from[1] + neck_alpha * (
+                                neck_pitch_cmd - neck_blend_from[1]
+                            )
                         last_neck_targets = (neck_yaw_cmd, neck_pitch_cmd)
                     if loco_mode == "locomotion" and walk_arm_drive != "never":
                         # when_free hands the arms back the instant the operator
@@ -3262,6 +3340,9 @@ def main() -> None:
                             arms_moved_by_policy = True
                     legs_tensor = torch.as_tensor(legs, dtype=torch.float32, device=base_env.device)
                     legs_tensor = legs_tensor.unsqueeze(0).repeat(base_env.num_envs, 1)
+                    # What the neck is actually commanded to this step, whichever
+                    # branch produced it -- the seed for the next locomotion ramp.
+                    last_neck_cmd = (float(neck_yaw_cmd), float(neck_pitch_cmd))
                     neck_tensor = torch.tensor(
                         [[neck_yaw_cmd, neck_pitch_cmd]],
                         dtype=torch.float32,
@@ -3455,6 +3536,11 @@ def main() -> None:
                     # Re-latch after the reset pose settles; the stale hold's
                     # pelvis-relative wrist belongs to the previous episode.
                     left_hold_snapshot = None
+                    # The robot is back at its default joints, so the previous
+                    # episode's neck command describes nothing: seed the entry
+                    # ramp at 0 (a no-op) instead of ramping down from a pose
+                    # the neck is not in.
+                    last_neck_cmd = (0.0, 0.0)
                     enter_locomotion_mode(capture_frozen=False)
                     last_neck_targets = (0.0, 0.0)
                     # Joints are back at defaults; the previous episode's torso
