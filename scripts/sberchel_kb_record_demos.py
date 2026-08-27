@@ -4,7 +4,10 @@ Upper-body teleop is XR hand tracking; legs use the zest locomotion policy
 driven by keyboard velocity commands (like ``demo_sberchel_kb.py``). Press **C**
 to toggle locomotion (WASD + soft frozen upper body) vs static teleop (station-keep
 at the latch pose + live XR hands + headset neck look). Press **T** to teleport the
-XR anchor onto the robot (same pose relative to the robot as at episode start).
+XR view onto the robot: you land just ahead of it (``--xr_view_forward``, 0.25 m
+by default — on its root you are inside the head) looking along its forward axis,
+no matter which way you had physically turned (``--no-xr_align_view`` for the
+older anchor-only rebase, which left your heading where your body pointed).
 
 OpenXR often steals window focus (carb WASD drops). This script polls X11 keymap
 globally so hold-to-move works while the headset is focused. During locomotion,
@@ -39,6 +42,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -706,6 +710,36 @@ parser.add_argument(
     default=1.6,
     help="Maximum width of the target task panel in metres (text wraps to fit).",
 )
+parser.add_argument(
+    "--xr_align_view",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help=(
+        "On every XR view teleport (L1 / T, episode reset, session start — not "
+        "the R1 / D-pad-left checkpoint restore, which leaves the view alone), "
+        "turn the play space so you end up looking along the robot's forward "
+        "axis, whichever way you were physically facing. Disable to only rebase "
+        "the anchor, which leaves your heading wherever your body happens to point."
+    ),
+)
+parser.add_argument(
+    "--xr_view_yaw_offset_deg",
+    type=float,
+    default=0.0,
+    help="Extra heading (deg) added to the robot yaw that --xr_align_view aims the view at.",
+)
+parser.add_argument(
+    "--xr_view_forward",
+    type=float,
+    default=0.25,
+    help=(
+        "Metres ahead of the robot's root that an XR view teleport drops you (along "
+        "its forward axis). The anchor config stands you on the root itself, i.e. "
+        "inside the head, looking at its internals. Costs the arms the same distance "
+        "of forward reach — wrist targets are absolute XR world poses, so the robot's "
+        "shoulders end up this far behind yours. 0 restores the on-the-root landing."
+    ),
+)
 AppLauncher.add_app_launcher_args(parser)
 # Sberchel runs on green_challenge's CPU physics by default; --device overrides.
 apply_sberchel_cli_defaults(parser)
@@ -785,6 +819,7 @@ from dsynth_isaac.teleop.gamepad import RecordGamepad
 from dsynth_isaac.teleop.xr_anchor import (
     XrAnchorTeleporter,
     end_xr_display,
+    head_pose_tracked,
     xr_display_active,
 )
 from dsynth_isaac.teleop.xr_target_hud import XrTargetHud
@@ -844,7 +879,7 @@ _HELP_KEYBOARD = """
   C  toggle locomotion (WASD + Pink hold-off) / static teleop
      (static: XR hands + headset neck; Pink IK on, slower)
   G  hold to squeeze (close fingers past your hand -> real grip force)
-  T  teleport XR view onto the robot (same offset as at episode start)
+  T  teleport XR view just ahead of the robot, facing the way it faces
   V / Left   restore last checkpoint (auto-taken at each C into static
              mode: rolls sim + recording back — retry a grasp seamlessly)
   R / Up     save episode + reset, new random start pose
@@ -863,7 +898,7 @@ _HELP_GAMEPAD = """
   D-pad             digital WASD fallback (with --gamepad_no_sticks)
   Create   toggle locomotion / static teleop   (= C)
   L2       analog grasp squeeze (0..1)         (= G)
-  L1       teleport XR view onto the robot     (= T)
+  L1       teleport just ahead of robot + face its way (= T)
   R1       restore loco->static checkpoint     (= V / Left arrow)
   D-pad ^  save episode + reset, new pose      (= R / Up arrow)
   D-pad v  discard + reset, SAME pose (retry)  (= X / Down arrow)
@@ -2623,8 +2658,11 @@ def main() -> None:
         # restoring. Rollback has to stay bit-exact or the frame-count truncation
         # above stops lining up with the scene.
         policies.restore(sim_checkpoint["policy_state"])
-        if anchor_teleporter is not None:
-            anchor_teleporter.teleport_to_robot(robot)
+        # Deliberately no view teleport. The checkpoint is taken on entry to
+        # static mode, where the base station-keeps, so the robot rolls back at
+        # most a few centimetres — snapping the operator's view (and, with
+        # --xr_align_view, their heading) for that is pure disorientation in the
+        # middle of a retry. Press L1 / T if the rollback did move the robot.
         if target_hud is not None:
             target_hud.refresh_soon()
         print(
@@ -2715,6 +2753,16 @@ def main() -> None:
     sync_retargeter_idle_from_robot(teleop_interface, robot)
     idle_upper = build_idle_upper_from_robot(robot, base_env.device)
 
+    def live_head_pose() -> np.ndarray | None:
+        """Headset world pose right now, or None while the session is not tracking."""
+        if not xr_display_active():
+            return None
+        try:
+            return teleop_interface._get_raw_data().get(DeviceBase.TrackingTarget.HEAD)
+        except Exception as exc:
+            logger.debug("head pose poll failed: %s", exc)
+            return None
+
     # Anchor prim only exists once the OpenXR device has been created above.
     # Latch the anchor offset against the robot's NOMINAL init pose (what
     # ``xr.anchor_pos`` was tuned for), not the live pose: the spawn is
@@ -2729,6 +2777,12 @@ def main() -> None:
                 tuple(float(v) for v in nominal_init.pos),
                 yaw_from_quat_wxyz(nominal_init.rot),
             ),
+            # Without this the teleport only rebases the play space, so whichever
+            # way the operator physically turned is the way they still face after
+            # landing on the robot.
+            head_pose_fn=live_head_pose if args_cli.xr_align_view else None,
+            view_yaw_offset=math.radians(args_cli.xr_view_yaw_offset_deg),
+            forward_offset=args_cli.xr_view_forward,
         )
         if args_cli.xr
         else None
@@ -2750,9 +2804,14 @@ def main() -> None:
         if target_hud is not None:
             target_hud.refresh_soon()
         (ax, ay, az), ayaw = pose
+        heading = (
+            "view turned to the robot's heading"
+            if anchor_teleporter.last_teleport_aligned
+            else "heading unchanged (no head tracking)"
+        )
         print(
-            f"[XR] View teleported to robot: anchor xy=({ax:.3f}, {ay:.3f}) "
-            f"z={az:.3f} yaw={ayaw:.3f}",
+            f"[XR] View teleported {args_cli.xr_view_forward:.2f} m ahead of the robot: "
+            f"anchor xy=({ax:.3f}, {ay:.3f}) z={az:.3f} yaw={ayaw:.3f} — {heading}",
             flush=True,
         )
 
@@ -2989,6 +3048,11 @@ def main() -> None:
     # the anchor on every False -> True edge of the live-session signal so the
     # operator always starts looking where the robot looks.
     xr_session_was_live = False
+    # Head tracking usually lags the display-enabled signal by a few frames, and
+    # that re-assert cannot align the view without a head pose. Keep polling for
+    # a tracked head over the frames after it, then teleport once for real.
+    ALIGN_RETRY_FRAMES = 300
+    align_retries_left = 0
 
     # Window X / File->Exit posts a Kit quit request; with a live CloudXR
     # session Kit's own shutdown wedges inside xrWaitFrame before the loop's
@@ -3028,6 +3092,25 @@ def main() -> None:
                             "[XR] session live — anchor re-asserted on the robot",
                             flush=True,
                         )
+                        align_retries_left = (
+                            0
+                            if anchor_teleporter.last_teleport_aligned
+                            or not args_cli.xr_align_view
+                            else ALIGN_RETRY_FRAMES
+                        )
+                    elif xr_session_live and align_retries_left > 0:
+                        align_retries_left -= 1
+                        # Poll first: an unaligned re-teleport would drag the
+                        # anchor along with a robot that has started moving.
+                        if head_pose_tracked(live_head_pose()):
+                            align_retries_left = 0
+                            anchor_teleporter.teleport_to_robot(robot)
+                            if target_hud is not None:
+                                target_hud.refresh_soon()
+                            print(
+                                "[XR] head tracking up — view turned to the robot's heading",
+                                flush=True,
+                            )
                     xr_session_was_live = xr_session_live
                 if target_hud is not None:
                     target_hud.tick()
