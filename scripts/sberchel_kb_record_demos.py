@@ -626,7 +626,7 @@ parser.add_argument(
     default="left_head",
     help=(
         "Comma-separated robot cameras to render and record into the HDF5 when "
-        "--enable_cameras is set: left_head,right_head,left_wrist,right_wrist "
+        "--enable_cameras is set: left_head,left_wrist,right_wrist "
         "(or 'all'/'none'). Default keeps only the left head camera; extra "
         "cameras slow teleop rendering. Prefer recording without cameras and "
         "adding RGB later via sberchel_replay_demos.py --output_dataset_file."

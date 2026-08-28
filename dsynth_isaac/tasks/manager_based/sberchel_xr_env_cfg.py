@@ -189,8 +189,9 @@ class SberchelXRDemoEnvCfg(ManagerBasedRLEnvCfg):
         )
         self.scene.robot.spawn.semantic_tags = [("class", "robot")]
         self.scene.robot.init_state.pos = (5.5, 5, SBERCHEL_STAND_HEIGHT)
-        # All four green_challenge cameras (left/right head, left/right wrist).
-        # Record/replay scripts strip the ones not selected via --cameras.
+        # Every camera green_challenge's camera_mapping enables (left head plus
+        # both wrists as of the _poly200 revision). Record/replay scripts strip
+        # the ones not selected via --cameras.
         add_sberchel_cameras(self)
 
         self.sim.dt = 1.0 / 150.0

@@ -11,8 +11,8 @@ exactly what those joints did before their terms existed.
 
 With ``--output_dataset_file`` and ``--enable_cameras``, each replayed episode is copied
 into a new HDF5 with live robot RGB for every camera selected via ``--cameras``:
-``obs/head_img`` (left head), ``obs/right_head_img``, ``obs/left_wrist_img`` and
-``obs/right_wrist_img``. Defaults target the LeRobot sample layout
+``obs/head_img`` (left head), ``obs/left_wrist_img`` and ``obs/right_wrist_img``
+(green_challenge retired the right head camera). Defaults target the LeRobot sample layout
 (``cam_head``/``cam_left_wrist``/``cam_right_wrist``): the left-head + wrists trio,
 one frame per ``--frame_stride`` env steps (150/5 = 30 fps), processed through the
 green_challenge runtime pipeline (native 960x600 render -> fisheye mask -> full-frame
@@ -77,7 +77,7 @@ parser.add_argument(
     help=(
         "If set, write a new HDF5 that copies each replayed episode and adds live "
         "robot RGB for the cameras selected via --cameras (obs/head_img, "
-        "obs/right_head_img, obs/left_wrist_img, obs/right_wrist_img). "
+        "obs/left_wrist_img, obs/right_wrist_img). "
         "Requires --enable_cameras."
     ),
 )
@@ -87,7 +87,7 @@ parser.add_argument(
     default="left_head,left_wrist,right_wrist",
     help=(
         "Comma-separated robot cameras to render/export with --output_dataset_file: "
-        "left_head,right_head,left_wrist,right_wrist (or 'all'). The default trio "
+        "left_head,left_wrist,right_wrist (or 'all'). The default trio "
         "matches the LeRobot sample layout (cam_head/cam_left_wrist/cam_right_wrist). "
         "Cameras not listed are stripped from the scene to save render time."
     ),

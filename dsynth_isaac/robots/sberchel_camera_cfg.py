@@ -1,16 +1,33 @@
-"""Sberchel robot camera configs mirrored from green_challenge.
+"""Sberchel robot camera configs, read live from green_challenge.
 
-Params match ``camera_parameters.json`` presets for robot ``v3_0a`` and the
-``create_camera_cfgs`` factory in green_challenge (RGB only, no depth):
+Camera params are NOT duplicated here. ``_CAMERA_PARAMS`` is parsed at import
+time from the checkout's ``camera_parameters.json`` (resolved by
+``dsynth_isaac.green_challenge_path``) and assembled exactly the way
+green_challenge's own ``create_camera_cfgs`` assembles it, so a preset revision
+on their side lands here without an edit. Hardcoding the presets is what let us
+run the retired ``_v1`` optics for two weeks after they moved to ``_poly200``.
 
-- ``left_head``  -> preset ``head_left_rgb_fisheye_v1``
-- ``right_head`` -> preset ``head_right_rgb_fisheye_v1``
-- ``left_wrist`` -> preset ``wrist_left_rgb_fisheye_v1``
-- ``right_wrist``-> preset ``wrist_right_rgb_fisheye_v1``
+``camera_mapping`` decides which cameras exist. As of the ``_poly200`` revision
+that is left head + both wrists; ``right_head_camera`` maps to ``null`` (their
+``scenes.DefaultSceneCfg`` has it commented out too), so ``--cameras
+right_head`` now fails instead of rendering a camera their stack does not have.
+
+Two things are deliberately not taken from the JSON:
+
+- ``extrinsic.rotation`` -> overridden per ``_OFFSET_ROT_OVERRIDES``. See
+  ``_OFFSET_ROT`` below; the value is unchanged across every revision so far.
+- ``mask_file`` -> ignored; see ``_CAMERA_MASK_FILES``.
+
+And one thing is copied from their factory rather than the file:
+``intrinsic.ftheta_width/ftheta_height`` are ignored, because
+``create_camera_cfgs`` passes ``resolution`` to ``fisheye_nominal_width/height``
+and never reads them. (``_poly200`` declares 860x600 head, 900x510 wrists -- if
+their factory starts honouring these, the FoV mapping changes and we follow.)
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -25,83 +42,122 @@ from isaaclab.sensors import CameraCfg
 from dsynth_isaac.green_challenge_path import green_challenge_root
 
 _HORIZONTAL_APERTURE = 5.784
+# Fallback for presets that do not state one. Note that the camera export in
+# ``sberchel_replay_demos`` overrides update_period to 0.0 (one fresh frame per
+# env step), so this only matters for teleop/record runs.
 _UPDATE_PERIOD = 0.067
-# MJCF head camera bodies are X-forward / Y-up (+90 deg about X from the Z-up
-# neck frame). green_challenge's (0.5, 0.5, -0.5, -0.5) OpenGL offset assumes a
-# Z-up parent and rolls the image 90 deg here. Map OpenGL (-Z forward, +Y up)
-# onto that body frame with a -90 deg rotation about Y.
+# The converted USD keeps the MJCF body quaternions (checked on the crate:
+# ``left_head_camera`` carries orient (0.7071, 0.7071, 0, 0)), so the head
+# camera bodies are X-forward / Y-up, not Z-up. green_challenge's
+# (0.5, 0.5, -0.5, -0.5) OpenGL offset assumes a Z-up parent and puts image-up
+# along world -Y here, i.e. a 90 deg roll. Map OpenGL (-Z forward, +Y up) onto
+# the body frame with a -90 deg rotation about Y instead; that reproduces the
+# upright framing of green_challenge's own reference episodes.
 _OFFSET_ROT = (0.70710678, 0.0, -0.70710678, 0.0)
 # The wrist camera bodies are rolled 90 deg about the optical axis relative to
-# the head bodies (verified visually on replay renders): compose the head
-# offset with Rz(+90 deg) in the camera frame, rotating the image clockwise.
+# the head bodies (MJCF quat 0.5213/0.4777/0.4777/-0.5213, verified visually on
+# replay renders): compose the head offset with Rz(+90 deg) in the camera frame,
+# rotating the image clockwise.
 _WRIST_OFFSET_ROT = (0.5, -0.5, -0.5, 0.5)
-
-# green_challenge camera_parameters.json (robot_v3_0a) presets.
-_CAMERA_PARAMS: dict[str, dict[str, Any]] = {
-    "left_head": {
-        "body": "left_head_camera",
-        "projection_type": "fisheyePolynomial",
-        "fx": 60.0,
-        "fy": 60.0,
-        "cx": 430.0,
-        "cy": 300.0,
-        "distortion": (0.0, 0.0038, 0.0, 0.0),
-        "fov": 200.0,
-        "clipping_range": (0.15, 1_000_000.0),
-        "offset_pos": (0.0, 0.0, 0.0155),
-    },
-    "right_head": {
-        "body": "right_head_camera",
-        "projection_type": "fisheyeKannalaBrandtK3",
-        "fx": 307.6776698581577,
-        "fy": 307.7025650237449,
-        "cx": 477.6228792583235,
-        "cy": 319.9706807837122,
-        "distortion": (
-            -0.008605678403163834,
-            0.006550329526540998,
-            -0.010705254411063993,
-            0.003190446522626963,
-        ),
-        "fov": 180.0,
-        "clipping_range": (0.08, 1_000_000.0),
-        "offset_pos": (0.0, 0.0, 0.0155),
-    },
-    # Wrists: green_challenge specifies KannalaBrandtK3 with zero distortion,
-    # i.e. the pure equidistant model r = fx*theta. Isaac's KB3 path renders
-    # that far too narrow, so use the equivalent f-theta polynomial
-    # theta(r) = r/fx (B = 1/fx) on the fisheyePolynomial path, which the
-    # left head camera already validated visually.
-    "left_wrist": {
-        "body": "left_wrist_camera",
-        "projection_type": "fisheyePolynomial",
-        "fx": 270.0,
-        "fy": 270.0,
-        "cx": 480.0,
-        "cy": 300.0,
-        "distortion": (0.0, 1.0 / 270.0, 0.0, 0.0),
-        "fov": 180.0,
-        "clipping_range": (0.025, 1_000_000.0),
-        "offset_pos": (0.04, 0.0, 0.0155),
-        "offset_rot": _WRIST_OFFSET_ROT,
-    },
-    "right_wrist": {
-        "body": "right_wrist_camera",
-        "projection_type": "fisheyePolynomial",
-        "fx": 270.0,
-        "fy": 270.0,
-        "cx": 480.0,
-        "cy": 300.0,
-        "distortion": (0.0, 1.0 / 270.0, 0.0, 0.0),
-        "fov": 180.0,
-        "clipping_range": (0.05, 1_000_000.0),
-        "offset_pos": (0.04, 0.0, 0.0155),
-        "offset_rot": _WRIST_OFFSET_ROT,
-    },
-}
 
 _WIDTH = 960
 _HEIGHT = 600
+
+# green_challenge camera key -> (our camera name, MJCF body, offset rot override).
+# The body name and the camera key coincide; keep both so a rename on their side
+# is a one-line change here.
+_GC_CAMERAS: dict[str, tuple[str, str, tuple[float, float, float, float]]] = {
+    "left_head_camera": ("left_head", "left_head_camera", _OFFSET_ROT),
+    "right_head_camera": ("right_head", "right_head_camera", _OFFSET_ROT),
+    "left_wrist_camera": ("left_wrist", "left_wrist_camera", _WRIST_OFFSET_ROT),
+    "right_wrist_camera": ("right_wrist", "right_wrist_camera", _WRIST_OFFSET_ROT),
+}
+
+_SETTINGS_SUBPATH = "assets/robot_v3_0a/dependencies/settings"
+
+
+def green_challenge_settings_dir() -> Path:
+    """``<checkout>/assets/robot_v3_0a/dependencies/settings``."""
+    return Path(green_challenge_root()) / _SETTINGS_SUBPATH
+
+
+def _load_green_challenge_camera_params() -> dict[str, dict[str, Any]]:
+    """Parse ``camera_parameters.json`` the way ``create_camera_cfgs`` reads it.
+
+    Only cameras that ``camera_mapping`` points at a preset are returned, so a
+    camera green_challenge retires (mapped to ``null``) disappears here too.
+    """
+    path = green_challenge_settings_dir() / "camera_parameters.json"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"green_challenge camera_parameters.json not found: {path} "
+            "(set GREEN_CHALLENGE_PATH to the checkout directory)."
+        )
+    config = json.loads(path.read_text())
+    presets = config["presets"]
+    mapping = config["camera_mapping"]
+
+    unknown = set(mapping) - set(_GC_CAMERAS)
+    if unknown:
+        raise ValueError(
+            f"{path} maps camera(s) {sorted(unknown)} that this module has no MJCF "
+            "body for; add them to _GC_CAMERAS."
+        )
+
+    params: dict[str, dict[str, Any]] = {}
+    for gc_name, (name, body, offset_rot) in _GC_CAMERAS.items():
+        preset_name = mapping.get(gc_name)
+        if preset_name is None:
+            continue
+        preset = presets[preset_name]
+        intrinsic = preset["intrinsic"]
+        extrinsic = preset["extrinsic"]
+
+        resolution = tuple(intrinsic["resolution"])
+        if resolution != (_WIDTH, _HEIGHT):
+            raise ValueError(
+                f"{path}: preset {preset_name!r} renders at {resolution}, but the "
+                f"mask and center-crop-resize maths here assume {(_WIDTH, _HEIGHT)}."
+            )
+        convention = extrinsic.get("convention", "opengl")
+        if convention != "opengl":
+            raise ValueError(
+                f"{path}: preset {preset_name!r} uses extrinsic convention "
+                f"{convention!r}; the _OFFSET_ROT overrides are OpenGL-frame."
+            )
+        if preset.get("data_types", ["rgb"]) != ["rgb"]:
+            raise ValueError(
+                f"{path}: preset {preset_name!r} asks for {preset['data_types']}; "
+                "this module only wires up RGB."
+            )
+
+        params[name] = {
+            "preset": preset_name,
+            "body": body,
+            "projection_type": preset.get("projection_type", "fisheyeKannalaBrandtK3"),
+            "fx": float(intrinsic["fx"]),
+            "fy": float(intrinsic["fy"]),
+            "cx": float(intrinsic["cx"]),
+            "cy": float(intrinsic["cy"]),
+            "distortion": tuple(float(k) for k in intrinsic["distortion"]),
+            "fov": float(intrinsic["fov"]),
+            "horizontal_aperture": float(
+                intrinsic.get("horizontal_aperture", _HORIZONTAL_APERTURE)
+            ),
+            "clipping_range": tuple(float(v) for v in preset["clipping_range"]),
+            "offset_pos": tuple(float(v) for v in extrinsic["position"]),
+            # Not extrinsic["rotation"] -- see _OFFSET_ROT.
+            "offset_rot": offset_rot,
+            "gc_offset_rot": tuple(float(v) for v in extrinsic["rotation"]),
+            "update_period": float(preset.get("update_period", _UPDATE_PERIOD)),
+        }
+
+    if not params:
+        raise ValueError(f"{path}: camera_mapping enables no cameras.")
+    return params
+
+
+_CAMERA_PARAMS: dict[str, dict[str, Any]] = _load_green_challenge_camera_params()
 
 SBERCHEL_CAMERA_NAMES: tuple[str, ...] = tuple(_CAMERA_PARAMS.keys())
 
@@ -119,8 +175,17 @@ SBERCHEL_CAMERA_OBS_KEYS: dict[str, tuple[str, str]] = {
 # LeRobot export trio (sample datasets: cam_head / cam_left_wrist / cam_right_wrist).
 SBERCHEL_LEROBOT_CAMERAS: tuple[str, ...] = ("left_head", "left_wrist", "right_wrist")
 
-# green_challenge per-camera masks (manip_env.py CAMERA_MASKS), applied at
-# native 960x600 before resize: fisheye valid-region oval + mount cutouts.
+# green_challenge per-camera masks, applied at native 960x600 before resize:
+# fisheye valid-region oval + mount cutouts.
+#
+# Taken from ``manip_env.CAMERA_MASKS`` rather than from the preset's
+# ``mask_file`` field. ``mask_file`` appears only in the ``_poly200`` JSON, is
+# read by nothing in green_challenge (``create_camera_cfgs`` never looks at it),
+# and names the arm masks crossed over -- wrist_left -> mask_right_arm,
+# wrist_right -> mask_left_arm -- while the code that actually runs in their
+# evaluation pairs each wrist with its own side. The straight pairing also fits
+# the geometry: mask_left_arm's valid region centres on x=474.1, and the left
+# wrist preset's cx is 474.0.
 _CAMERA_MASK_FILES: dict[str, str] = {
     "left_head": "mask_head.npy",
     "right_head": "mask_head.npy",
@@ -135,8 +200,7 @@ def load_sberchel_camera_masks(cameras: str | Iterable[str]) -> dict[str, np.nda
     The green_challenge checkout is resolved by ``dsynth_isaac.green_challenge_path``
     (``GREEN_CHALLENGE_PATH`` or the default checkout location).
     """
-    gc_root = Path(green_challenge_root())
-    mask_dir = gc_root / "assets" / "robot_v3_0a" / "dependencies" / "settings" / "camera_mask"
+    mask_dir = green_challenge_settings_dir() / "camera_mask"
     masks: dict[str, np.ndarray] = {}
     for camera in parse_camera_names(cameras):
         mask_path = mask_dir / _CAMERA_MASK_FILES[camera]
@@ -177,8 +241,17 @@ def parse_camera_names(spec: str | Iterable[str]) -> tuple[str, ...]:
         return ()
     unknown = [name for name in names if name not in _CAMERA_PARAMS]
     if unknown:
+        known = {entry[0] for entry in _GC_CAMERAS.values()}
+        retired = [name for name in unknown if name in known]
+        hint = (
+            f" {retired} exist on the robot but green_challenge's camera_mapping "
+            "points them at null, so their evaluation stack does not render them."
+            if retired
+            else ""
+        )
         raise ValueError(
-            f"Unknown camera name(s) {unknown}; valid names: {list(SBERCHEL_CAMERA_NAMES)} (or 'all'/'none')."
+            f"Unknown camera name(s) {unknown}; valid names: "
+            f"{list(SBERCHEL_CAMERA_NAMES)} (or 'all'/'none').{hint}"
         )
     return tuple(dict.fromkeys(names))
 
@@ -220,7 +293,7 @@ def make_sberchel_camera_cfg(camera: str, size: tuple[int, int] | None = None) -
     else:
         width, height = size
         fx, fy, cx, cy = _center_crop_resize_intrinsics(params, width, height)
-    focal_length = (fx * _HORIZONTAL_APERTURE) / width
+    focal_length = (fx * params["horizontal_aperture"]) / width
     intrinsic_matrix = [
         fx, 0.0, cx,
         0.0, fy, cy,
@@ -260,7 +333,7 @@ def make_sberchel_camera_cfg(camera: str, size: tuple[int, int] | None = None) -
     body = params["body"]
     return CameraCfg(
         prim_path=f"{{ENV_REGEX_NS}}/Robot/root/{body}/{body}_sensor",
-        update_period=_UPDATE_PERIOD,
+        update_period=params.get("update_period", _UPDATE_PERIOD),
         height=height,
         width=width,
         data_types=["rgb"],
