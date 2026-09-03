@@ -3,32 +3,41 @@
 Camera params are NOT duplicated here. ``_CAMERA_PARAMS`` is parsed at import
 time from the checkout's ``camera_parameters.json`` (resolved by
 ``dsynth_isaac.green_challenge_path``) and assembled exactly the way
-green_challenge's own ``create_camera_cfgs`` assembles it, so a preset revision
-on their side lands here without an edit. Hardcoding the presets is what let us
-run the retired ``_v1`` optics for two weeks after they moved to ``_poly200``.
+green_challenge's own camera factory assembles it, so a preset revision on their
+side lands here without an edit. Hardcoding the presets is what let us run the
+retired ``_v1`` optics for two weeks after they moved to ``_poly200``.
+
+That factory is now ``scenes/assets/camera_spawner.CameraSpawner`` (the
+``green-challenge-sim`` branch; it replaced the free function
+``sensors.create_camera_cfgs``, kept there as ``sensors_backup21aug2026.py``).
+Two of its behaviours differ from the retired one: ``intrinsic.ftheta_width /
+ftheta_height`` now feed ``fisheye_nominal_*`` instead of the render resolution
+(mirrored in ``make_sberchel_camera_cfg``), and ``preset["mask_file"]`` is read
+into a runtime mask (not mirrored -- see ``_CAMERA_MASK_FILES``, which follows
+the masking their evaluation actually runs).
 
 ``camera_mapping`` decides which cameras exist. As of the ``_poly200`` revision
 that is left head + both wrists; ``right_head_camera`` maps to ``null`` (their
 ``scenes.DefaultSceneCfg`` has it commented out too), so ``--cameras
 right_head`` now fails instead of rendering a camera their stack does not have.
 
-Two things are deliberately not taken from the JSON:
-
-- ``extrinsic.rotation`` -> overridden per ``_OFFSET_ROT_OVERRIDES``. See
-  ``_OFFSET_ROT`` below; the value is unchanged across every revision so far.
-- ``mask_file`` -> ignored; see ``_CAMERA_MASK_FILES``.
-
-And one thing is copied from their factory rather than the file:
-``intrinsic.ftheta_width/ftheta_height`` are ignored, because
-``create_camera_cfgs`` passes ``resolution`` to ``fisheye_nominal_width/height``
-and never reads them. (``_poly200`` declares 860x600 head, 900x510 wrists -- if
-their factory starts honouring these, the FoV mapping changes and we follow.)
+``extrinsic.rotation`` used to be overridden too, with a -90 deg rotation about
+Y for the heads and that composed with Rz(+90 deg) for the wrists, on the theory
+that green_challenge's ``(0.5, 0.5, -0.5, -0.5)`` assumed a Z-up parent while
+the MJCF camera bodies are X-forward / Y-up. Measured against their value that
+override rolled the head 90 deg and the wrists 180 deg (upside down) about the
+optical axis, which is exactly the framing mismatch seen against the
+``left_wrist_camera_sensor`` viewport of a live ``run.sh``. Both stacks spawn
+the same MJCF through green_challenge's own ``spawn_from_mjcf``, so the parent
+frames are identical and there is nothing to compensate for: the rotation now
+comes from the file like everything else. The images the VLA trains on are
+rotated instead, at LeRobot conversion time -- see
+``sberchel_hdf5_to_lerobot.CAMERA_ROT90_CW``.
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
@@ -39,50 +48,29 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.sensors import CameraCfg
 
-from dsynth_isaac.green_challenge_path import green_challenge_root
+from dsynth_isaac.green_challenge_path import green_challenge_settings_dir
 
 _HORIZONTAL_APERTURE = 5.784
 # Fallback for presets that do not state one. Note that the camera export in
 # ``sberchel_replay_demos`` overrides update_period to 0.0 (one fresh frame per
 # env step), so this only matters for teleop/record runs.
 _UPDATE_PERIOD = 0.067
-# The converted USD keeps the MJCF body quaternions (checked on the crate:
-# ``left_head_camera`` carries orient (0.7071, 0.7071, 0, 0)), so the head
-# camera bodies are X-forward / Y-up, not Z-up. green_challenge's
-# (0.5, 0.5, -0.5, -0.5) OpenGL offset assumes a Z-up parent and puts image-up
-# along world -Y here, i.e. a 90 deg roll. Map OpenGL (-Z forward, +Y up) onto
-# the body frame with a -90 deg rotation about Y instead; that reproduces the
-# upright framing of green_challenge's own reference episodes.
-_OFFSET_ROT = (0.70710678, 0.0, -0.70710678, 0.0)
-# The wrist camera bodies are rolled 90 deg about the optical axis relative to
-# the head bodies (MJCF quat 0.5213/0.4777/0.4777/-0.5213, verified visually on
-# replay renders): compose the head offset with Rz(+90 deg) in the camera frame,
-# rotating the image clockwise.
-_WRIST_OFFSET_ROT = (0.5, -0.5, -0.5, 0.5)
-
 _WIDTH = 960
 _HEIGHT = 600
 
-# green_challenge camera key -> (our camera name, MJCF body, offset rot override).
-# The body name and the camera key coincide; keep both so a rename on their side
-# is a one-line change here.
-_GC_CAMERAS: dict[str, tuple[str, str, tuple[float, float, float, float]]] = {
-    "left_head_camera": ("left_head", "left_head_camera", _OFFSET_ROT),
-    "right_head_camera": ("right_head", "right_head_camera", _OFFSET_ROT),
-    "left_wrist_camera": ("left_wrist", "left_wrist_camera", _WRIST_OFFSET_ROT),
-    "right_wrist_camera": ("right_wrist", "right_wrist_camera", _WRIST_OFFSET_ROT),
+# green_challenge camera key -> (our camera name, MJCF body). The body name and
+# the camera key coincide; keep both so a rename on their side is a one-line
+# change here.
+_GC_CAMERAS: dict[str, tuple[str, str]] = {
+    "left_head_camera": ("left_head", "left_head_camera"),
+    "right_head_camera": ("right_head", "right_head_camera"),
+    "left_wrist_camera": ("left_wrist", "left_wrist_camera"),
+    "right_wrist_camera": ("right_wrist", "right_wrist_camera"),
 }
-
-_SETTINGS_SUBPATH = "assets/robot_v3_0a/dependencies/settings"
-
-
-def green_challenge_settings_dir() -> Path:
-    """``<checkout>/assets/robot_v3_0a/dependencies/settings``."""
-    return Path(green_challenge_root()) / _SETTINGS_SUBPATH
 
 
 def _load_green_challenge_camera_params() -> dict[str, dict[str, Any]]:
-    """Parse ``camera_parameters.json`` the way ``create_camera_cfgs`` reads it.
+    """Parse ``camera_parameters.json`` the way ``CameraSpawner`` reads it.
 
     Only cameras that ``camera_mapping`` points at a preset are returned, so a
     camera green_challenge retires (mapped to ``null``) disappears here too.
@@ -105,7 +93,7 @@ def _load_green_challenge_camera_params() -> dict[str, dict[str, Any]]:
         )
 
     params: dict[str, dict[str, Any]] = {}
-    for gc_name, (name, body, offset_rot) in _GC_CAMERAS.items():
+    for gc_name, (name, body) in _GC_CAMERAS.items():
         preset_name = mapping.get(gc_name)
         if preset_name is None:
             continue
@@ -119,36 +107,58 @@ def _load_green_challenge_camera_params() -> dict[str, dict[str, Any]]:
                 f"{path}: preset {preset_name!r} renders at {resolution}, but the "
                 f"mask and center-crop-resize maths here assume {(_WIDTH, _HEIGHT)}."
             )
+        # CameraSpawner takes the render raster from the preset's own
+        # width/height and the intrinsics from intrinsic.resolution; nothing
+        # checks that the two agree, and a preset where they disagree would put
+        # the fisheye centre off by the difference.
+        raster = (int(preset["width"]), int(preset["height"]))
+        if raster != resolution:
+            raise ValueError(
+                f"{path}: preset {preset_name!r} renders at {raster} but states "
+                f"intrinsic.resolution {resolution}; CameraSpawner would use both."
+            )
         convention = extrinsic.get("convention", "opengl")
         if convention != "opengl":
             raise ValueError(
                 f"{path}: preset {preset_name!r} uses extrinsic convention "
-                f"{convention!r}; the _OFFSET_ROT overrides are OpenGL-frame."
+                f"{convention!r}; CameraCfg.OffsetCfg is wired up as OpenGL here."
             )
         if preset.get("data_types", ["rgb"]) != ["rgb"]:
             raise ValueError(
                 f"{path}: preset {preset_name!r} asks for {preset['data_types']}; "
                 "this module only wires up RGB."
             )
+        projection_type = preset.get("projection_type", "fisheyeKannalaBrandtK3")
+        if projection_type == "pinhole":
+            # CameraSpawner spawns the PinholeCameraCfg for these and skips the
+            # fisheye path entirely; make_sberchel_camera_cfg always builds the
+            # fisheye cfg, so a pinhole mapping would silently render a lens
+            # they do not use. The JSON carries four unmapped pinhole presets.
+            raise ValueError(
+                f"{path}: camera_mapping points at pinhole preset {preset_name!r}; "
+                "make_sberchel_camera_cfg only builds fisheye cameras."
+            )
 
         params[name] = {
             "preset": preset_name,
             "body": body,
-            "projection_type": preset.get("projection_type", "fisheyeKannalaBrandtK3"),
+            "projection_type": projection_type,
             "fx": float(intrinsic["fx"]),
             "fy": float(intrinsic["fy"]),
             "cx": float(intrinsic["cx"]),
             "cy": float(intrinsic["cy"]),
             "distortion": tuple(float(k) for k in intrinsic["distortion"]),
             "fov": float(intrinsic["fov"]),
+            # The ftheta polynomial's reference raster. Absent on the pinhole
+            # and _kb3 presets, where CameraSpawner falls back to resolution.
+            "ftheta_width": float(intrinsic.get("ftheta_width", resolution[0])),
+            "ftheta_height": float(intrinsic.get("ftheta_height", resolution[1])),
             "horizontal_aperture": float(
                 intrinsic.get("horizontal_aperture", _HORIZONTAL_APERTURE)
             ),
             "clipping_range": tuple(float(v) for v in preset["clipping_range"]),
             "offset_pos": tuple(float(v) for v in extrinsic["position"]),
-            # Not extrinsic["rotation"] -- see _OFFSET_ROT.
-            "offset_rot": offset_rot,
-            "gc_offset_rot": tuple(float(v) for v in extrinsic["rotation"]),
+            "offset_rot": tuple(float(v) for v in extrinsic["rotation"]),
             "update_period": float(preset.get("update_period", _UPDATE_PERIOD)),
         }
 
@@ -179,13 +189,20 @@ SBERCHEL_LEROBOT_CAMERAS: tuple[str, ...] = ("left_head", "left_wrist", "right_w
 # fisheye valid-region oval + mount cutouts.
 #
 # Taken from ``manip_env.CAMERA_MASKS`` rather than from the preset's
-# ``mask_file`` field. ``mask_file`` appears only in the ``_poly200`` JSON, is
-# read by nothing in green_challenge (``create_camera_cfgs`` never looks at it),
-# and names the arm masks crossed over -- wrist_left -> mask_right_arm,
-# wrist_right -> mask_left_arm -- while the code that actually runs in their
-# evaluation pairs each wrist with its own side. The straight pairing also fits
-# the geometry: mask_left_arm's valid region centres on x=474.1, and the left
-# wrist preset's cx is 474.0.
+# ``mask_file`` field, which names the arm masks crossed over: wrist_left ->
+# mask_right_arm, wrist_right -> mask_left_arm. ``CameraSpawner._init_masks``
+# does now load that field (the retired ``create_camera_cfgs`` ignored it
+# entirely), but nothing calls ``CameraSpawner.apply_masks`` -- the one live
+# call in ``manip_env.step`` is commented out -- so the masking that actually
+# runs in their evaluation is still ``LatestFrameHandler(masks=CAMERA_MASKS)``,
+# which pairs each wrist with its own side. Follow the code, not the field.
+#
+# ``mask_right_arm.npy`` was regenerated on the sim branch and is now the exact
+# horizontal mirror of ``mask_left_arm.npy`` (measured: ``L[:, ::-1] == R``,
+# valid region 780 px wide centred at x=476 vs the old 738 px at x=451). The
+# masks are read live from the checkout, so this needs no edit -- but the
+# right-wrist vignette in demos replayed after the switch does not match the
+# one in demos replayed before it.
 _CAMERA_MASK_FILES: dict[str, str] = {
     "left_head": "mask_head.npy",
     "right_head": "mask_head.npy",
@@ -211,6 +228,49 @@ def load_sberchel_camera_masks(cameras: str | Iterable[str]) -> dict[str, np.nda
             )
         masks[camera] = np.load(mask_path)
     return masks
+
+
+def camera_optics_provenance(cameras: str | Iterable[str]) -> dict[str, Any]:
+    """What the cameras of a render actually were, for the dataset's ``env_args``.
+
+    Everything here is read live from the green_challenge checkout, so two
+    exports made from the same recording months apart can differ in optics with
+    nothing in the file to say so. The sim-branch switch of 2026-08-28 is exactly
+    that case: the ftheta raster went 960x600 -> 860x600 / 900x510 and
+    ``mask_right_arm.npy`` was regenerated, both invisible in every other field.
+
+    The mask digest is over the file bytes, so a regenerated mask of unchanged
+    shape still shows up. Masks are recorded for every requested camera even
+    under ``--camera_pipeline center_crop``, which does not apply them -- the
+    pipeline is recorded next to this and says which happened.
+    """
+    import hashlib
+
+    mask_dir = green_challenge_settings_dir() / "camera_mask"
+    out: dict[str, Any] = {"green_challenge_root": str(green_challenge_settings_dir().parents[3])}
+    for camera in parse_camera_names(cameras):
+        params = _CAMERA_PARAMS[camera]
+        mask_path = mask_dir / _CAMERA_MASK_FILES[camera]
+        entry: dict[str, Any] = {
+            "preset": params["preset"],
+            "projection_type": params["projection_type"],
+            "fx": params["fx"], "fy": params["fy"],
+            "cx": params["cx"], "cy": params["cy"],
+            "distortion": list(params["distortion"]),
+            "fov": params["fov"],
+            "ftheta_size": [params["ftheta_width"], params["ftheta_height"]],
+            "clipping_range": list(params["clipping_range"]),
+            "offset_pos": list(params["offset_pos"]),
+            "offset_rot": list(params["offset_rot"]),
+            "mask_file": _CAMERA_MASK_FILES[camera],
+            "mask_sha1": (
+                hashlib.sha1(mask_path.read_bytes()).hexdigest()
+                if mask_path.exists()
+                else None
+            ),
+        }
+        out[camera] = entry
+    return out
 
 
 def parse_camera_size(spec: str) -> tuple[int, int] | None:
@@ -258,11 +318,15 @@ def parse_camera_names(spec: str | Iterable[str]) -> tuple[str, ...]:
 
 def _center_crop_resize_intrinsics(
     params: dict[str, Any], new_width: int, new_height: int
-) -> tuple[float, float, float, float]:
+) -> tuple[float, float, float, float, float, float]:
     """green_challenge ``rescale_camera_preset(mode="center_crop_resize")``.
 
     Crop the native 960x600 frame to its centered 600x600 square, then scale to
-    the new resolution, adjusting fx/fy/cx/cy accordingly.
+    the new resolution, adjusting fx/fy/cx/cy accordingly. Returns the scale
+    factors too, for the ftheta raster (which their rescale leaves alone --
+    ``CameraSpawner.rescale_camera_preset`` only touches the intrinsic matrix,
+    so a rescaled ftheta preset comes out with a nominal size that no longer
+    matches its own resolution).
     """
     crop_size = min(_WIDTH, _HEIGHT)
     crop_x = (_WIDTH - crop_size) / 2.0
@@ -273,7 +337,7 @@ def _center_crop_resize_intrinsics(
     fy = params["fy"] * sy
     cx = (params["cx"] - crop_x) * sx
     cy = (params["cy"] - crop_y) * sy
-    return fx, fy, cx, cy
+    return fx, fy, cx, cy, sx, sy
 
 
 def make_sberchel_camera_cfg(camera: str, size: tuple[int, int] | None = None) -> CameraCfg:
@@ -290,9 +354,13 @@ def make_sberchel_camera_cfg(camera: str, size: tuple[int, int] | None = None) -
         fy: float = params["fy"]
         cx: float = params["cx"]
         cy: float = params["cy"]
+        ftheta_width: float = params["ftheta_width"]
+        ftheta_height: float = params["ftheta_height"]
     else:
         width, height = size
-        fx, fy, cx, cy = _center_crop_resize_intrinsics(params, width, height)
+        fx, fy, cx, cy, sx, sy = _center_crop_resize_intrinsics(params, width, height)
+        ftheta_width = params["ftheta_width"] * sx
+        ftheta_height = params["ftheta_height"] * sy
     focal_length = (fx * params["horizontal_aperture"]) / width
     intrinsic_matrix = [
         fx, 0.0, cx,
@@ -309,8 +377,12 @@ def make_sberchel_camera_cfg(camera: str, size: tuple[int, int] | None = None) -
     k1, k2, k3, k4 = params["distortion"]
     fisheye_cfg = sim_utils.FisheyeCameraCfg(
         projection_type=params["projection_type"],
-        fisheye_nominal_width=float(width),
-        fisheye_nominal_height=float(height),
+        # Their factory used to pass the render resolution here and ignore the
+        # preset's ftheta_* fields; CameraSpawner reads them, so the _poly200
+        # presets now map their polynomial over an 860x600 head / 900x510 wrist
+        # raster instead of 960x600 -- a different FoV per pixel, not a crop.
+        fisheye_nominal_width=ftheta_width,
+        fisheye_nominal_height=ftheta_height,
         fisheye_optical_centre_x=cx,
         fisheye_optical_centre_y=cy,
         fisheye_polynomial_a=k1,
@@ -340,7 +412,7 @@ def make_sberchel_camera_cfg(camera: str, size: tuple[int, int] | None = None) -
         spawn=fisheye_cfg,
         offset=CameraCfg.OffsetCfg(
             pos=params["offset_pos"],
-            rot=params.get("offset_rot", _OFFSET_ROT),
+            rot=params["offset_rot"],
             convention="opengl",
         ),
     )

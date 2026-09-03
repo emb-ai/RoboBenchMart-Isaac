@@ -16,6 +16,10 @@ Input files are produced by ``sberchel_replay_demos.py --output_dataset_file ...
 The output dataset frame rate equals the camera rate (default 150/5 = 30 fps):
 frame k uses sim step ``k * camera_frame_stride``.
 
+Camera frames are rotated on the way in -- head 90 deg clockwise, both wrists
+180 deg (``CAMERA_ROT90_CW``), as green_challenge specified for this conversion.
+Disable with ``--no_camera_rotation``.
+
 Feature construction (reverse-engineered from the sample dataset):
 
 - ``observation.state`` (51) = 44 named joints (sim crank joints aliased to the real
@@ -136,6 +140,33 @@ CAMERA_MAP = {
     "left_wrist_img": "observation.images.cam_left_wrist",
     "right_wrist_img": "observation.images.cam_right_wrist",
 }
+
+# Quarter-turns CLOCKWISE applied to each camera on the way into the dataset:
+# head 1 (90 deg), both wrists 2 (180 deg), as specified by green_challenge for
+# this conversion.
+#
+# The two halves of the camera question are settled in different places, and
+# they must not be confused. The SIM CAMERAS carry green_challenge's own
+# ``extrinsic.rotation`` (0.5, 0.5, -0.5, -0.5) verbatim -- see
+# ``sberchel_camera_cfg`` -- so a rendered frame is oriented exactly as their
+# evaluation stack renders it, and the fisheye masks (authored in native 960x600
+# sensor pixels) land where they were drawn. The DATASET IMAGES then get the
+# roll, here. Do not move this into the CameraCfg offsets: that breaks both.
+CAMERA_ROT90_CW = {
+    "head_img": 1,
+    "left_wrist_img": 2,
+    "right_wrist_img": 2,
+}
+
+
+def rotate_frames_cw(frames: np.ndarray, quarter_turns: int) -> np.ndarray:
+    """Rotate (T, H, W, 3) frames by ``quarter_turns`` * 90 deg clockwise."""
+    k = quarter_turns % 4
+    if k == 0:
+        return frames
+    # np.rot90 turns counter-clockwise in the (H, W) plane, so negate k.
+    return np.ascontiguousarray(np.rot90(frames, k=-k, axes=(1, 2)))
+
 
 CHUNKS_SIZE = 1000
 
@@ -458,7 +489,7 @@ def subtask_frame_spans(
 # ---------------------------------------------------------------------------
 
 def convert_episode(demo: h5py.Group, env_args: dict, state_idx: np.ndarray,
-                    arm_idx: np.ndarray) -> dict:
+                    arm_idx: np.ndarray, rotate_cameras: bool = True) -> dict:
     stride = int(env_args.get("camera_frame_stride", 5))
 
     joint_pos = demo["obs/robot_joint_pos"][:]                      # (S, 53)
@@ -513,7 +544,10 @@ def convert_episode(demo: h5py.Group, env_args: dict, state_idx: np.ndarray,
         )
 
     videos = {
-        video_key: demo[f"obs/{img_key}"][:T]
+        video_key: rotate_frames_cw(
+            demo[f"obs/{img_key}"][:T],
+            CAMERA_ROT90_CW[img_key] if rotate_cameras else 0,
+        )
         for img_key, video_key in CAMERA_MAP.items()
     }
     return {"state": state, "action": action, "cmd": cmd, "videos": videos}
@@ -548,6 +582,13 @@ def main() -> None:
                              "single fallback subtask when no split is possible); segmented "
                              "subtasks carry fixed skills walk/pick/walk/place/retract. "
                              "Default: first word of the episode's task instruction.")
+    parser.add_argument("--no_camera_rotation", action="store_true",
+                        help="Write the camera frames as rendered instead of applying "
+                             "CAMERA_ROT90_CW (head 90 deg clockwise, wrists 180 deg), "
+                             "the orientation green_challenge asked the dataset images "
+                             "to carry. For lining a dataset up against the replay "
+                             "preview videos only — a dataset converted with this flag "
+                             "does not match the images their stack expects.")
     parser.add_argument("--robot_type", default="gamma")
     parser.add_argument("--only_successful", action="store_true",
                         help="Skip demos whose 'success' attribute is False.")
@@ -574,8 +615,18 @@ def main() -> None:
             raw_env_args = json.loads(raw_f["data"].attrs.get("env_args", "{}"))
             raw_demo_attrs = {name: dict(raw_f[f"data/{name}"].attrs) for name in raw_f["data"]}
 
+    rotate_cameras = not args.no_camera_rotation
+    if rotate_cameras:
+        print("[cameras] clockwise quarter-turns: "
+              + ", ".join(f"{CAMERA_MAP[k]}={v}" for k, v in CAMERA_ROT90_CW.items()))
+    else:
+        print("[cameras] rotation disabled (--no_camera_rotation)")
+
     state_idx = arm_idx = None
-    fps = image_hw = None
+    fps = None
+    # Per-video (height, width) after rotation: a quarter turn transposes a
+    # non-square frame, so the head and the wrists can differ.
+    video_hw: dict[str, tuple[int, int]] = {}
 
     episodes_meta, episodes_stats, subtasks = [], [], []
     # Main prompts and subtask prompts share one index space (tasks.jsonl):
@@ -630,7 +681,7 @@ def main() -> None:
                 main_tasks.add(task)
                 skill = args.skill or task.split()[0]
 
-                ep = convert_episode(demo, env_args, state_idx, arm_idx)
+                ep = convert_episode(demo, env_args, state_idx, arm_idx, rotate_cameras)
                 T = ep["state"].shape[0]
                 if T < 2:
                     print(f"[skip] {path}:{demo_name}: only {T} frames")
@@ -672,12 +723,16 @@ def main() -> None:
                     })
 
                 chunk = ep_index // CHUNKS_SIZE
-                if image_hw is None:
-                    sample_img = next(iter(ep["videos"].values()))
-                    image_hw = sample_img.shape[1:3]
 
                 # --- videos ---
                 for video_key, frames in ep["videos"].items():
+                    hw = (int(frames.shape[1]), int(frames.shape[2]))
+                    if video_hw.setdefault(video_key, hw) != hw:
+                        sys.exit(
+                            f"{path}:{demo_name}: {video_key} is {hw[0]}x{hw[1]}, but "
+                            f"earlier episodes are {video_hw[video_key][0]}x"
+                            f"{video_hw[video_key][1]}; one dataset cannot hold both."
+                        )
                     encode_video(
                         frames,
                         out / "videos" / f"chunk-{chunk:03d}" / video_key
@@ -758,12 +813,12 @@ def main() -> None:
     if ep_index == 0:
         sys.exit("No episodes converted.")
 
-    h, w = int(image_hw[0]), int(image_hw[1])
     fps_out = int(fps) if float(fps).is_integer() else fps
     features = {
-        "observation.images.cam_head": video_feature(h, w, fps_out),
-        "observation.images.cam_left_wrist": video_feature(h, w, fps_out),
-        "observation.images.cam_right_wrist": video_feature(h, w, fps_out),
+        **{
+            video_key: video_feature(hw[0], hw[1], fps_out)
+            for video_key, hw in video_hw.items()
+        },
         "observation.state": {"dtype": "float32", "shape": [51], "names": STATE_NAMES},
         "action": {"dtype": "float32", "shape": [52], "names": ACTION_NAMES},
         "observation.robot_command_35x.position": {

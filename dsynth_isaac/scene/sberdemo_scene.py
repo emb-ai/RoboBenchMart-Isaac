@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
-import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.sensors import CameraCfg
@@ -46,7 +45,8 @@ _STORE_PKG_VER6 = Path(__file__).resolve().parents[2] / "small_store_aij_ver6_bl
 _STORE_PKG_VER7 = Path(__file__).resolve().parents[2] / "small_store_aij_ver7"
 _STORE_PKG_VER8 = Path(__file__).resolve().parents[2] / "small_store_aij_ver8_monotone"
 _STORE_PKG_VER9 = Path(__file__).resolve().parents[2] / "small_store_aij_ver9_monotone"
-STORE_USD = (_STORE_PKG_VER9 / "store.usd").resolve()
+_STORE_PKG_VER10 = Path(__file__).resolve().parents[2] / "small_store_aij_ver10_monotone"
+STORE_USD = (_STORE_PKG_VER10 / "store.usd").resolve()
 
 # Exported store layout (see small_store_aij/store.usd).
 STORE_DSYNTH_SUBPATH = "/World/envs/env_0/dsynth_scene"
@@ -696,10 +696,29 @@ class SberDemoSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    dome_light = AssetBaseCfg(
-        prim_path="/World/Light",
-        spawn=sim_utils.DomeLightCfg(intensity=1000.0, color=(0.35, 0.35, 0.35)),
-    )
+    # No dome light here on purpose. The store package brings its own complete
+    # lighting rig inside ``dsynth_scene``: ``daylight_sky`` (a DomeLight with
+    # the ``overcast_soil_puresky_4k.hdr`` latlong environment, intensity 1678,
+    # yawed ~127 deg), ``daylight_sun`` (DistantLight 400 at 7000 K), 16 ceiling
+    # DiskLights and four clerestory RectLights.
+    #
+    # This field used to spawn ``DomeLightCfg(intensity=1000.0,
+    # color=(0.35, 0.35, 0.35))`` at ``/World/Light`` -- a leftover from
+    # ``darkstore_base_cfg``, which predates the store having a sky of its own.
+    # Two dome lights both light the scene, but only one paints the visible
+    # background, and the top-level ``/World/Light`` won: the clerestory windows
+    # rendered flat grey and the HDRI sky never appeared. Measured A/B from the
+    # same camera with the store referenced exactly as below, sampling the
+    # clerestory band: with that dome the windows are a dead-flat (179, 179,
+    # 179), per-channel std 0.4; without it they are (241, 241, 240) with std
+    # ~3.4 -- actual cloud variation, and the room sits at the brightness the
+    # package was authored for.
+    #
+    # Do NOT "fix" this by also referencing the package's own ``/World/Light``
+    # (it has one: an untextured white DomeLight at intensity 1000). That is the
+    # same trap with a different colour -- it would repaint the background flat
+    # white and hide the HDRI again. The sky is visible precisely because
+    # ``daylight_sky`` is the only DomeLight on the stage.
 
 
 class SberDemoInteractiveScene(InteractiveScene):

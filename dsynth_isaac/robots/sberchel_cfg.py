@@ -32,6 +32,7 @@ from green_challenge.assets.robot_v3_0a.utils.config_manager import ConfigManage
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
+from dsynth_isaac.robots.sberchel_fingertip_friction import with_fingertip_friction
 from dsynth_isaac.robots.sberchel_self_collision import with_mjcf_self_collision_filters
 
 _GC_ROBOT_DIR = (
@@ -70,14 +71,23 @@ _base = _cm.load_config("sberchel_v3_0_alpha_locomanipulation_full")
 # The serialized ``asset_path`` is a stale absolute path from the machine the
 # config was captured on, and ``usd_dir`` is null; point both at this checkout.
 #
-# ``func`` is green_challenge's ``spawn_from_mjcf`` with one post-spawn pass
-# added: the importer drops every ``contype``/``conaffinity`` mask, so PhysX
-# collides link pairs MuJoCo never does. Inside the hand that jams the thumb
-# against the palm at the open-hand pose and makes both thumbs chatter at half
-# the sim rate; see ``sberchel_self_collision``.
-# green_challenge's unwrapped spawner, kept so a check script can spawn the
-# masks-lost plant side by side with ours (scripts/sberchel_check_thumb_yaw.py).
-GREEN_CHALLENGE_SPAWN_FUNC = _base.spawn.func
+# ``func`` is green_challenge's ``spawn_from_mjcf`` with two post-spawn passes.
+# ``with_fingertip_friction`` is theirs, moved onto the spawner (see that
+# module); it is inside GREEN_CHALLENGE_SPAWN_FUNC below because their runs
+# always have it. ``with_mjcf_self_collision_filters`` is ours: the importer
+# drops every ``contype``/``conaffinity`` mask, so PhysX collides link pairs
+# MuJoCo never does. Inside the hand that jams the thumb against the palm at the
+# open-hand pose and makes both thumbs chatter at half the sim rate; see
+# ``sberchel_self_collision``.
+#
+# GREEN_CHALLENGE_SPAWN_FUNC is the first pass only: their spawner plus their
+# fingertip friction, i.e. the plant their evaluation runs, MJCF collision masks
+# still lost. Kept exported so a check script (scripts/sberchel_check_thumb_yaw.py)
+# and --gc_self_collisions can spawn that plant side by side with ours. The
+# friction belongs on this side of the line -- they bind it from
+# ``ManipEnv.__init__`` on every run, masks or no masks, so leaving it out would
+# make --gc_self_collisions mean two changes instead of one.
+GREEN_CHALLENGE_SPAWN_FUNC = with_fingertip_friction(_base.spawn.func)
 
 SBERCHEL_CONFIG = _base.replace(
     spawn=_base.spawn.replace(
@@ -98,6 +108,36 @@ WRIST_OUTPUT_JOINT_EXPR = ".*_wrist_pitch_joint"
 
 _XR_LOCK_STIFFNESS = 10000.0
 _XR_LOCK_DAMPING = 1000.0
+
+# Wrist and finger joints of the fixed-base rig below take their PD and limits
+# from green_challenge's ``motors`` group instead of literals. Those joints are
+# position-controlled on their side too (``force_control`` False), so the cfg
+# values ARE the plant, and a revision like the sim branch's wrist 1.0 -> 2.0
+# and thumb-yaw 2.0 -> 4.0 damping bump has to land here without an edit.
+_MOTORS_TRACKED_EXPRS: tuple[str, ...] = (
+    WRIST_MOTOR_JOINT_EXPR,
+    ".*_wrist_roll_joint",
+    ".*_thumb_proximal_yaw_joint",
+    ".*_thumb_proximal_pitch_joint",
+    ".*_index_proximal_joint",
+    ".*_middle_proximal_joint",
+    ".*_ring_proximal_joint",
+    ".*_pinky_proximal_joint",
+)
+
+
+def _motors_gains(field: str) -> dict[str, float]:
+    """green_challenge ``motors`` values for the wrist/finger joint patterns."""
+    table = getattr(SBERCHEL_CONFIG.actuators["motors"], field)
+    missing = [expr for expr in _MOTORS_TRACKED_EXPRS if expr not in table]
+    if missing:
+        raise KeyError(
+            f"green_challenge motors.{field} no longer has {missing}: the joint "
+            "patterns were renamed, and the fixed-base XR rig would silently drop "
+            "to Isaac Lab's defaults on those joints."
+        )
+    return {expr: float(table[expr]) for expr in _MOTORS_TRACKED_EXPRS}
+
 
 # --- green_challenge-native PD -----------------------------------------------
 #
@@ -234,12 +274,7 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
                 ".*_shoulder_roll_joint": 61.1,
                 ".*_shoulder_yaw_joint": 25.6,
                 ".*_elbow_.*": 25.6,
-                ".*_wrist_.*": 40.0,
-                ".*_thumb_proximal_.*": 40.0,
-                ".*_index_proximal_joint": 10.0,
-                ".*_middle_proximal_joint": 10.0,
-                ".*_ring_proximal_joint": 10.0,
-                ".*_pinky_proximal_joint": 10.0,
+                **_motors_gains("stiffness"),
             },
             damping={
                 ".*_hip_.*": _XR_LOCK_DAMPING,
@@ -251,12 +286,7 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
                 ".*_shoulder_roll_joint": 3.2,
                 ".*_shoulder_yaw_joint": 1.4,
                 ".*_elbow_.*": 1.4,
-                ".*_wrist_.*": 1.0,
-                ".*_thumb_proximal_.*": 2.0,
-                ".*_index_proximal_joint": 1.0,
-                ".*_middle_proximal_joint": 1.0,
-                ".*_ring_proximal_joint": 1.0,
-                ".*_pinky_proximal_joint": 1.0,
+                **_motors_gains("damping"),
             },
             effort_limit={
                 ".*_hip_pitch_joint": 380.0,
@@ -270,12 +300,7 @@ SBERCHEL_UPPERBODY_XR_ROBOT = ArticulationCfg(
                 ".*_shoulder_roll_joint": 90.0,
                 ".*_shoulder_yaw_joint": 36.0,
                 ".*_elbow_.*": 36.0,
-                ".*_wrist_.*": 16.0,
-                ".*_thumb_proximal_.*": 8.5,
-                ".*_index_proximal_joint": 8.5,
-                ".*_middle_proximal_joint": 8.5,
-                ".*_ring_proximal_joint": 8.5,
-                ".*_pinky_proximal_joint": 8.5,
+                **_motors_gains("effort_limit"),
             },
         ),
         **_passive_actuators(),

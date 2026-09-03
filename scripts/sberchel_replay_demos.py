@@ -341,6 +341,7 @@ from dsynth_isaac.tasks.manager_based.sberchel_base_env_cfg import (
 from dsynth_isaac.robots.sberchel_camera_cfg import (
     SBERCHEL_CAMERA_OBS_KEYS,
     apply_sberchel_camera_size,
+    camera_optics_provenance,
     load_sberchel_camera_masks,
     parse_camera_names,
     parse_camera_size,
@@ -1499,6 +1500,11 @@ def main() -> None:
                 "camera_width": out_width,
                 "camera_height": out_height,
                 "camera_pipeline": args_cli.camera_pipeline,
+                # Which optics/masks this export was rendered with. Read live
+                # from the green_challenge checkout, so it is the one part of
+                # the render that can change under a recording without changing
+                # anything else in the file.
+                "sberchel_camera_optics": camera_optics_provenance(selected_cameras),
                 "replay_source": args_cli.replay_source,
                 "replay_state_sync": (
                     args_cli.replay_source == "processed_joint_targets"
